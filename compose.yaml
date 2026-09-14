@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:latest
+    container_name: node-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRESQL_DB_NAME}
+      POSTGRES_USER: ${POSTGRESQL_USER}
+      POSTGRES_PASSWORD: ${POSTGRESQL_PASSWORD}
+    ports:
+      - '5432:5432'
+    volumes:
+      - mySqlData:/var/lib/postgresql
+
+volumes:
+  mySqlData:
