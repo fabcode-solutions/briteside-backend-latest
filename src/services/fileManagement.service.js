@@ -69,47 +69,28 @@ class FileManagementService {
   }
 
   /**
-   * Create new media record or increment reference count
+   * Create new media record or increment reference count.
+   *
+   * Uses a single atomic INSERT ... ON CONFLICT (file_hash) DO UPDATE instead
+   * of a separate find-then-insert — two uploads of byte-identical content
+   * (e.g. picking the same photo for two different image slots in one form)
+   * can otherwise both pass the "does it exist?" check before either commits,
+   * then both try to INSERT and the second one dies on the unique constraint
+   * on file_hash. The same race applied to a hash that only exists as a
+   * soft-deleted row: findByHash correctly treats it as "not found" for reuse
+   * purposes, but a plain INSERT still collides with it (the unique
+   * constraint isn't scoped to `deleted_at IS NULL`). ON CONFLICT sidesteps
+   * both cases by letting Postgres resolve the race, and also revives a
+   * soft-deleted row being reused.
    * @param {Object} fileData - File metadata
    * @returns {Object} - Media record
    */
   static async createOrIncrementReference(fileData) {
     try {
-      const existingFile = await this.findByHash(fileData.fileHash);
-
-      if (existingFile) {
-        // File already exists (content-hash dedup) — increment reference count.
-        // uploadedBy stays as the original uploader; grant the current uploader
-        // access via mediaOwners so a shared S3 object can have multiple owners.
-        const [updatedFile] = await db
-          .update(media)
-          .set({
-            referenceCount: sql`${media.referenceCount} + 1`,
-            lastAccessedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(media.id, existingFile.id))
-          .returning();
-
-        if (fileData.uploadedBy) {
-          await db
-            .insert(mediaOwners)
-            .values({ mediaId: existingFile.id, userId: fileData.uploadedBy })
-            .onConflictDoNothing();
-        }
-
-        logger.info(
-          `File deduplicated: ${fileData.fileHash}, new reference count: ${updatedFile.referenceCount}`
-        );
-        return updatedFile;
-      }
-
-      // Determine media type and extract extension
       const mediaType = this.getMediaType(fileData.mimetype);
       const extension = fileData.extension || path.extname(fileData.originalName || fileData.s3Key);
 
-      // Create new media record
-      const [newFile] = await db
+      const [file] = await db
         .insert(media)
         .values({
           fileHash: fileData.fileHash,
@@ -126,17 +107,30 @@ class FileManagementService {
           uploadedBy: fileData.uploadedBy,
           referenceCount: 1,
         })
+        .onConflictDoUpdate({
+          target: media.fileHash,
+          set: {
+            referenceCount: sql`${media.referenceCount} + 1`,
+            lastAccessedAt: new Date(),
+            updatedAt: new Date(),
+            deletedAt: null,
+          },
+        })
         .returning();
 
+      // uploadedBy stays as the original uploader; grant the current uploader
+      // access via mediaOwners so a shared S3 object can have multiple owners.
       if (fileData.uploadedBy) {
         await db
           .insert(mediaOwners)
-          .values({ mediaId: newFile.id, userId: fileData.uploadedBy })
+          .values({ mediaId: file.id, userId: fileData.uploadedBy })
           .onConflictDoNothing();
       }
 
-      logger.info(`New media tracked: ${fileData.fileHash}, type: ${mediaType}`);
-      return newFile;
+      logger.info(
+        `Media tracked: ${fileData.fileHash}, type: ${mediaType}, reference count: ${file.referenceCount}`
+      );
+      return file;
     } catch (error) {
       logger.error('Error creating/updating media record:', error);
       throw error;

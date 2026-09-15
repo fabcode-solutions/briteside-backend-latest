@@ -2,9 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { authMiddleware, requireAdmin } from '../middlewares/auth.middleware.js';
 import { adminController } from '../controllers/admin.controller.js';
-import { createRequire } from 'module';
 
-const require = createRequire(import.meta.url);
 
 const router = Router();
 

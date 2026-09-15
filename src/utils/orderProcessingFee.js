@@ -36,3 +36,33 @@ export function calculateOrderProcessingFee(subtotal) {
   const subtotalCents = Math.round((parseFloat(subtotal) || 0) * 100);
   return calculateOrderProcessingFeeCents(subtotalCents) / 100;
 }
+
+// Flat, tiered order processing fee for Paid Messages specifically — separate
+// table from the general one above. Applied to the total of the paid message
+// fee + the 5% platform fee (not the message fee alone).
+//
+// Source table (dollars):
+//   Under $10        $0.50
+//   $10.01-$15       $0.75
+//   $15.01-$20.00    $1.00
+//   $20.01-$50       $1.30
+//   $50.01-$100      $2.25
+//   $100.01+         $3.25
+const PAID_MESSAGE_PROCESSING_FEE_TIERS_CENTS = [
+  { maxCents: 1_000, feeCents: 50 },
+  { maxCents: 1_500, feeCents: 75 },
+  { maxCents: 2_000, feeCents: 100 },
+  { maxCents: 5_000, feeCents: 130 },
+  { maxCents: 10_000, feeCents: 225 },
+  { maxCents: Infinity, feeCents: 325 },
+];
+
+/**
+ * @param {number} baseWithPlatformFeeCents - paid message base cost + 5% platform fee, in cents
+ * @returns {number} flat processing fee in cents
+ */
+export function calculatePaidMessageProcessingFeeCents(baseWithPlatformFeeCents) {
+  const amount = Math.max(0, Math.round(baseWithPlatformFeeCents) || 0);
+  const tier = PAID_MESSAGE_PROCESSING_FEE_TIERS_CENTS.find(t => amount <= t.maxCents);
+  return tier.feeCents;
+}

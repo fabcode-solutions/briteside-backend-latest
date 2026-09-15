@@ -34,6 +34,40 @@ const validateUsernameFormat = username => {
   return null;
 };
 
+// Collapses the 5 flat profile-song DB columns into the Apple Music JSON
+// shape the client works with, or null when no song is set.
+const buildProfileSongResponse = row => {
+  if (
+    !row?.profileSongTrackId ||
+    !row?.profileSongTrackName ||
+    !row?.profileSongPreviewUrl ||
+    !row?.profileSongAppleMusicUrl
+  ) {
+    return null;
+  }
+  return {
+    trackId: Number(row.profileSongTrackId),
+    trackName: row.profileSongTrackName,
+    artistName: row.profileSongArtistName ?? '',
+    artworkUrl: row.profileSongArtworkUrl ?? null,
+    previewUrl: row.profileSongPreviewUrl,
+    appleMusicUrl: row.profileSongAppleMusicUrl,
+  };
+};
+
+// Strips the flat profile-song columns out of a raw DB row before it's
+// spread into an API response — callers add the nested `profileSong` object
+// (via buildProfileSongResponse) instead, so the shape isn't duplicated.
+const omitProfileSongColumns = ({
+  profileSongTrackId,
+  profileSongTrackName,
+  profileSongArtistName,
+  profileSongArtworkUrl,
+  profileSongPreviewUrl,
+  profileSongAppleMusicUrl,
+  ...rest
+}) => rest;
+
 // ============ PROFILE MANAGEMENT ============
 
 export const checkProfileUsernameAvailability = catchAsync(async (req, res) => {
@@ -163,7 +197,8 @@ export const getSocialProfile = catchAsync(async (req, res) => {
     success: true,
     data: {
       profile: {
-        ...profile,
+        ...omitProfileSongColumns(profile),
+        profileSong: buildProfileSongResponse(profile),
         coverModerationStatus,
         isFollowing,
         isBlocked,
@@ -221,7 +256,47 @@ export const updateSocialProfile = catchAsync(async (req, res) => {
      defaultLandingTab,
     firstName,
     lastName,
+    profileSong,
   } = req.body;
+
+  // `profileSong` is either a picked-song object (Apple Music JSON shape:
+  // trackId/trackName/artistName/artworkUrl/previewUrl/appleMusicUrl) or null
+  // to clear it — never a partial patch, so every field is set together
+  // (undefined stays untouched, matching how every other field here works).
+  let profileSongFields;
+  if (profileSong === null) {
+    profileSongFields = {
+      profileSongTrackId: null,
+      profileSongTrackName: null,
+      profileSongArtistName: null,
+      profileSongArtworkUrl: null,
+      profileSongPreviewUrl: null,
+      profileSongAppleMusicUrl: null,
+    };
+  } else if (profileSong !== undefined) {
+    if (
+      typeof profileSong !== 'object' ||
+      profileSong.trackId === undefined ||
+      profileSong.trackId === null ||
+      !profileSong.trackName ||
+      !profileSong.artistName ||
+      !profileSong.previewUrl ||
+      !profileSong.appleMusicUrl
+    ) {
+      throw new ApiError(
+        400,
+        'profileSong must include trackId, trackName, artistName, previewUrl and appleMusicUrl'
+      );
+    }
+    profileSongFields = {
+      profileSongTrackId: String(profileSong.trackId),
+      profileSongTrackName: String(profileSong.trackName).slice(0, 300),
+      profileSongArtistName: String(profileSong.artistName).slice(0, 300),
+      profileSongArtworkUrl: profileSong.artworkUrl ? String(profileSong.artworkUrl) : null,
+      profileSongPreviewUrl: String(profileSong.previewUrl),
+      profileSongAppleMusicUrl: String(profileSong.appleMusicUrl),
+    };
+  }
 
   if (buttonMeta !== undefined && !req.user.isBritesidePlus) {
     throw new ApiError(403, 'Cover button is a BriteSide Plus feature. Upgrade to add one.');
@@ -334,6 +409,7 @@ export const updateSocialProfile = catchAsync(async (req, res) => {
     buttonMeta,
     expiresAt,
      defaultLandingTab,
+    ...profileSongFields,
   });
 
   const updatedUser = await userService.getUserById(userId);
@@ -342,7 +418,8 @@ export const updateSocialProfile = catchAsync(async (req, res) => {
     success: true,
     data: {
       profile: {
-        ...updated,
+        ...omitProfileSongColumns(updated),
+        profileSong: buildProfileSongResponse(updated),
         username: updatedUser?.username,
         // Same gap as getSocialProfile — dob is on the users table and was
         // never surfaced here, so the edit form couldn't confirm the save.
@@ -1605,6 +1682,45 @@ export const searchInterests = catchAsync(async (req, res) => {
   const categories = await SocialService.searchInterests(q);
 
   res.json({ success: true, data: { categories } });
+});
+
+// Free, keyless proxy over Apple's public iTunes Search API — used to pick a
+// profile song. Proxied (rather than called client-side) so the app can use
+// the same endpoint the web does, and so we control the response shape.
+export const searchAppleMusicSongs = catchAsync(async (req, res) => {
+  const { q } = req.query;
+
+  if (!q || !q.trim()) {
+    return res.json({ success: true, data: { songs: [] } });
+  }
+
+  const url = `https://itunes.apple.com/search?media=music&entity=song&limit=12&term=${encodeURIComponent(
+    q.trim()
+  )}`;
+
+  let payload;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`iTunes search failed with status ${response.status}`);
+    payload = await response.json();
+  } catch (err) {
+    console.error('Apple Music search failed', err);
+    return res.json({ success: true, data: { songs: [] } });
+  }
+
+  const songs = (payload.results || [])
+    .filter(r => r.previewUrl && r.trackViewUrl)
+    .map(r => ({
+      trackId: r.trackId,
+      trackName: r.trackName,
+      artistName: r.artistName,
+      // Apple's search API returns a 100x100 thumbnail — swap in a larger one.
+      artworkUrl: r.artworkUrl100 ? r.artworkUrl100.replace('100x100', '300x300') : null,
+      previewUrl: r.previewUrl,
+      appleMusicUrl: r.trackViewUrl,
+    }));
+
+  res.json({ success: true, data: { songs } });
 });
 
 export const addUserInterest = catchAsync(async (req, res) => {
