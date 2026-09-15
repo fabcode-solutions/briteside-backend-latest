@@ -33,7 +33,7 @@ import config from '../config/config.js';
 import { StripeConnectService } from './stripeConnect.service.js';
 import { getRedirectUrls } from '../utils/redirect-urls.js';
 import { socialConversations } from '../db/schema/socialChat.js';
-import { calculateOrderProcessingFeeCents } from '../utils/orderProcessingFee.js';
+import { calculatePaidMessageProcessingFeeCents } from '../utils/orderProcessingFee.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 
@@ -238,13 +238,16 @@ export class PriorityMessageService {
     // split as message content — talent earns 95% of attachment price too.
     const baseCents = profile.priorityMessageFee * totalUnits + totalAttachmentCents;
 
-    // Flat, tiered order processing fee — one per checkout, based on the base
-    // cost (message + extension + attachments combined). 100% Briteside revenue.
-    const orderProcessingFeeCents = calculateOrderProcessingFeeCents(baseCents);
-
     // Platform fee (5% of base) — a separate, additional charge to the sender
     // on top of the flat order processing fee. 100% Briteside revenue.
     const platformFeeCents = Math.round(baseCents * 0.05);
+
+    // Flat, tiered order processing fee — one per checkout, based on the total
+    // of the base message cost (message + extension + attachments combined)
+    // plus the 5% platform fee. 100% Briteside revenue.
+    const orderProcessingFeeCents = calculatePaidMessageProcessingFeeCents(
+      baseCents + platformFeeCents
+    );
 
     // Talent's cut is 95% of base — includes their share of attachment price.
     // This is a separate marketplace commission, unrelated to either the order

@@ -85,6 +85,7 @@ import {
   getUserInterests,
   updateUserInterests,
   searchInterests,
+  searchAppleMusicSongs,
   addUserInterest,
   removeUserInterest,
   inviteToEvent,
@@ -268,6 +269,7 @@ router.get('/personalized-feed', getPersonalizedFeed);
 
 router.get('/interests/categories', getInterestCategories);
 router.get('/interests/search', searchInterests);
+router.get('/profile-song/search', searchAppleMusicSongs);
 router.get('/interests', getUserInterests);
 router.put('/interests', updateUserInterests);
 router.post('/interests', addUserInterest);

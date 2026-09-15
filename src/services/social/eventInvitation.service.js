@@ -5,6 +5,7 @@ import {
   events,
   userFollows,
   followerInviteLog,
+  eventBlasts,
 } from '../../db/schema/index.js';
 import { eq, and, desc, count } from 'drizzle-orm';
 import ApiError from '../../utils/api-error.js';
@@ -160,6 +161,16 @@ export class EventInvitationService {
 
     if (followers.length === 0) {
       await db.insert(followerInviteLog).values({ organizerId, eventId });
+      await db.insert(eventBlasts).values({
+        eventId,
+        sentBy: organizerUserId,
+        type: 'followers',
+        message: 'Notified all followers about this event',
+        recipientCount: 0,
+        successCount: 0,
+        failureCount: 0,
+        status: 'completed',
+      });
       return { invited: 0, emailsSent: 0 };
     }
 
@@ -234,6 +245,19 @@ export class EventInvitationService {
 
     // Log this action for rate limiting
     await db.insert(followerInviteLog).values({ organizerId, eventId });
+
+    // Also show up in Blast History alongside SMS/email blasts, so an
+    // organizer sees every outbound communication for the event in one place.
+    await db.insert(eventBlasts).values({
+      eventId,
+      sentBy: organizerUserId,
+      type: 'followers',
+      message: 'Notified all followers about this event',
+      recipientCount: followers.length,
+      successCount: emailsSent,
+      failureCount: Math.max(0, emailRecipients.length - emailsSent),
+      status: 'completed',
+    });
 
     return { invited: created.length, emailsSent };
   }

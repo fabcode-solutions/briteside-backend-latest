@@ -6,6 +6,9 @@ export async function createExtensions() {
   await db.execute(sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`);
   await db.execute(sql`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`);
   await db.execute(sql`CREATE EXTENSION IF NOT EXISTS "postgis";`);
+  // Powers similarity() — used by InterestService.searchInterests for
+  // fuzzy interest-category matching.
+  await db.execute(sql`CREATE EXTENSION IF NOT EXISTS "pg_trgm";`);
 }
 
 // Updated at trigger function
