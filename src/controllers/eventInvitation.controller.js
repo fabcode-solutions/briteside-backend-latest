@@ -23,7 +23,10 @@ export const inviteAllFollowers = catchAsync(async (req, res) => {
 export const getFollowerInviteStats = catchAsync(async (req, res) => {
   const { eventId } = req.params;
 
-  const stats = await EventInvitationService.getFollowerInviteStats(eventId);
+  const stats = await EventInvitationService.getInviteFollowersStats(eventId);
 
-  res.status(200).json({ success: true, stats });
+  // Nested under `data`, matching getBlastStats' shape — the frontend reads
+  // res.data.stats for both, and Communication.tsx's fetchFollowersStats was
+  // silently failing (caught, swallowed) because this used to be flat.
+  res.status(200).json({ success: true, data: { stats } });
 });
