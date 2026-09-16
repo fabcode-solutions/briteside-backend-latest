@@ -1123,8 +1123,12 @@ static async saveSchedule(
       windowsToUse = matchingWindows;
     }
 
-    const dayStart = new Date(`${date}T00:00:00.000Z`);
-    const dayEnd = new Date(`${date}T23:59:59.999Z`);
+    // Use the talent's local calendar day, not UTC — otherwise this window is
+    // shifted by hours for any talent not in UTC, missing real conflicts in
+    // their local evening and falsely blocking valid slots in their morning.
+    const talentTzForDay = windowsToUse[0]?.timezone || 'UTC';
+    const dayStart = dayjs.tz(date, talentTzForDay).startOf('day').utc().toDate();
+    const dayEnd = dayjs.tz(date, talentTzForDay).endOf('day').utc().toDate();
 
     const bookedSessions = await db.query.talentSessions.findMany({
       where: and(
@@ -1157,9 +1161,8 @@ static async saveSchedule(
       return base;
     };
 
-    const talentTz = windowsToUse[0]?.timezone || 'UTC';
     const busyRanges = bookedSessions.map(s => {
-      const localTime = dayjs(s.scheduledAt).tz(talentTz);
+      const localTime = dayjs(s.scheduledAt).tz(talentTzForDay);
       const startMins = localTime.hour() * 60 + localTime.minute();
       return [startMins, startMins + s.durationMins];
     });
@@ -1217,6 +1220,7 @@ export class TalentSessionService {
     giftDetails,
     giftCode,
     platform,
+    bookerTimezone,
   }) {
     if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
 
@@ -1244,8 +1248,25 @@ export class TalentSessionService {
       throw new ApiError(403, 'This talent is not currently accepting video bookings');
     }
 
-    const booker = await db.query.users.findFirst({ where: eq(users.id, bookerId) });
+    let booker = await db.query.users.findFirst({ where: eq(users.id, bookerId) });
     if (!booker) throw new ApiError(404, 'Booker not found');
+
+    // Capture the booker's real IANA timezone (sent by the frontend from
+    // Intl.DateTimeFormat) so confirmation/reminder emails for this booking —
+    // and any future one — show times in their actual local time instead of
+    // being stuck on the users.timezone column's 'UTC' default.
+    if (bookerTimezone && bookerTimezone !== booker.timezone) {
+      try {
+        Intl.DateTimeFormat(undefined, { timeZone: bookerTimezone });
+        [booker] = await db
+          .update(users)
+          .set({ timezone: bookerTimezone })
+          .where(eq(users.id, bookerId))
+          .returning();
+      } catch {
+        // Not a valid IANA timezone name — ignore and keep the existing value.
+      }
+    }
 
     // Get talent timezone from their availability windows
     const availWindows = await TalentAvailabilityService.getForProfile(talentProfileId);
@@ -1614,6 +1635,7 @@ export class TalentSessionService {
     giftDetails,
     giftCode,
     io,
+    bookerTimezone,
   }) {
     // 1. Validate slot is still available
     const slots = await TalentAvailabilityService.getAvailableSlots(
@@ -1640,8 +1662,23 @@ export class TalentSessionService {
       throw new ApiError(403, 'This talent is not currently accepting video bookings');
     }
 
-    const booker = await db.query.users.findFirst({ where: eq(users.id, bookerId) });
+    let booker = await db.query.users.findFirst({ where: eq(users.id, bookerId) });
     if (!booker) throw new ApiError(404, 'Booker not found');
+
+    // Capture the booker's real IANA timezone (see createCheckout) so their
+    // confirmation/reminder emails show local time instead of UTC.
+    if (bookerTimezone && bookerTimezone !== booker.timezone) {
+      try {
+        Intl.DateTimeFormat(undefined, { timeZone: bookerTimezone });
+        [booker] = await db
+          .update(users)
+          .set({ timezone: bookerTimezone })
+          .where(eq(users.id, bookerId))
+          .returning();
+      } catch {
+        // Not a valid IANA timezone name — ignore and keep the existing value.
+      }
+    }
 
     const availWindows = await TalentAvailabilityService.getForProfile(talentProfileId);
     const talentTz = availWindows[0]?.timezone || 'UTC';
@@ -2399,7 +2436,8 @@ export class TalentSessionService {
       }
     }
 
-    const { booker, talentUser, talentName } = await TalentSessionService._getParties(session);
+    const { booker, talentUser, talentName, talentTimezone } =
+      await TalentSessionService._getParties(session);
     const bookerIsCancel = cancelledByUserId === session.bookerId;
 
     if (bookerIsCancel) {
@@ -2417,7 +2455,7 @@ export class TalentSessionService {
             booker,
             session,
             refundNote,
-            talentUser.timezone || 'UTC'
+            talentTimezone
           );
           await mailService.sendMail(talentUser.email, subject, html);
         },
@@ -2818,8 +2856,17 @@ export class TalentSessionService {
 
     let dateCondition;
     if (date) {
-      const dayStart = new Date(`${date}T00:00:00.000Z`);
-      const dayEnd = new Date(`${date}T23:59:59.999Z`);
+      // Use the talent's local calendar day, not UTC, so this filter matches
+      // the same day the talent (and this session's actual scheduling) sees.
+      let dayTz = 'UTC';
+      if (profileId) {
+        const tzWindow = await db.query.talentAvailability.findFirst({
+          where: eq(talentAvailability.talentProfileId, profileId),
+        });
+        dayTz = tzWindow?.timezone || 'UTC';
+      }
+      const dayStart = dayjs.tz(date, dayTz).startOf('day').utc().toDate();
+      const dayEnd = dayjs.tz(date, dayTz).endOf('day').utc().toDate();
       dateCondition = and(
         gte(talentSessions.scheduledAt, dayStart),
         lte(talentSessions.scheduledAt, dayEnd)
@@ -2919,16 +2966,22 @@ export class TalentSessionService {
   }
 
   static async _getParties(session) {
-    const [booker, talentProfile] = await Promise.all([
+    const [booker, talentProfile, talentAvailWindow] = await Promise.all([
       db.query.users.findFirst({ where: eq(users.id, session.bookerId) }),
       db.query.talentProfiles.findFirst({
         where: eq(talentProfiles.id, session.talentProfileId),
         with: { user: true },
       }),
+      db.query.talentAvailability.findFirst({
+        where: eq(talentAvailability.talentProfileId, session.talentProfileId),
+      }),
     ]);
     const talentUser = talentProfile.user;
     const talentName = `${talentUser.firstName} ${talentUser.lastName}`;
-    return { booker, talentUser, talentName };
+    // users.timezone is never actually set anywhere — talentAvailability's is
+    // the one timezone value that's kept up to date for this talent.
+    const talentTimezone = talentAvailWindow?.timezone || 'UTC';
+    return { booker, talentUser, talentName, talentTimezone };
   }
 
   /**
@@ -3477,6 +3530,7 @@ export async function listSessionsForUser(
 
   // ── 1. Role condition ── (unchanged)
   let roleCondition;
+  let profileIdForTz = null;
   if (role === 'booker') {
     roleCondition = eq(talentSessions.bookerId, userId);
   } else if (role === 'talent') {
@@ -3484,11 +3538,13 @@ export async function listSessionsForUser(
       where: eq(talentProfiles.userId, userId),
     });
     if (!profile) return { sessions: [], total: 0, page, limit, totalPages: 0 };
+    profileIdForTz = profile.id;
     roleCondition = eq(talentSessions.talentProfileId, profile.id);
   } else {
     const profile = await db.query.talentProfiles.findFirst({
       where: eq(talentProfiles.userId, userId),
     });
+    profileIdForTz = profile?.id ?? null;
     roleCondition = profile
       ? or(eq(talentSessions.bookerId, userId), eq(talentSessions.talentProfileId, profile.id))
       : eq(talentSessions.bookerId, userId);
@@ -3529,8 +3585,16 @@ export async function listSessionsForUser(
 
   let dateCondition;
   if (date) {
-    const dayStart = new Date(`${date}T00:00:00.000Z`);
-    const dayEnd = new Date(`${date}T23:59:59.999Z`);
+    // Use the talent's local calendar day, not UTC — see listForUser above.
+    let dayTz = 'UTC';
+    if (profileIdForTz) {
+      const tzWindow = await db.query.talentAvailability.findFirst({
+        where: eq(talentAvailability.talentProfileId, profileIdForTz),
+      });
+      dayTz = tzWindow?.timezone || 'UTC';
+    }
+    const dayStart = dayjs.tz(date, dayTz).startOf('day').utc().toDate();
+    const dayEnd = dayjs.tz(date, dayTz).endOf('day').utc().toDate();
     dateCondition = and(
       gte(talentSessions.scheduledAt, dayStart),
       lte(talentSessions.scheduledAt, dayEnd)

@@ -153,6 +153,7 @@ export const createSessionCheckout = catchAsync(async (req, res) => {
     giftDetails,
     giftCode,
     platform,
+    timezone,
   } = req.body;
 
   if (!talentProfileId) throw new ApiError(400, '`talentProfileId` is required');
@@ -173,6 +174,7 @@ export const createSessionCheckout = catchAsync(async (req, res) => {
     giftDetails,
     giftCode,
     platform,
+    bookerTimezone: timezone,
   });
 
   res.status(201).json({ success: true, data: result });
@@ -189,6 +191,7 @@ export const bookSession = catchAsync(async (req, res) => {
     isGift,
     giftDetails,
     giftCode,
+    timezone,
   } = req.body;
 
   if (!talentProfileId) throw new ApiError(400, '`talentProfileId` is required');
@@ -209,6 +212,7 @@ export const bookSession = catchAsync(async (req, res) => {
     giftDetails,
     giftCode,
     io,
+    bookerTimezone: timezone,
   });
 
   res.status(201).json({ success: true, data: { session } });
