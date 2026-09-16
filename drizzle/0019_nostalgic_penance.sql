@@ -1,0 +1,1 @@
+ALTER TABLE "user_notification_settings" ADD COLUMN "birthday_notifications" boolean DEFAULT true;

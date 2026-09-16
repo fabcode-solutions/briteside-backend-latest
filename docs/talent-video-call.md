@@ -17,14 +17,37 @@ Confirmed direction: extend the **existing** `user_reports` system (not a parall
 - `src/db/schema/userReports.js`: add `'talent_session'` to `reportTypeEnum` (migration: `ALTER TYPE report_type ADD VALUE`), add `talentSessionId` uuid column (FK → `talentSessions.id`, `onDelete: 'cascade'`), add `unique('unique_talent_session_report').on(reporterId, talentSessionId)` and `index('idx_reports_talent_session')` — same shape as the existing per-entity unique constraints. Add the `talentSession: one(...)` relation alongside the existing `post`/`group`/`event` relations.
 - `src/validations/report.validation.js` (or wherever report payloads are validated) — accept `type: 'talent_session'` + `talentSessionId`.
 - `src/controllers/report.controller.js` — when `type === 'talent_session'`, verify the reporter is either the `bookerId` or the talent's `userId` on that session (authorization check mirroring how other report types confirm the target exists) before inserting.
-- Admin review: extend the existing admin report detail view (wherever `report.controller.js`'s admin-side read lives, alongside `admin.controller.js`) so a `talent_session`-type report also returns the session's `moderationStatus`, `moderationEventsLog`, and its archived frames (section 2) inline — support shouldn't have to cross-reference `GET /api/admin/moderation/calls` separately when reviewing a specific report.
+- Admin review: extend the existing admin report detail view (wherever `report.controller.js`'s admin-side read lives, alongside `admin.controller.js`) so a `talent_session`-type report also returns the session's `moderationStatus`, `moderationEventsLog`, its archived flagged/rejected frames (section 2), **and** its random report-screenshot set (section 2b) inline — support shouldn't have to cross-reference `GET /api/admin/moderation/calls` separately when reviewing a specific report. The admin panel report detail page renders both frame sets as an image gallery (thumbnail grid → click to open full-size via the presigned URL), labeled separately ("Flagged frames" vs. "Random spot-checks") so reviewers know which images came from an automated flag vs. routine sampling.
 
 ## 2. Durable screenshot archival
 
 - New file `src/db/schema/talentSessionFrames.js` — table `talent_session_frames`: `id` uuid PK, `sessionId` FK → `talentSessions.id` (`onDelete: cascade`), `trackType` varchar, `participantId` uuid, `s3Bucket` varchar, `s3Key` varchar, `moderationAction` varchar, `reviewQueueItemId` varchar NULL, `capturedAt` timestamptz, `createdAt` timestamptz default now(). Indexed on `sessionId`.
 - In `TalentSessionService.applyFrameVerdict()` (`src/services/talentSession.service.js`, ~line 1803), after computing the verdict and before/alongside appending to `moderationEventsLog`: download the frame from the transient Stream `frameUrl` and `PutObjectCommand` it into the **existing private moderation bucket** (same bucket/credentials pattern as `src/services/moderation/mediaModeration.service.js`, key convention e.g. `call-moderation/{sessionId}/{trackType}-{participantId}-{capturedAt}.jpg`), then insert a `talentSessionFrames` row. Keep `moderationEventsLog` as the fast worst-wins/audit trail (it can keep the same event shape, optionally dropping the raw external `frameUrl` in favor of a `frameId` referencing the new table) — this only changes _where the image bytes live_, not the existing status-escalation logic.
-- Bound storage cost the same way the graduated-action logic already does: archive frames for `flagged`/`rejected`/`shadowed`/`shadow_block` verdicts (i.e., anything that already produces a log event today) — not every routine "approved" frame.
+- Bound storage cost the same way the graduated-action logic already does: archive frames for `flagged`/`rejected`/`shadowed`/`shadow_block` verdicts (i.e., anything that already produces a log event today) — not every routine "approved" frame. (Section 2b adds a second, small archival path for routine "approved" frames that are randomly selected as report screenshots.)
+- Add a `reason` varchar column to `talent_session_frames` (`'moderation_flag'` | `'report_sample'`) so the two archival paths (flag-triggered vs. random-sample) share one table/S3 prefix but stay distinguishable in the admin gallery and in storage-cost accounting.
 - Admin viewing: never return a permanent/public URL. Add a small helper (mirroring the presigned-URL pattern already used in `shopDeliverable.service.js`/`imports/presign.service.js`) that generates a short-TTL (~15 min) `GetObjectCommand` presigned URL **on demand** when an admin opens a session's moderation detail or a `talent_session` report — either inline in `listModeratedSessions`/the report detail response, or via a small `GET /api/admin/moderation/frames/:frameId/signed-url` endpoint if generating all URLs eagerly is wasteful.
+
+## 2b. Randomized report screenshots (spot-check sampling, independent of moderation verdict)
+
+Beyond the flag-triggered archival above, product also wants a small, randomly-timed set of screenshots per call — routine evidence for support to spot-check, regardless of whether any frame was ever flagged.
+
+**Constraint confirmed against the GetStream Node SDK (`@stream-io/node-sdk`):** frame recording only exposes `startFrameRecording` / `stopFrameRecording` (`VideoApi.ts`) — no interval parameter, no on-demand "capture one frame right now" call. The capture cadence is a fixed setting on the call type's frame-recording config (currently "every few seconds," per the existing comment in `applyFrameVerdict()`), the same for every call. Stream cannot be told to capture at specific, arbitrary, per-call-randomized timestamps.
+
+**Chosen approach: sample from the existing continuous capture, don't try to control its timing.** Stream keeps capturing a frame every few seconds exactly as it does today (unchanged — this also keeps the existing continuous moderation coverage intact, per the "additive" decision above). We independently pick which of those already-arriving frames count as "report screenshots":
+
+- On session start (`confirm()`/call-join, wherever `applyFrameVerdict()` first has the session's `durationMins`), compute a list of random target offsets (seconds from call start) once per session:
+  - Target count scales with call length: `count = clamp(round(durationMins / 10 * 10), 8, 12 scaled proportionally for longer calls)` — i.e. ~8–12 per 10 minutes, growing roughly linearly for longer bookings (e.g. a 30 min call → ~24–36 targets) rather than capping at 12 regardless of duration.
+  - Offsets are drawn randomly (uniform jitter within evenly-spaced buckets, e.g. one random offset per `durationSeconds / count` bucket) so they land at varied, unpredictable points like ~0:30, ~1:20, ~1:50, ~3:00, etc., rather than a fixed cadence — avoids someone timing "safe" behavior around a predictable capture schedule.
+  - Store the target-offset list somewhere cheap to read on every incoming frame — e.g. a `reportScreenshotTargets` jsonb column on `talentSessions` (offsets + a `consumed: boolean` per entry), set once at session start.
+- In `applyFrameVerdict()` (or the webhook handler feeding it), for every incoming frame — not just flagged ones — compute `secondsSinceCallStart` and check whether it falls within a small tolerance window (e.g. ±5s, matching the "every few seconds" capture rate) of the next unconsumed target offset. If so: mark that target `consumed`, archive the frame to S3 with `reason: 'report_sample'` (same helper/bucket/key convention as section 2, regardless of the frame's own moderation verdict — even "approved" frames get archived when they land on a target), and insert the `talentSessionFrames` row.
+- This reuses the moderation pipeline's own webhook cadence as the "clock" — no separate scheduler/cron needed, and it self-corrects if frames arrive late/irregularly (first frame inside the tolerance window wins; if none lands in a window before the next target, that slot is simply skipped rather than over- or under-shooting the count).
+- Screenshots captured this way still flow through the existing moderation check first (per the "also moderated" decision above) — a `report_sample` frame that also happens to be flagged/rejected is archived once, tagged with both signals (`reason` could be an array, or keep `reason: 'moderation_flag'` when both apply since that's the stronger signal for the admin gallery's default filter).
+
+## Verification (section 2b)
+
+- Book test sessions at a few different `durationMins` (e.g. 10, 30, 60) and confirm the target-offset count scales roughly linearly (not capped at 12) and offsets are non-uniformly spaced (not a fixed interval).
+- Run a full test call and confirm the resulting `talent_session_frames` rows with `reason: 'report_sample'` land close to (within the tolerance window of) their target offsets, and that the count matches expectations for that call's duration.
+- Confirm a session with zero moderation flags still produces its full random report-screenshot set (i.e. sampling doesn't depend on anything being flagged).
 
 ## 3. Recording consent & disclosure
 
@@ -37,19 +60,26 @@ Confirmed direction: extend the **existing** `user_reports` system (not a parall
 **Phase 1 — Schema**
 
 - `userReports.js`: enum value + `talentSessionId` column + unique/index + relation
-- `talentSessions.js`: three new consent/disclosure columns
-- New `talentSessionFrames.js` table
+- `talentSessions.js`: three new consent/disclosure columns + `reportScreenshotTargets` jsonb (random offset list, computed once at session start)
+- New `talentSessionFrames.js` table, including the `reason` (`'moderation_flag'` | `'report_sample'`) column
 - Migrations via `drizzle-kit generate`; update `src/db/schema/index.js`/`relations.js`
 
 **Phase 2 — Durable frame archival**
 
-- Wire S3 archival into `applyFrameVerdict()`, insert `talentSessionFrames` rows
+- Wire S3 archival into `applyFrameVerdict()`, insert `talentSessionFrames` rows for flagged/rejected/shadowed verdicts (`reason: 'moderation_flag'`)
 - Add the presigned-URL helper for admin viewing
+
+**Phase 2b — Randomized report screenshots**
+
+- Compute `reportScreenshotTargets` (random offsets, count scaling with `durationMins`) once per session at call start
+- Extend `applyFrameVerdict()`/the webhook handler to check every incoming frame (not just flagged ones) against the next unconsumed target offset and archive on match (`reason: 'report_sample'`)
+- Surface the `report_sample` frame set alongside `moderation_flag` frames wherever section 2's frames are returned (admin moderation list, report detail)
 
 **Phase 3 — Reporting**
 
 - Extend report validation/controller/route for `talent_session` type + authorization check
-- Extend admin report detail to surface linked session + frames
+- Extend admin report detail to surface linked session + both frame sets (flagged + random sample)
+- Admin panel report page: render the two frame sets as a labeled image gallery (thumbnail grid, click-through to full size via presigned URL)
 
 **Phase 4 — Consent gate**
 
@@ -59,11 +89,15 @@ Confirmed direction: extend the **existing** `user_reports` system (not a parall
 
 ## Verification
 
-- Submit a `talent_session` report as the booker and as the talent on a test session; confirm it lands in `user_reports` with the FK populated, and that the admin report detail view shows the session's moderation history + frame list.
-- Trigger a test frame verdict (flagged/rejected) and confirm an object lands in S3 and a `talent_session_frames` row is created; confirm a presigned URL for it is retrievable by an admin call and expires after ~15 minutes.
+- Submit a `talent_session` report as the booker and as the talent on a test session; confirm it lands in `user_reports` with the FK populated, and that the admin report detail view shows the session's moderation history + both frame sets.
+- Trigger a test frame verdict (flagged/rejected) and confirm an object lands in S3 and a `talent_session_frames` row is created with `reason: 'moderation_flag'`; confirm a presigned URL for it is retrievable by an admin call and expires after ~15 minutes.
+- Run a full test call with zero flags and confirm the random `report_sample` set is still archived per section 2b's verification steps, and that the admin panel report page's image gallery renders it.
 - Attempt to fetch a call-join token without calling `acknowledge-recording` first → rejected; call it, then retry → succeeds. Verify booker and talent are gated independently.
 
 ## Open items to revisit during implementation
 
 - Exact location of the Stream call-join-token issuance code path to add the consent gate (`stream.controller.js` vs. a method inside `talentSession.service.js` — confirm during implementation).
 - Whether existing sessions created before this change (no consent timestamps) need a backfill/grandfathering rule, or simply prompt on next join.
+- Exact scaling formula for report-screenshot count vs. `durationMins` (this doc proposes ~8–12 per 10 minutes, scaling roughly linearly beyond that) — confirm the precise curve/cap with product before implementation.
+- Confirm the ±5s tolerance window (matched to Stream's "every few seconds" capture rate) is wide enough that target offsets reliably get consumed without needing to inspect real capture-rate data first.
+- Confirm whether "approved" frames archived only because they hit a `report_sample` target should count against the same storage-cost budget as flagged frames, or be tracked/rotated (e.g. shorter retention) separately.

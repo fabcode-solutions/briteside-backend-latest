@@ -1,0 +1,3 @@
+ALTER TABLE "user_notification_settings" ADD COLUMN "birthday_notifications" boolean DEFAULT true;--> statement-breakpoint
+ALTER TABLE "talent_profiles" ADD COLUMN "talent_search" "tsvector" GENERATED ALWAYS AS (setweight(to_tsvector('simple', coalesce(category, '')), 'A') || setweight(to_tsvector('english', coalesce(title, '')), 'B') || setweight(to_tsvector('english', coalesce(bio, '')), 'C')) STORED;--> statement-breakpoint
+CREATE INDEX "idx_talent_profiles_search_fts" ON "talent_profiles" USING gin ("talent_search");

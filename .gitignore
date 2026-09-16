@@ -48,7 +48,7 @@ web_modules/
 
 # TypeScript cache
 *.tsbuildinfo
-drizzle/
+
 # Optional npm cache directory
 .npm
 
