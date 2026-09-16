@@ -1,6 +1,8 @@
 import httpStatus from 'http-status';
 import { userReports } from '../db/schema/userReports.js';
 import { discussions, groupMembers, groups } from '../db/schema/index.js';
+import { talentSessions } from '../db/schema/talentSessions.js';
+import { talentProfiles } from '../db/schema/talentProfiles.js';
 import ApiError from '../utils/api-error.js';
 import { sql, eq, and, desc, asc } from 'drizzle-orm';
 import { catchAsync } from '../utils/catch-async.js';
@@ -22,6 +24,7 @@ const createReport = catchAsync(async (req, res) => {
     conversationId,
     commentId,
     discussionReplyId,
+    talentSessionId,
     reason,
     description,
     metadata,
@@ -46,6 +49,11 @@ const createReport = catchAsync(async (req, res) => {
       httpStatus.BAD_REQUEST,
       'Conversation ID is required for social chat reports'
     );
+  if (type === 'talent_session' && !talentSessionId)
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      'Talent session ID is required for talent session reports'
+    );
   // `comment` covers both a post comment (commentId + postId) and a discussion
   // reply (discussionReplyId + discussionId) — same report shape, distinguished
   // by which pair is set. No new DB column: the specific id is stored in
@@ -62,6 +70,28 @@ const createReport = catchAsync(async (req, res) => {
       throw new ApiError(
         httpStatus.BAD_REQUEST,
         'Discussion ID is required when reporting a discussion reply'
+      );
+  }
+
+  // ── Authorize talent session reports (only the booker or the talent may report) ──
+  if (type === 'talent_session' && talentSessionId) {
+    const session = await db.query.talentSessions.findFirst({
+      where: eq(talentSessions.id, talentSessionId),
+      columns: { id: true, bookerId: true, talentProfileId: true },
+    });
+    if (!session) throw new ApiError(httpStatus.NOT_FOUND, 'Talent session not found');
+
+    const talentProfile = await db.query.talentProfiles.findFirst({
+      where: eq(talentProfiles.id, session.talentProfileId),
+      columns: { userId: true },
+    });
+
+    const isParty =
+      session.bookerId === reporterId || talentProfile?.userId === reporterId;
+    if (!isParty)
+      throw new ApiError(
+        httpStatus.FORBIDDEN,
+        'Only the booker or talent on this session can report it'
       );
   }
 
@@ -116,6 +146,14 @@ const createReport = catchAsync(async (req, res) => {
             eq(userReports.conversationId, conversationId)
           ),
         });
+
+      if (!existingReport && talentSessionId)
+        existingReport = await db.query.userReports.findFirst({
+          where: and(
+            eq(userReports.reporterId, reporterId),
+            eq(userReports.talentSessionId, talentSessionId)
+          ),
+        });
     }
 
     if (existingReport)
@@ -140,6 +178,7 @@ const createReport = catchAsync(async (req, res) => {
       groupId,
       eventId,
       conversationId,
+      talentSessionId,
       reason,
       description,
       metadata: mergedMetadata,
