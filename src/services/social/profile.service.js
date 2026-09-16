@@ -282,27 +282,10 @@ static async getOrCreateSocialProfile(userId) {
     // user actually changed — so only re-moderate a field when its value
     // differs from what's already stored, otherwise saved-and-already-approved
     // text (e.g. bio) would block an edit to an unrelated field (e.g. location).
-    const needsCurrentProfile = TEXT_FIELDS.some(f => f in rest) || 'location' in rest;
+    const needsCurrentProfile = TEXT_FIELDS.some(f => f in rest);
     const currentProfile = needsCurrentProfile
       ? await this.getOrCreateSocialProfile(userId)
       : null;
-
-    // The profile's location should only ever read as "City, State, Country"
-    // — the frontend already builds it that way from the map pick, but
-    // enforce it here too (whatever city/state/country end up saved,
-    // combining this request with whatever's already stored) so a stale
-    // client, a direct API call, or old full-address data left over from
-    // before this rule existed all get normalized instead of silently
-    // saving/keeping a full street address.
-    if ('location' in rest && rest.location) {
-      const city = 'city' in rest ? rest.city : currentProfile?.city;
-      const state = 'state' in rest ? rest.state : currentProfile?.state;
-      const country = 'country' in rest ? rest.country : currentProfile?.country;
-      const parts = [city, state, country].filter(Boolean);
-      if (parts.length > 0) {
-        updatePayload.location = parts.join(', ');
-      }
-    }
 
     const textFieldEntries = TEXT_FIELDS.map(field => [field, rest[field]]).filter(
       ([field, value]) =>

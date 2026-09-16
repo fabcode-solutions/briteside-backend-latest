@@ -7,6 +7,22 @@ import { db } from '../db/index.js';
 import { users } from '../db/schema/users.js';
 import { eq } from 'drizzle-orm';
 
+// Enforced web-only (see X-Client-Platform check below) — the Expo mobile app
+// has no DOB-collection UI yet, so enforcing this backend-wide would lock out
+// existing mobile/OAuth users with no way to self-resolve. Paths a
+// not-yet-verified web user must still be able to hit: the session check
+// (so the frontend can even learn it needs to show the gate), logout (escape
+// hatch), and the profile update endpoint that lets them submit their DOB.
+const AGE_VERIFICATION_EXEMPT_PATHS = ['/api/auth/session', '/api/auth/logout', '/api/users/profile'];
+
+function isAgeVerificationExempt(req, user) {
+  const isWebClient = req.headers['x-client-platform'] === 'web';
+  if (!isWebClient || user.isVerifiedAdult) return true;
+  if (user.roles?.includes('admin')) return true;
+  const path = req.originalUrl.split('?')[0];
+  return AGE_VERIFICATION_EXEMPT_PATHS.some(p => path.startsWith(p));
+}
+
 export function authMiddleware(req, res, next) {
   const authenticateOption = { session: false };
 
@@ -31,6 +47,15 @@ export function authMiddleware(req, res, next) {
       user.isSuspended = false;
       user.suspendedUntil = null;
       user.suspensionReason = null;
+    }
+
+    // Web-only age-verification gate (see AGE_VERIFICATION_EXEMPT_PATHS above).
+    if (!isAgeVerificationExempt(req, user)) {
+      return next(
+        new ApiError(httpStatus.FORBIDDEN, 'Age verification required', true, '', {
+          code: 'AGE_VERIFICATION_REQUIRED',
+        })
+      );
     }
 
     // Surface impersonation on req, then strip it off req.user so it's never
