@@ -16,6 +16,7 @@ import { events } from './events.js';
 import { users } from './users.js';
 import { socialConversations } from './socialChat.js';
 import { discussions } from './groups.js';
+import { talentSessions } from './talentSessions.js';
 export const reportTypeEnum = pgEnum('report_type', [
   'user',
   'post',
@@ -24,6 +25,7 @@ export const reportTypeEnum = pgEnum('report_type', [
   'comment',
   'social_chat',
   'discussion',
+  'talent_session',
 ]);
 
 export const reportStatusEnum = pgEnum('report_status', [
@@ -60,6 +62,9 @@ export const userReports = pgTable(
     discussionId: uuid('discussion_id').references(() => discussions.id, {
       onDelete: 'cascade',
     }),
+    talentSessionId: uuid('talent_session_id').references(() => talentSessions.id, {
+      onDelete: 'cascade',
+    }),
     reason: varchar('reason', { length: 255 }).notNull(),
     description: text('description'),
     metadata: jsonb('metadata').default(sql`'{}'::jsonb`),
@@ -81,12 +86,14 @@ export const userReports = pgTable(
     index('idx_reports_reporter').on(table.reporterId),
     index('idx_reports_target_user').on(table.targetUserId),
     index('idx_reports_discussion').on(table.discussionId),
+    index('idx_reports_talent_session').on(table.talentSessionId),
     // Unique constraints to prevent spamming reports on same content
     unique('unique_post_report').on(table.reporterId, table.postId),
     unique('unique_group_report').on(table.reporterId, table.groupId),
     unique('unique_event_report').on(table.reporterId, table.eventId),
     unique('unique_social_chat_report').on(table.reporterId, table.conversationId),
     unique('unique_discussion_report').on(table.reporterId, table.discussionId),
+    unique('unique_talent_session_report').on(table.reporterId, table.talentSessionId),
   ]
 );
 
@@ -125,5 +132,9 @@ export const userReportsRelations = relations(userReports, ({ one }) => ({
   discussion: one(discussions, {
     fields: [userReports.discussionId],
     references: [discussions.id],
+  }),
+  talentSession: one(talentSessions, {
+    fields: [userReports.talentSessionId],
+    references: [talentSessions.id],
   }),
 }));

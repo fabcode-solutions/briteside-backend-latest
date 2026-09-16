@@ -23,6 +23,7 @@ import {
   declineSession,
   cancelSession,
   recordJoin,
+  acknowledgeRecording,
   listMySessions,
   getVideoRequests,
   getMyBookedEvents,
@@ -148,6 +149,11 @@ router.put(
 );
 router.put('/sessions/:sessionId/cancel', authMiddleware, cancelSession);
 router.post('/sessions/:sessionId/join', authMiddleware, recordJoin);
+router.post(
+  '/sessions/:sessionId/acknowledge-recording',
+  authMiddleware,
+  acknowledgeRecording
+);
 router.post('/sessions/:sessionId/end', authMiddleware, endSession);
 router.post('/sessions/:sessionId/reschedule', authMiddleware, rescheduleSession);
 router.post('/sessions/:sessionId/review', authMiddleware, submitReview);

@@ -11,6 +11,7 @@ const createReport = {
     groupId: Joi.string().uuid(),
     eventId: Joi.string().uuid(),
     conversationId: Joi.string().uuid(),
+    talentSessionId: Joi.string().uuid(),
     reason: Joi.string().required(),
     description: Joi.string().allow(null, ''),
     metadata: Joi.object(),
