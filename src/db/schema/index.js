@@ -117,6 +117,7 @@ export * from './userReports.js';
 export * from './talentAvailability.js';
 export * from './talentProfiles.js';
 export * from './talentSessions.js';
+export * from './talentSessionFrames.js';
 export * from './talentDateOverrides.js';
 export * from './talentFavorites.js';
 

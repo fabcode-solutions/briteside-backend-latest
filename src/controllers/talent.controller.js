@@ -236,6 +236,16 @@ export const recordJoin = catchAsync(async (req, res) => {
   res.json({ success: true, data: { session } });
 });
 
+export const acknowledgeRecording = catchAsync(async (req, res) => {
+  const { disclosureVersion } = req.body;
+  const session = await TalentSessionService.acknowledgeRecording(
+    req.params.sessionId,
+    req.user.id,
+    { disclosureVersion }
+  );
+  res.json({ success: true, data: { session } });
+});
+
 export const endSession = catchAsync(async (req, res) => {
   const session = await TalentSessionService.endSession(req.params.sessionId);
   res.json({ success: true, data: { session } });

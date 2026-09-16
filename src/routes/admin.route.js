@@ -150,6 +150,7 @@ router.patch(
   adminController.reviewMediaModerationItem
 );
 router.get('/moderation/calls', adminController.listCallModerationQueue);
+router.get('/moderation/frames/:frameId/signed-url', adminController.getFrameSignedUrl);
 
 // Logo library management routes (shared "popular covers" picker)
 router.get('/logos', adminController.listLogos);

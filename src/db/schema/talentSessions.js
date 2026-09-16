@@ -93,6 +93,20 @@ export const talentSessions = pgTable(
     // Append-only audit log: [{ trackType, action, label, participantId, capturedAt }]
     moderationEventsLog: jsonb('moderation_events_log').default(sql`'[]'::jsonb`),
 
+    // Random report-screenshot sampling — offsets (seconds since the call's
+    // first captured frame) picked once per session, independent of any
+    // moderation verdict. Computed lazily in applyFrameVerdict() on the first
+    // frame (call start isn't known before then).
+    // [{ offsetSeconds, consumed: boolean }]
+    reportScreenshotTargets: jsonb('report_screenshot_targets').default(sql`'[]'::jsonb`),
+
+    // Recording consent/disclosure — stamped independently by each party via
+    // POST /api/talent-sessions/:id/acknowledge-recording before they can
+    // obtain a call-join token.
+    bookerRecordingConsentAt: timestamp('booker_recording_consent_at', { withTimezone: true }),
+    talentRecordingConsentAt: timestamp('talent_recording_consent_at', { withTimezone: true }),
+    recordingDisclosureVersion: varchar('recording_disclosure_version', { length: 32 }),
+
     // Stripe payment references
     stripeSessionId: varchar('stripe_session_id', { length: 255 }),
     stripePaymentIntentId: varchar('stripe_payment_intent_id', { length: 255 }),

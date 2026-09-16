@@ -38,6 +38,8 @@ import {
 import ApiError from '../utils/api-error.js';
 import httpStatus from 'http-status';
 import { talentProfiles } from '../db/schema/talentProfiles.js';
+import { talentSessions } from '../db/schema/talentSessions.js';
+import { talentSessionFrames } from '../db/schema/talentSessionFrames.js';
 import { sendSuspensionEmail, sendUnsuspensionEmail } from './mail.service.js';
 
 const PLATFORM_FEE_KEY = 'platform_fee_percentage';
@@ -1289,6 +1291,25 @@ const getReportById = async reportId => {
       group: { columns: { id: true, name: true, slug: true } },
       event: { columns: { id: true, title: true, slug: true } },
       discussion: { columns: { id: true, title: true, groupId: true } },
+      talentSession: {
+        columns: {
+          id: true,
+          moderationStatus: true,
+          moderationEventsLog: true,
+          scheduledAt: true,
+          durationMins: true,
+          status: true,
+        },
+        with: {
+          booker: { columns: { id: true, username: true, firstName: true, lastName: true } },
+          talentProfile: {
+            columns: { id: true },
+            with: {
+              user: { columns: { id: true, username: true, firstName: true, lastName: true } },
+            },
+          },
+        },
+      },
     },
   });
 
@@ -1313,6 +1334,29 @@ const getReportById = async reportId => {
     });
   }
 
+  // Support shouldn't have to cross-reference GET /api/admin/moderation/calls
+  // separately — surface the session's archived frames right here, split by
+  // reason so the report page's gallery can label them distinctly. No signed
+  // URLs generated eagerly (same on-demand-per-frame endpoint as the
+  // moderation queue covers this page too).
+  let flaggedFrames = [];
+  let reportScreenshots = [];
+  if (report.type === 'talent_session' && report.talentSessionId) {
+    const frames = await db
+      .select({
+        id: talentSessionFrames.id,
+        reason: talentSessionFrames.reason,
+        moderationAction: talentSessionFrames.moderationAction,
+        trackType: talentSessionFrames.trackType,
+        capturedAt: talentSessionFrames.capturedAt,
+      })
+      .from(talentSessionFrames)
+      .where(eq(talentSessionFrames.sessionId, report.talentSessionId));
+
+    flaggedFrames = frames.filter(f => f.reason === 'moderation_flag');
+    reportScreenshots = frames.filter(f => f.reason === 'report_sample');
+  }
+
   // `comment` covers both a post comment and a discussion reply — the specific
   // id lives in metadata (no dedicated FK column, see report.controller.js
   // createReport). `report.post`/`report.discussion` above already give the
@@ -1333,7 +1377,7 @@ const getReportById = async reportId => {
     });
   }
 
-  return { ...report, reportedContent, comment, discussionReply };
+  return { ...report, reportedContent, comment, discussionReply, flaggedFrames, reportScreenshots };
 };
 
 const resolveReportedEntity = async (reportId, action, reason, adminId) => {

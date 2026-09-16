@@ -24,6 +24,7 @@ import { shopCustomServiceOffers } from '../db/schema/shop.js';
 import { TextModerationService, TEXT_ENTITY } from './moderation/textModeration.service.js';
 import { StreamCallService, streamClient } from './stream.service.js';
 import { MEDIA_CONFIG_KEY } from './moderation/mediaModeration.service.js';
+import { CallFrameArchiveService } from './moderation/callFrameArchive.service.js';
 import { StripeConnectService, getReserveRate } from './stripeConnect.service.js';
 import { createNotification } from './notification.service.js';
 import * as mailService from './mail.service.js';
@@ -36,6 +37,7 @@ import {
 } from '../templates/index.js';
 import { talentDateOverrides } from '../db/schema/talentDateOverrides.js';
 import { talentSessions } from '../db/schema/talentSessions.js';
+import { talentSessionFrames } from '../db/schema/talentSessionFrames.js';
 import { UserSpendService } from './userSpend.service.js';
 import { talentFavorites } from '../db/schema/talentFavorites.js';
 import { talentReviews } from '../db/schema/talentReviews.js';
@@ -89,6 +91,43 @@ const FRAME_ACTION_TO_STATUS = {
 };
 // Worst-wins ordering for the session's aggregate moderationStatus.
 const STATUS_SEVERITY = { approved: 0, flagged: 1, rejected: 2, shadowed: 3 };
+
+// Bump when the recording-disclosure copy changes materially, so past
+// acknowledgements stay auditable against the version they actually saw.
+const CURRENT_RECORDING_DISCLOSURE_VERSION = 'v1';
+
+// ── Random report-screenshot sampling ───────────────────────────────────────
+// Stream captures a frame every ~5s (capture_interval_in_seconds, set on the
+// 'default' call type by scripts/setup-frame-recording.js and inherited by
+// 'talent-session'). There's no API to tell Stream to capture at arbitrary
+// instants, so instead we pick which of the already-arriving frames count as
+// report screenshots: ~8-12 per 10 minutes, scaling roughly linearly for
+// longer calls, at randomized (not fixed-cadence) offsets.
+const REPORT_SCREENSHOT_TOLERANCE_SECONDS = 7; // >= the 5s capture interval
+
+function computeReportScreenshotTargets(durationMins) {
+  const durationSeconds = durationMins * 60;
+  const count = Math.max(8, Math.round((durationMins / 10) * 10));
+  const bucketSeconds = durationSeconds / count;
+  return Array.from({ length: count }, (_, i) => ({
+    offsetSeconds: Math.round(i * bucketSeconds + Math.random() * bucketSeconds),
+    consumed: false,
+  }));
+}
+
+// Finds the first unconsumed target within tolerance of secondsSinceStart.
+// Returns { targets, matched } — `targets` is the array to persist back
+// (unchanged if nothing matched), `matched` is true if this frame should be
+// archived as a report_sample.
+function matchReportScreenshotTarget(targets, secondsSinceStart) {
+  const index = targets.findIndex(
+    t => !t.consumed && Math.abs(t.offsetSeconds - secondsSinceStart) <= REPORT_SCREENSHOT_TOLERANCE_SECONDS
+  );
+  if (index === -1) return { targets, matched: false };
+  const nextTargets = targets.slice();
+  nextTargets[index] = { ...nextTargets[index], consumed: true };
+  return { targets: nextTargets, matched: true };
+}
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -1802,6 +1841,32 @@ export class TalentSessionService {
       })
     );
 
+    // Archived S3 frames (both flagged and random-sample) — no signed URLs
+    // here, those are minted on demand per-frame when an admin actually opens
+    // a session, via GET /api/admin/moderation/frames/:frameId/signed-url.
+    const framesBySession = {};
+    if (rows.length) {
+      const frameRows = await db
+        .select({
+          id: talentSessionFrames.id,
+          sessionId: talentSessionFrames.sessionId,
+          reason: talentSessionFrames.reason,
+          moderationAction: talentSessionFrames.moderationAction,
+          trackType: talentSessionFrames.trackType,
+          capturedAt: talentSessionFrames.capturedAt,
+        })
+        .from(talentSessionFrames)
+        .where(
+          inArray(
+            talentSessionFrames.sessionId,
+            rows.map(r => r.id)
+          )
+        );
+      for (const frame of frameRows) {
+        (framesBySession[frame.sessionId] ??= []).push(frame);
+      }
+    }
+
     const items = rows.map(row => ({
       id: row.id,
       talentProfileId: row.talentProfileId,
@@ -1816,6 +1881,7 @@ export class TalentSessionService {
         ...e,
         labels: e.reviewQueueItemId ? (labelsByReviewId[e.reviewQueueItemId] ?? []) : [],
       })),
+      frames: framesBySession[row.id] ?? [],
     }));
 
     return { items, total: totalRows[0]?.total ?? 0, page, limit };
@@ -1904,6 +1970,7 @@ export class TalentSessionService {
         .for('update');
       if (!session || !session.streamCallCid) return null;
 
+      const priorLog = session.moderationEventsLog || [];
       const event = {
         trackType,
         action,
@@ -1912,21 +1979,60 @@ export class TalentSessionService {
         reviewQueueItemId,
         capturedAt: new Date().toISOString(),
       };
-      const nextLog = [...(session.moderationEventsLog || []), event];
+      const nextLog = [...priorLog, event];
       const nextStatus =
         (STATUS_SEVERITY[status] ?? 0) >= (STATUS_SEVERITY[session.moderationStatus] ?? 0)
           ? status
           : session.moderationStatus;
 
+      // Lazily compute the random report-screenshot targets on this call's
+      // first-ever frame (call start isn't known before frames start
+      // arriving), then check whether THIS frame lands on one of them.
+      let targets = session.reportScreenshotTargets || [];
+      if (targets.length === 0 && priorLog.length === 0) {
+        targets = computeReportScreenshotTargets(session.durationMins);
+      }
+      const firstFrameCapturedAt = priorLog[0]?.capturedAt ?? event.capturedAt;
+      const secondsSinceStart =
+        (Date.parse(event.capturedAt) - Date.parse(firstFrameCapturedAt)) / 1000;
+      const { targets: nextTargets, matched: isReportSample } = matchReportScreenshotTarget(
+        targets,
+        secondsSinceStart
+      );
+
       await tx
         .update(talentSessions)
-        .set({ moderationStatus: nextStatus, moderationEventsLog: nextLog, updatedAt: new Date() })
+        .set({
+          moderationStatus: nextStatus,
+          moderationEventsLog: nextLog,
+          reportScreenshotTargets: nextTargets,
+          updatedAt: new Date(),
+        })
         .where(eq(talentSessions.id, sessionId));
 
-      return { session, nextLog };
+      return { session, nextLog, event, isReportSample };
     });
     if (!result) return;
-    const { session, nextLog } = result;
+    const { session, nextLog, event, isReportSample } = result;
+
+    // Durable S3 archival — flagged/rejected/shadowed frames always archive
+    // (reason: moderation_flag, the stronger signal); an approved frame only
+    // archives if it landed on a random report-screenshot target. Never lets
+    // an S3/network failure break the live moderation escalation below.
+    if (frameUrl && (status !== 'approved' || isReportSample)) {
+      CallFrameArchiveService.archiveFrame({
+        sessionId,
+        trackType,
+        participantId,
+        frameUrl,
+        capturedAt: event.capturedAt,
+        moderationAction: action,
+        reason: status !== 'approved' ? 'moderation_flag' : 'report_sample',
+        reviewQueueItemId,
+      }).catch(err => {
+        console.error('[TalentSession] Frame archival failed:', err.message);
+      });
+    }
 
     const isScreenShare = trackType === 'TRACK_TYPE_SCREEN_SHARE';
     const trackLabel = isScreenShare ? 'screen share' : 'camera';
@@ -2347,6 +2453,39 @@ export class TalentSessionService {
 
   // ── Record join events (called from Stream webhook / call room) ───────────
 
+  /**
+   * Stamps the caller's recording-consent timestamp + the disclosure version
+   * they were shown. Booker and talent acknowledge independently, since they
+   * join at different times. Gates recordJoin() below — the actual call-join
+   * token (GET /api/stream/generateToken) is a generic, session-unaware
+   * endpoint shared by every call type, so it can't itself be gated per
+   * session; recordJoin is the one per-session, per-party checkpoint that
+   * exists in this codebase, so that's where consent is enforced.
+   */
+  static async acknowledgeRecording(sessionId, userId, { disclosureVersion } = {}) {
+    const session = await db.query.talentSessions.findFirst({
+      where: eq(talentSessions.id, sessionId),
+      with: { talentProfile: true },
+    });
+    if (!session) throw new ApiError(404, 'Session not found');
+
+    const isBooker = userId === session.bookerId;
+    const isTalent = userId === session.talentProfile.userId;
+    if (!isBooker && !isTalent) throw new ApiError(403, 'Not a participant in this session');
+
+    const patch = { recordingDisclosureVersion: disclosureVersion || CURRENT_RECORDING_DISCLOSURE_VERSION };
+    if (isBooker) patch.bookerRecordingConsentAt = new Date();
+    if (isTalent) patch.talentRecordingConsentAt = new Date();
+
+    const [updated] = await db
+      .update(talentSessions)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(talentSessions.id, sessionId))
+      .returning();
+
+    return updated;
+  }
+
   static async recordJoin(sessionId, userId) {
     const session = await db.query.talentSessions.findFirst({
       where: eq(talentSessions.id, sessionId),
@@ -2358,6 +2497,15 @@ export class TalentSessionService {
     const isBooker = userId === session.bookerId;
     const isTalent = userId === session.talentProfile.userId;
     if (!isBooker && !isTalent) throw new ApiError(403, 'Not a participant in this session');
+
+    // Recording consent gate — each party must acknowledge the disclosure
+    // (POST .../acknowledge-recording) before they can join, independently.
+    if (isBooker && !session.bookerRecordingConsentAt) {
+      throw new ApiError(428, 'Acknowledge the recording disclosure before joining this session');
+    }
+    if (isTalent && !session.talentRecordingConsentAt) {
+      throw new ApiError(428, 'Acknowledge the recording disclosure before joining this session');
+    }
 
     // Enforce join window
     if (now < new Date(session.joinAllowedAt)) {

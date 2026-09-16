@@ -15,6 +15,7 @@ import { GroupCourseService } from '../services/groupCourse.service.js';
 import { GroupSubscriptionService } from '../services/groupSubscription.service.js';
 import { MediaModerationService } from '../services/moderation/mediaModeration.service.js';
 import { TalentSessionService } from '../services/talentSession.service.js';
+import { CallFrameArchiveService } from '../services/moderation/callFrameArchive.service.js';
 import { PopularCoverService } from '../services/social/popularCover.service.js';
 
 /**
@@ -986,6 +987,16 @@ const listCallModerationQueue = catchAsync(async (req, res) => {
 });
 
 /**
+ * Short-lived (~15 min) signed URL for one archived call-moderation frame.
+ * @route GET /api/admin/moderation/frames/:frameId/signed-url
+ */
+const getFrameSignedUrl = catchAsync(async (req, res) => {
+  const { frameId } = req.params;
+  const data = await CallFrameArchiveService.getFrameSignedUrl(frameId);
+  res.status(httpStatus.OK).json({ success: true, data });
+});
+
+/**
  * Admin manually approves/rejects/flags/shadow-bans a moderated media entity.
  * @route PATCH /api/admin/moderation/media/:id/action
  */
@@ -1027,6 +1038,7 @@ export const adminController = {
   listMediaModerationQueue,
   reviewMediaModerationItem,
   listCallModerationQueue,
+  getFrameSignedUrl,
   getReportStatistics,
   listLogos,
   createLogo,
