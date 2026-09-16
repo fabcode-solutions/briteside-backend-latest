@@ -1,7 +1,7 @@
 {
-  "name": "gokyro-api",
+  "name": "BriteSide API",
   "version": "1.0.0",
-  "description": "GoKyro Event Management API",
+  "description": "BriteSide Event Management API",
   "main": "src/app.js",
   "type": "module",
   "scripts": {

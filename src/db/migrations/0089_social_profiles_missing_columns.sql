@@ -1,0 +1,9 @@
+ALTER TABLE "social_profiles" ADD COLUMN "city" varchar(100);
+ALTER TABLE "social_profiles" ADD COLUMN "state" varchar(100);
+ALTER TABLE "social_profiles" ADD COLUMN "country" varchar(100);
+ALTER TABLE "social_profiles" ADD COLUMN "profile_song_track_id" varchar(50);
+ALTER TABLE "social_profiles" ADD COLUMN "profile_song_track_name" varchar(300);
+ALTER TABLE "social_profiles" ADD COLUMN "profile_song_artist_name" varchar(300);
+ALTER TABLE "social_profiles" ADD COLUMN "profile_song_artwork_url" text;
+ALTER TABLE "social_profiles" ADD COLUMN "profile_song_preview_url" text;
+ALTER TABLE "social_profiles" ADD COLUMN "profile_song_apple_music_url" text;
