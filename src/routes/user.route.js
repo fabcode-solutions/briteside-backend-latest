@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-import { userController } from '../controllers/index.js';
+import { userController, userDeviceController } from '../controllers/index.js';
 import { authMiddleware } from '../middlewares/auth.middleware.js';
 
 /**
@@ -40,5 +40,12 @@ userRoutes
   .route('/information')
   .get(authMiddleware, userController.getUserInformation)
   .put(authMiddleware, userController.upsertUserInformation);
+
+// Registered push-notification devices — call on login/app-open (register)
+// and on logout (deactivate).
+userRoutes
+  .route('/devices')
+  .post(authMiddleware, userDeviceController.registerDevice)
+  .delete(authMiddleware, userDeviceController.deactivateDevice);
 
 export { userRoutes };

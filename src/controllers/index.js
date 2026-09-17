@@ -1,5 +1,6 @@
 export * as authController from './auth.controller.js';
 export * as userController from './user.controller.js';
+export * as userDeviceController from './userDevice.controller.js';
 export * as eventController from './event.controller.js';
 export * as ticketController from './ticket.controller.js';
 export * as venueController from './venue.controller.js';

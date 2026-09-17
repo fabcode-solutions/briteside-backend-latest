@@ -132,6 +132,7 @@ static async getOrCreateSocialProfile(userId) {
           and(
             eq(posts.userId, userId),
             eq(posts.isStatusPost, false),
+            eq(posts.isCoverPost, false),
             eq(posts.isArchived, false),
             isNull(posts.deletedAt),
             or(isNull(posts.expiresAt), gt(posts.expiresAt, new Date()))

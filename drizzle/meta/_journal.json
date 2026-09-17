@@ -771,6 +771,20 @@
       "when": 1786701871308,
       "tag": "0117_giant_spitfire",
       "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1789556700401,
+      "tag": "0118_yielding_supreme_intelligence",
+      "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1789632952956,
+      "tag": "0119_left_nicolaos",
+      "breakpoints": true
     }
   ]
 }
