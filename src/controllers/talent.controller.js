@@ -745,7 +745,9 @@ export const adminDismissReviewReport = catchAsync(async (req, res) => {
 
 /**
  * POST /talent/sessions/:sessionId/reschedule
- * Booker reschedules a pending or confirmed session to a new date/time.
+ * Booker or talent reschedules a pending or confirmed session to a new date/time.
+ * Blocked once both parties have joined the call; if only one has joined,
+ * only the party that hasn't joined yet may reschedule.
  *
  * Body: { date: 'YYYY-MM-DD', time: 'HH:MM' }
  *
