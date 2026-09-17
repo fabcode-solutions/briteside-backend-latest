@@ -2377,6 +2377,10 @@ export class TalentSessionService {
     if (['completed', 'cancelled', 'declined'].includes(session.status)) {
       throw new ApiError(400, `Cannot cancel a session with status: ${session.status}`);
     }
+    // Once anyone has joined the call, the booking can no longer be cancelled.
+    if (session.bookerJoinedAt || session.talentJoinedAt) {
+      throw new ApiError(400, 'Cannot cancel — a participant has already joined the call');
+    }
 
     const now = new Date();
     const hoursUntil = (new Date(session.scheduledAt) - now) / 3_600_000;
@@ -2996,11 +3000,11 @@ export class TalentSessionService {
    *  - rescheduledFromId on the new session points back to the original.
    *
    * @param {string} sessionId
-   * @param {string} bookerUserId
+   * @param {string} requestingUserId  The booker or talent user initiating the reschedule
    * @param {object} newTime  { date: 'YYYY-MM-DD', time: 'HH:MM' }
    * @returns {{ oldSession, newSession }}
    */
-  static async reschedule(sessionId, bookerUserId, { date, time, reason , io }) {
+  static async reschedule(sessionId, requestingUserId, { date, time, reason , io }) {
     // ── 1. Load original session ────────────────────────────────────────────
     const session = await db.query.talentSessions.findFirst({
       where: eq(talentSessions.id, sessionId),
@@ -3008,10 +3012,27 @@ export class TalentSessionService {
     });
     if (!session) throw new ApiError(404, 'Session not found');
 
-    // ── 2. Only booker can reschedule ───────────────────────────────────────
-    if (session.bookerId !== bookerUserId) {
-      throw new ApiError(403, 'Only the booker can reschedule this session');
+    // ── 2. Only a participant (booker or talent) can reschedule ────────────
+    const isBooker = session.bookerId === requestingUserId;
+    const isTalent = session.talentProfile.userId === requestingUserId;
+    if (!isBooker && !isTalent) {
+      throw new ApiError(403, 'Only a participant of this session can reschedule it');
     }
+
+    // ── 2b. Cannot reschedule once both parties have joined the call ───────
+    if (session.bookerJoinedAt && session.talentJoinedAt) {
+      throw new ApiError(400, 'Cannot reschedule — both participants have already joined the call');
+    }
+    // A participant who has already joined the call cannot reschedule it —
+    // only the party still waiting to join may do so.
+    if (isBooker && session.bookerJoinedAt) {
+      throw new ApiError(400, 'You have already joined this call and cannot reschedule it');
+    }
+    if (isTalent && session.talentJoinedAt) {
+      throw new ApiError(400, 'You have already joined this call and cannot reschedule it');
+    }
+
+    const bookerUserId = session.bookerId;
 
     // ── 3. Must be pending or confirmed ────────────────────────────────────
     if (!['pending', 'confirmed'].includes(session.status)) {
