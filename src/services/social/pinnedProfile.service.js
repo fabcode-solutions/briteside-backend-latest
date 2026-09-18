@@ -1,6 +1,7 @@
 import { db } from '../../db/index.js';
 import { pinnedProfiles, users, socialProfiles } from '../../db/schema/index.js';
-import { eq, and, or, sql, count, desc } from 'drizzle-orm';
+import { eq, and, or, sql, count, desc, notInArray } from 'drizzle-orm';
+import { BlockService } from './block.service.js';
 
 /**
  * Pinned profiles — a user bookmarking another user's profile for quick access.
@@ -31,6 +32,13 @@ export class PinnedProfileService {
   static async getPinnedProfiles(userId, page = 1, limit = 20, search = '') {
     const offset = (page - 1) * limit;
 
+    // A block (either direction) doesn't unpin the profile — it just hides
+    // it here, same as it hides from search/followers — so a later unblock
+    // brings it straight back without the user having to re-pin.
+    const blockedUserIds = await BlockService.getAllBlockRelationshipUserIds(userId);
+    const blockCondition =
+      blockedUserIds.length > 0 ? notInArray(pinnedProfiles.pinnedUserId, blockedUserIds) : undefined;
+
     // Filters on the joined `users` row, so this can't go through
     // db.query.pinnedProfiles (the relational API can't scope a where
     // condition to a related table) — use the core query builder instead.
@@ -42,7 +50,7 @@ export class PinnedProfileService {
         )
       : undefined;
 
-    const whereCondition = and(eq(pinnedProfiles.userId, userId), nameCondition);
+    const whereCondition = and(eq(pinnedProfiles.userId, userId), blockCondition, nameCondition);
 
     const [rows, [{ value: total }]] = await Promise.all([
       db
@@ -62,9 +70,13 @@ export class PinnedProfileService {
         .orderBy(desc(pinnedProfiles.createdAt))
         .limit(limit)
         .offset(offset),
-      // Total is always the unfiltered pin count — it feeds the menu badge,
-      // which shouldn't jump around while the user is typing a search.
-      db.select({ value: count() }).from(pinnedProfiles).where(eq(pinnedProfiles.userId, userId)),
+      // Total is the unfiltered-by-search (but still block-filtered) pin
+      // count — it feeds the menu badge, which shouldn't jump around while
+      // the user is typing a search, but also shouldn't count a blocked pin.
+      db
+        .select({ value: count() })
+        .from(pinnedProfiles)
+        .where(and(eq(pinnedProfiles.userId, userId), blockCondition)),
     ]);
 
     return {

@@ -211,7 +211,7 @@ export class ShopCustomOfferService {
       message: `You've received a custom service offer: "${offer.title}".`,
       type: 'shop_custom_offer',
       relatedId: offer.id,
-      redirectTo: '/bookings',
+      redirectTo: '/bookings?tab=requests',
       metadata: { offerId: offer.id, sellerId },
     }).catch(err => logger.error(`[ShopCustomOffer] buyer notify failed: ${err.message}`));
 
@@ -444,7 +444,7 @@ export class ShopCustomOfferService {
       message: `Your offer "${offer.title}" was declined.`,
       type: 'shop_custom_offer',
       relatedId: offer.id,
-      redirectTo: '/talent-dashboard',
+      redirectTo: `/bookings?offerId=${offer.id}`,
       metadata: { offerId: offer.id },
     }).catch(err => logger.error(`[ShopCustomOffer] decline notify failed: ${err.message}`));
     this._emitOfferUpdate(io, updated);
@@ -514,19 +514,8 @@ export class ShopCustomOfferService {
         {
           price_data: {
             currency: 'usd',
-            unit_amount: fees.platformFeeCents,
-            product_data: { name: 'Platform Fee (5%)' },
-          },
-          quantity: 1,
-        },
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: fees.orderProcessingFeeCents,
-            product_data: {
-              name: 'Order Processing Fee',
-              description: 'Non-refundable order processing fee',
-            },
+            unit_amount: fees.platformAndServiceFeeCents,
+            product_data: { name: 'Platform & Service Fee' },
           },
           quantity: 1,
         },
@@ -541,9 +530,11 @@ export class ShopCustomOfferService {
         customer_creation: 'always',
       }),
       metadata,
+      // No transfer_data/application_fee_amount here on purpose — the
+      // seller's cut is no longer transferred at charge time. It accumulates
+      // in reserveAmountCents and is moved to the seller's Connect account by
+      // a scheduled job 48h after the work is delivered.
       payment_intent_data: {
-        application_fee_amount: fees.applicationFeeCents,
-        transfer_data: { destination: connectAccount.stripeAccountId },
         metadata,
         // NEW — tells Stripe to keep this payment method attached to the
         // Customer for a later off-session charge (the completion charge).
@@ -603,6 +594,8 @@ export class ShopCustomOfferService {
         stripeCustomerId, // NEW
         dueDate: computedDueDate, // NEW — the real due date, set here for the first time
         resolvedAt: paidAt,
+        // Held (not transferred) until 48h after delivery — see createAcceptCheckout.
+        reserveAmountCents: offer.sellerReceiveCents ?? 0,
         updatedAt: paidAt,
       })
       .where(
@@ -637,7 +630,7 @@ export class ShopCustomOfferService {
       message: `${updated.title} was accepted and paid.`,
       type: 'shop_custom_offer',
       relatedId: updated.id,
-      redirectTo: '/talent-dashboard',
+      redirectTo: `/bookings?offerId=${updated.id}`,
       metadata: { offerId: updated.id },
     }).catch(err => logger.error(`[ShopCustomOffer] accept notify failed: ${err.message}`));
   }
@@ -754,7 +747,7 @@ export class ShopCustomOfferService {
         : `"${offer.title}" was cancelled.`,
       type: 'shop_custom_offer',
       relatedId: offer.id,
-      redirectTo: '/bookings',
+      redirectTo: `/bookings?offerId=${offer.id}`,
       metadata: { offerId: offer.id, refundedCents: offer.chargedCents ?? 0 },
     }).catch(err => logger.error(`[ShopCustomOffer] cancel notify failed: ${err.message}`));
     this._emitOfferUpdate(io, updated);
@@ -847,6 +840,9 @@ export class ShopCustomOfferService {
     };
 
     try {
+      // No transfer_data/application_fee_amount here on purpose — see
+      // createAcceptCheckout. This charge's seller cut accumulates into
+      // reserveAmountCents instead of transferring immediately.
       const paymentIntent = await stripe.paymentIntents.create({
         amount: fees.chargedCents,
         currency: 'usd',
@@ -854,8 +850,6 @@ export class ShopCustomOfferService {
         payment_method: paymentMethodId,
         off_session: true,
         confirm: true,
-        application_fee_amount: fees.applicationFeeCents,
-        transfer_data: { destination: connectAccount.stripeAccountId },
         metadata,
       });
 
@@ -866,6 +860,7 @@ export class ShopCustomOfferService {
           basePriceCoveredCents: (offer.basePriceCoveredCents || 0) + remainingCents,
           sellerReceiveCents: (offer.sellerReceiveCents || 0) + fees.sellerReceiveCents,
           platformShareCents: (offer.platformShareCents || 0) + fees.platformShareCents,
+          reserveAmountCents: (offer.reserveAmountCents || 0) + fees.sellerReceiveCents,
           stripePaymentIntentId: paymentIntent.id,
         },
         actorUserId
@@ -891,19 +886,8 @@ export class ShopCustomOfferService {
             {
               price_data: {
                 currency: 'usd',
-                unit_amount: fees.platformFeeCents,
-                product_data: { name: 'Platform Fee (5%)' },
-              },
-              quantity: 1,
-            },
-            {
-              price_data: {
-                currency: 'usd',
-                unit_amount: fees.orderProcessingFeeCents,
-                product_data: {
-                  name: 'Order Processing Fee',
-                  description: 'Non-refundable order processing fee',
-                },
+                unit_amount: fees.platformAndServiceFeeCents,
+                product_data: { name: 'Platform & Service Fee' },
               },
               quantity: 1,
             },
@@ -911,9 +895,9 @@ export class ShopCustomOfferService {
           success_url: `${process.env.FRONTEND_URL}/bookings`,
           cancel_url: `${process.env.FRONTEND_URL}/bookings`,
           metadata: { ...metadata, type: 'shop_custom_offer_completion_retry' },
+          // No transfer_data/application_fee_amount here on purpose — see
+          // createAcceptCheckout.
           payment_intent_data: {
-            application_fee_amount: fees.applicationFeeCents,
-            transfer_data: { destination: connectAccount.stripeAccountId },
             metadata: { ...metadata, type: 'shop_custom_offer_completion_retry' },
           },
         });
@@ -924,7 +908,7 @@ export class ShopCustomOfferService {
           message: `Confirm the remaining $${(fees.chargedCents / 100).toFixed(2)} to complete "${offer.title}".`,
           type: 'shop_custom_offer',
           relatedId: offer.id,
-          redirectTo: '/bookings',
+          redirectTo: `/bookings?offerId=${offer.id}`,
           metadata: { offerId: offer.id, checkoutUrl: session.url },
         }).catch(e => logger.error(`[ShopCustomOffer] SCA notify failed: ${e.message}`));
 
@@ -970,7 +954,7 @@ export class ShopCustomOfferService {
         message: `"${offer.title}" has been marked complete.`,
         type: 'shop_custom_offer',
         relatedId: offer.id,
-        redirectTo: '/bookings',
+        redirectTo: `/bookings?offerId=${offer.id}`,
         metadata: { offerId: offer.id },
       }).catch(err => logger.error(`[ShopCustomOffer] completion notify failed: ${err.message}`));
 
@@ -980,11 +964,29 @@ export class ShopCustomOfferService {
         message: `Your project "${offer.title}" is done. Share your experience!`,
         type: 'event_update',
         relatedId: offer.id,
-        redirectTo: '/bookings',
+        redirectTo: `/bookings?offerId=${offer.id}`,
         metadata: { offerId: offer.id },
       }).catch(err =>
         logger.error(`[ShopCustomOffer] review-prompt notify failed: ${err.message}`)
       );
+
+      // The seller only hears about this from the two paths above (their own
+      // completeOffer() call, or the auto-approve cron's own dedicated
+      // notification) unless the BUYER is the one who accepted the delivery —
+      // that path had no seller-facing notification at all.
+      if (actorUserId === offer.buyerId) {
+        await createNotification({
+          userId: offer.sellerId,
+          title: 'Service marked complete',
+          message: `The customer accepted your delivery for "${offer.title}" — payment has been released.`,
+          type: 'shop_custom_offer',
+          relatedId: offer.id,
+          redirectTo: `/bookings?offerId=${offer.id}`,
+          metadata: { offerId: offer.id },
+        }).catch(err =>
+          logger.error(`[ShopCustomOffer] seller completion notify failed: ${err.message}`)
+        );
+      }
 
       return this._stripAttachments(updated);
     } catch (error) {
@@ -1139,19 +1141,8 @@ export class ShopCustomOfferService {
         {
           price_data: {
             currency: 'usd',
-            unit_amount: fees.platformFeeCents,
-            product_data: { name: 'Platform Fee (5%)' },
-          },
-          quantity: 1,
-        },
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: fees.orderProcessingFeeCents,
-            product_data: {
-              name: 'Order Processing Fee',
-              description: 'Non-refundable order processing fee',
-            },
+            unit_amount: fees.platformAndServiceFeeCents,
+            product_data: { name: 'Platform & Service Fee' },
           },
           quantity: 1,
         },
@@ -1161,9 +1152,9 @@ export class ShopCustomOfferService {
       customer_email: buyer?.email,
       ...(offer.stripeCustomerId && { customer: offer.stripeCustomerId }),
       metadata,
+      // No transfer_data/application_fee_amount here on purpose — see
+      // createAcceptCheckout.
       payment_intent_data: {
-        application_fee_amount: fees.applicationFeeCents,
-        transfer_data: { destination: connectAccount.stripeAccountId },
         metadata,
       },
     });
@@ -1203,6 +1194,8 @@ export class ShopCustomOfferService {
         sellerReceiveCents: (offer.sellerReceiveCents || 0) + fees.sellerReceiveCents,
         basePriceCoveredCents: (offer.basePriceCoveredCents || 0) + remainingCents,
         platformShareCents: (offer.platformShareCents || 0) + fees.platformShareCents,
+        // Held (not transferred) until 48h after delivery — see createAcceptCheckout.
+        reserveAmountCents: (offer.reserveAmountCents || 0) + fees.sellerReceiveCents,
         stripePaymentIntentId: paymentIntentId,
         updatedAt: paidAt,
       })
@@ -1236,7 +1229,7 @@ export class ShopCustomOfferService {
       message: `The remaining balance for "${updated.title}" has been paid — you can now mark it completed.`,
       type: 'shop_custom_offer',
       relatedId: updated.id,
-      redirectTo: '/talent-dashboard',
+      redirectTo: `/bookings?offerId=${updated.id}`,
       metadata: { offerId: updated.id },
     }).catch(err => logger.error(`[ShopCustomOffer] remainder notify failed: ${err.message}`));
   }
@@ -1323,7 +1316,7 @@ export class ShopCustomOfferService {
       } for your review.`,
       type: 'shop_custom_offer',
       relatedId: offer.id,
-      redirectTo: '/bookings',
+      redirectTo: `/bookings?offerId=${offer.id}`,
       metadata: { offerId: offer.id, deliverableCount: inserted.length, round: nextRound },
     }).catch(err => logger.error(`[ShopCustomOffer] submit-work notify failed: ${err.message}`));
     this._emitOfferUpdate(io, offer);
@@ -1453,7 +1446,7 @@ export class ShopCustomOfferService {
       message: `A revision was requested on "${offer.title}".`,
       type: 'shop_custom_offer',
       relatedId: offer.id,
-      redirectTo: '/talent-dashboard',
+      redirectTo: `/bookings?offerId=${offer.id}`,
       metadata: { offerId: offer.id, revisionRequestId: request.id },
     }).catch(err =>
       logger.error(`[ShopCustomOffer] revision-request notify failed: ${err.message}`)
@@ -1534,7 +1527,7 @@ export class ShopCustomOfferService {
       message: `A new due date was proposed for "${offer.title}".`,
       type: 'shop_custom_offer',
       relatedId: offer.id,
-      redirectTo: '/bookings',
+      redirectTo: `/bookings?offerId=${offer.id}`,
       metadata: { offerId: offer.id, requestId: request.id },
     }).catch(err => logger.error(`[ShopCustomOffer] date-extension notify failed: ${err.message}`));
     this._emitOfferUpdate(io, offer);
@@ -1599,7 +1592,7 @@ export class ShopCustomOfferService {
           : `Your requested due date change for "${offer.title}" was declined.`,
       type: 'shop_custom_offer',
       relatedId: offer.id,
-      redirectTo: '/bookings',
+      redirectTo: `/bookings?offerId=${offerId}`,
       metadata: { offerId, requestId },
     }).catch(err =>
       logger.error(`[ShopCustomOffer] date-extension response notify failed: ${err.message}`)
@@ -1679,9 +1672,10 @@ export class ShopCustomOfferService {
       cancel_url: `${process.env.FRONTEND_URL}/bookings`,
       customer_email: buyer?.email,
       metadata,
+      // No transfer_data/application_fee_amount here on purpose — see
+      // createAcceptCheckout. The tip amount accumulates into the offer's
+      // reserveAmountCents instead of transferring immediately.
       payment_intent_data: {
-        application_fee_amount: fees.applicationFeeCents,
-        transfer_data: { destination: connectAccount.stripeAccountId },
         metadata,
       },
     });
@@ -1716,6 +1710,22 @@ export class ShopCustomOfferService {
       .returning();
     if (!updated) return;
 
+    // No platform commission on tips — the seller's cut is the full tip
+    // amount. Held (not transferred) until 48h after delivery, same as the
+    // rest of the offer's payments — see createAcceptCheckout. A tip often
+    // arrives after the offer's earlier reserve already released, which is
+    // exactly why release zeroes reserveAmountCents instead of just
+    // stamping reserveReleasedAt: this accumulation is always safe to add
+    // to, and a late tip on an already-released offer is simply picked up
+    // fresh on the next cron pass.
+    await db
+      .update(shopCustomServiceOffers)
+      .set({
+        reserveAmountCents: sql`${shopCustomServiceOffers.reserveAmountCents} + ${updated.amountCents}`,
+        updatedAt: paidAt,
+      })
+      .where(eq(shopCustomServiceOffers.id, updated.offerId));
+
     await UserSpendService.recordSpend({
       userId: updated.buyerId,
       spendType: 'shop',
@@ -1739,7 +1749,7 @@ export class ShopCustomOfferService {
       message: `You received a $${(updated.amountCents / 100).toFixed(2)} tip.`,
       type: 'shop_custom_offer',
       relatedId: updated.offerId,
-      redirectTo: '/talent-dashboard',
+      redirectTo: `/bookings?offerId=${updated.offerId}`,
       metadata: { offerId: updated.offerId, tipId: updated.id },
     }).catch(err => logger.error(`[ShopCustomOffer] tip notify failed: ${err.message}`));
   }
@@ -1773,7 +1783,7 @@ export class ShopCustomOfferService {
       message: `An issue was reported on "${offer.title}".`,
       type: 'shop_custom_offer',
       relatedId: offer.id,
-      redirectTo: '/bookings',
+      redirectTo: `/bookings?offerId=${offerId}`,
       metadata: { offerId, disputeId: dispute.id },
     }).catch(err => logger.error(`[ShopCustomOffer] dispute notify failed: ${err.message}`));
 
@@ -1861,7 +1871,7 @@ export class ShopCustomOfferService {
           message: `You didn't respond to the delivery for "${offer.title}" within 3 days, so it was automatically approved and payment released.`,
           type: 'shop_custom_offer',
           relatedId: offer.id,
-          redirectTo: '/bookings',
+          redirectTo: `/bookings?offerId=${offer.id}`,
           metadata: { offerId: offer.id, auto: true },
         }).catch(err =>
           logger.error(`[ShopCustomOffer] auto-approve buyer notify failed: ${err.message}`)
@@ -1873,7 +1883,7 @@ export class ShopCustomOfferService {
           message: `"${offer.title}" was automatically approved after 3 days and payment has been released.`,
           type: 'shop_custom_offer',
           relatedId: offer.id,
-          redirectTo: '/talent-dashboard',
+          redirectTo: `/bookings?offerId=${offer.id}`,
           metadata: { offerId: offer.id, auto: true },
         }).catch(err =>
           logger.error(`[ShopCustomOffer] auto-approve seller notify failed: ${err.message}`)

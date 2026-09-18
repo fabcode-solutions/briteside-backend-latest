@@ -22,6 +22,7 @@ import {
   getTotalSpent,
   markAttachmentViewed,
     getItemStatuses,
+    getPendingStatus,
 } from '../controllers/priorityMessage.controller.js';
 
 const router = express.Router();
@@ -34,6 +35,10 @@ router.use(authMiddleware);
 
 // Customer sends a priority message — no Plus required (paying per message)
 router.post('/', createCheckout);
+// Proactive check before the sender even fills out the form — lets the
+// talent-profile "Send Message" dialog warn about an outstanding pending
+// message immediately, instead of only failing at checkout submission.
+router.get('/pending/:talentProfileId', getPendingStatus);
 // Customer polls their own payment status
 router.get('/:paymentId/status', getPaymentStatus);
 // Talent reads received messages — requires priority_messaging feature

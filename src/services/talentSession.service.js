@@ -52,7 +52,7 @@ import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 import { emitSocialChat } from '../socket/emitter.js';
 import { organizerSocialLinks } from '../db/schema/index.js';
-import { calculateOrderProcessingFeeCents } from '../utils/orderProcessingFee.js';
+import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
@@ -1311,32 +1311,20 @@ export class TalentSessionService {
     const talentName = `${profile.user.firstName} ${profile.user.lastName}`;
 
     // Fee structure:
-    //   talentDeductionCents    = base × 0.05 — talent's marketplace commission (talent keeps 95%)
-    //   orderProcessingFeeCents = flat, tiered by base (utils/orderProcessingFee.js) — 100% Briteside revenue
-    //   platformFeeCents        = base × 0.05 — separate, additional charge, 100% Briteside revenue
-    //   chargedCents            = base + orderProcessingFee + platformFee. Stripe's own processing
-    //                             cost is Briteside-absorbed, not grossed up onto the booker.
-    //   application_fee         = orderProcessingFee + platformFee + talent's commission
+    //   talentDeductionCents        = base × 0.05 — talent's marketplace commission (talent keeps 95%)
+    //   platformAndServiceFeeCents  = base × 7.5% — merged "Platform & Service Fee", 100% Briteside revenue
+    //   chargedCents                = base + platformAndServiceFee. Stripe's own processing
+    //                                 cost is Briteside-absorbed, not grossed up onto the booker.
+    //   application_fee             = platformAndServiceFee + talent's commission
     const basePriceCents = slot.priceCents;
     const talentDeductionCents = Math.round(basePriceCents * 0.05);
     const talentPriceCents = basePriceCents;
-    const orderProcessingFeeCents = calculateOrderProcessingFeeCents(basePriceCents);
-    const platformFeeCents = Math.round(basePriceCents * 0.05);
-    const chargedCents = basePriceCents + orderProcessingFeeCents + platformFeeCents;
-    const applicationFeeCents = orderProcessingFeeCents + platformFeeCents + talentDeductionCents;
+    const platformAndServiceFeeCents = calculatePlatformAndServiceFeeCents(basePriceCents);
+    const chargedCents = basePriceCents + platformAndServiceFeeCents;
+    const applicationFeeCents = platformAndServiceFeeCents + talentDeductionCents;
     // Stripe's actual processing cost is a separate, Briteside-absorbed expense —
     // tracked for reporting only, never charged to the booker or the talent.
     const estimatedStripeFeeCents = Math.round(chargedCents * 0.029) + 30;
-
-    let connectAccount = await StripeConnectService.getForUser(profile.userId);
-    // Self-heal: chargesEnabled only updates via webhook or the talent visiting
-    // their earnings page — if it's stale-false, re-check Stripe live rather
-    // than silently routing this booking's full amount to the platform.
-    if (connectAccount && !connectAccount.chargesEnabled) {
-      connectAccount = await StripeConnectService.syncStatus(profile.userId).catch(
-        () => connectAccount
-      );
-    }
 
     const redirectUrls = getRedirectUrls(
       platform,
@@ -1364,20 +1352,9 @@ export class TalentSessionService {
         {
           price_data: {
             currency: 'usd',
-            unit_amount: platformFeeCents,
+            unit_amount: platformAndServiceFeeCents,
             product_data: {
-              name: 'Platform fee (5%)',
-            },
-          },
-          quantity: 1,
-        },
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: orderProcessingFeeCents,
-            product_data: {
-              name: 'Order Processing Fee',
-              description: 'Non-refundable order processing fee',
+              name: 'Platform & Service Fee',
             },
           },
           quantity: 1,
@@ -1392,20 +1369,21 @@ export class TalentSessionService {
         bookerId,
         talentUserId: profile.userId,
       },
-    };
-
-    if (connectAccount?.chargesEnabled) {
-      checkoutParams.payment_intent_data = {
-        application_fee_amount: applicationFeeCents,
-        transfer_data: { destination: connectAccount.stripeAccountId },
+      // No transfer_data/application_fee_amount here on purpose — the talent's
+      // cut is no longer transferred at charge time. It's held on the
+      // platform's own Stripe balance (reserveAmountCents, set in the payment
+      // webhook below) and moved to the talent's Connect account by a
+      // scheduled job 48h after the session is marked completed, per the
+      // deliver-first escrow payout rule.
+      payment_intent_data: {
         metadata: {
           type: 'talent_session',
           sessionId: session.id,
           bookerId,
           talentUserId: profile.userId,
         },
-      };
-    }
+      },
+    };
 
     const stripeSession = await stripe.checkout.sessions.create(checkoutParams);
 
@@ -1464,21 +1442,23 @@ export class TalentSessionService {
     }
 
     let stripeFeeCents = 0;
-    // Also captures transferId — records whether Stripe actually created the
-    // Connect transfer for this charge, so a cron audit can spot payments
-    // where the talent's cut is stuck in the platform balance.
-    let transferId = null;
     if (stripe && stripeSession.payment_intent) {
       try {
         const pi = await stripe.paymentIntents.retrieve(stripeSession.payment_intent, {
           expand: ['latest_charge.balance_transaction'],
         });
         stripeFeeCents = pi.latest_charge?.balance_transaction?.fee ?? 0;
-        transferId = pi.latest_charge?.transfer ?? null;
       } catch (err) {
         console.warn('[TalentSession] Could not retrieve Stripe fee:', err.message);
       }
     }
+
+    // Talent's net cut is held (not transferred at charge time — see
+    // createCheckout) until 48h after the session is marked completed, per
+    // the deliver-first escrow payout rule. Recomputed from priceCents rather
+    // than persisted at booking time, since nothing should reserve anything
+    // before payment is actually confirmed.
+    const talentNetCents = existing.priceCents - Math.round(existing.priceCents * 0.05);
 
     await db
       .update(talentSessions)
@@ -1486,8 +1466,7 @@ export class TalentSessionService {
         stripeSessionId: stripeSession.id,
         stripePaymentIntentId: stripeSession.payment_intent ?? null,
         stripeFeeCents,
-        transferId,
-        transferredAt: transferId ? new Date() : null,
+        reserveAmountCents: talentNetCents,
       })
       .where(eq(talentSessions.id, sessionId));
 

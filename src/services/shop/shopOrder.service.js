@@ -13,7 +13,7 @@ import { createNotification } from '../notification.service.js';
 import * as mailService from '../mail.service.js';
 import { ShopProductService } from './shopProduct.service.js';
 import { ShopDeliverableService } from './shopDeliverable.service.js';
-import { calculateOrderProcessingFeeCents } from '../../utils/orderProcessingFee.js';
+import { calculatePlatformAndServiceFeeCents } from '../../utils/orderProcessingFee.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://briteside.app';
@@ -33,27 +33,24 @@ export class ShopOrderService {
   /**
    * Fee split, identical to talent sessions (talentSession.service.js).
    *
-   *   sellerDeductionCents    = base × 0.05 — seller's marketplace commission (seller keeps 95%)
-   *   orderProcessingFeeCents = flat, tiered by base (utils/orderProcessingFee.js) — 100% Briteside revenue
-   *   platformFeeCents        = base × 0.05 — separate, additional charge, 100% Briteside revenue
-   *   chargedCents            = base + orderProcessingFee + platformFee. Stripe's own processing
-   *                             cost is Briteside-absorbed, not grossed up onto the buyer.
-   *   applicationFeeCents     = orderProcessingFee + platformFee + seller's commission — this is
-   *                             the entirety of what Briteside keeps from the Connect transfer.
+   *   sellerDeductionCents       = base × 0.05 — seller's marketplace commission (seller keeps 95%)
+   *   platformAndServiceFeeCents = base × 7.5% — merged "Platform & Service Fee", 100% Briteside revenue
+   *   chargedCents               = base + platformAndServiceFee. Stripe's own processing
+   *                                cost is Briteside-absorbed, not grossed up onto the buyer.
+   *   applicationFeeCents        = platformAndServiceFee + seller's commission — this is
+   *                                the entirety of what Briteside keeps from the Connect transfer.
    */
   static computeFees(basePriceCents) {
     const sellerDeductionCents = Math.round(basePriceCents * 0.05);
     const sellerReceiveCents = basePriceCents - sellerDeductionCents;
-    const orderProcessingFeeCents = calculateOrderProcessingFeeCents(basePriceCents);
-    const platformFeeCents = Math.round(basePriceCents * 0.05);
-    const chargedCents = basePriceCents + orderProcessingFeeCents + platformFeeCents;
-    const applicationFeeCents = orderProcessingFeeCents + platformFeeCents + sellerDeductionCents;
+    const platformAndServiceFeeCents = calculatePlatformAndServiceFeeCents(basePriceCents);
+    const chargedCents = basePriceCents + platformAndServiceFeeCents;
+    const applicationFeeCents = platformAndServiceFeeCents + sellerDeductionCents;
     return {
       sellerReceiveCents,
       chargedCents,
       applicationFeeCents,
-      orderProcessingFeeCents,
-      platformFeeCents,
+      platformAndServiceFeeCents,
       platformShareCents: applicationFeeCents,
     };
   }
@@ -169,8 +166,7 @@ export class ShopOrderService {
     });
 
     const sellerPriceCents = product.priceCents;
-    const platformFeeCents = fees.platformFeeCents;
-    const orderProcessingFeeCents = fees.orderProcessingFeeCents;
+    const platformAndServiceFeeCents = fees.platformAndServiceFeeCents;
 
     const [order] = await db
       .insert(shopOrders)
@@ -227,20 +223,9 @@ export class ShopOrderService {
         {
           price_data: {
             currency: 'usd',
-            unit_amount: platformFeeCents,
+            unit_amount: platformAndServiceFeeCents,
             product_data: {
-              name: 'Platform fee (5%)',
-            },
-          },
-          quantity: 1,
-        },
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: orderProcessingFeeCents,
-            product_data: {
-              name: 'Order Processing Fee',
-              description: 'Non-refundable order processing fee',
+              name: 'Platform & Service Fee',
             },
           },
           quantity: 1,
@@ -250,9 +235,12 @@ export class ShopOrderService {
       cancel_url: redirectUrls.cancelUrl,
       customer_email: customerEmail || buyer?.email,
       metadata,
+      // No transfer_data/application_fee_amount here on purpose — the seller's
+      // cut is no longer transferred at charge time. It's held on the
+      // platform's own Stripe balance (reserveAmountCents, set in the payment
+      // webhook below) and moved to the seller's Connect account by a
+      // scheduled job 48h after paidAt, per the digital-content payout hold.
       payment_intent_data: {
-        application_fee_amount: fees.applicationFeeCents,
-        transfer_data: { destination: connectAccount.stripeAccountId },
         metadata,
       },
     });
@@ -301,6 +289,10 @@ export class ShopOrderService {
         status: 'paid',
         paidAt,
         stripePaymentIntentId: paymentIntentId,
+        // Held for 48h from paidAt, then released to the seller's Connect
+        // account by the reserve-release cron — see reserveAmountCents comment
+        // on the shopOrders schema.
+        reserveAmountCents: order.sellerReceiveCents,
         updatedAt: paidAt,
       })
       // Re-assert pending so two concurrent deliveries can't both proceed.
@@ -430,7 +422,7 @@ export class ShopOrderService {
       message: `${buyer?.firstName ?? 'Someone'} bought "${order.productTitleSnapshot}".`,
       type: 'payment',
       relatedId: order.id,
-      redirectTo: '/talent-dashboard',
+      redirectTo: '/talent-dashboard?tab=shop',
       metadata: { orderId: order.id, productId: order.productId },
     });
 

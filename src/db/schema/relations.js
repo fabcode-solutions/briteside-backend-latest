@@ -139,6 +139,7 @@ import { bioLinks } from './bioLinks.js';
 import { talentProfiles } from './talentProfiles.js';
 import { organizerPresets } from './organizerPresets.js';
 import { talentAvailability } from './talentAvailability.js';
+import { userDevices } from './userDevices.js';
 import { talentSessions } from './talentSessions.js';
 import { talentDateOverrides } from './talentDateOverrides.js';
 import { talentFavorites } from './talentFavorites.js';
@@ -181,6 +182,7 @@ export const usersRelations = relations(users, ({ many, one }) => ({
     references: [organizers.userId],
   }),
   accounts: many(accounts),
+  devices: many(userDevices),
 
   purchasedTickets: many(purchasedTickets),
   purchasedMerchandise: many(purchasedMerchandise),
@@ -1704,6 +1706,13 @@ export const talentSessionsRelations = relations(talentSessions, ({ one }) => ({
   }),
   booker: one(users, {
     fields: [talentSessions.bookerId],
+    references: [users.id],
+  }),
+}));
+
+export const userDevicesRelations = relations(userDevices, ({ one }) => ({
+  user: one(users, {
+    fields: [userDevices.userId],
     references: [users.id],
   }),
 }));

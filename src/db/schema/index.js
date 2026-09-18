@@ -1,5 +1,7 @@
 // User management
 export * from './users.js';
+// Registered push-notification devices (one row per logged-in app install)
+export * from './userDevices.js';
 // Contact form messages
 export * from './contactMessages.js';
 

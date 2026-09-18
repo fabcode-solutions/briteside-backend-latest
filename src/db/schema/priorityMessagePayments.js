@@ -70,6 +70,12 @@ export const priorityMessagePayments = pgTable(
     repliedAt: timestamp('replied_at', { withTimezone: true }), // talent's reply released the payment
     refundedAt: timestamp('refunded_at', { withTimezone: true }),
 
+    // SLA escrow — the talent's cut isn't transferred at checkout; it's held
+    // on the platform's own Stripe balance and moved to the talent's Connect
+    // account by a scheduled job 48h after repliedAt.
+    reserveAmountCents: integer('reserve_amount_cents').default(0),
+    reserveReleasedAt: timestamp('reserve_released_at', { withTimezone: true }),
+
     metadata: jsonb('metadata').default(sql`'{}'::jsonb`),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

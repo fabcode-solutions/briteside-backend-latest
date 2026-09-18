@@ -186,6 +186,13 @@ export const shopOrders = pgTable(
     customerEmail: varchar('customer_email', { length: 255 }),
 
     paidAt: timestamp('paid_at', { withTimezone: true }),
+
+    // 48h payout hold — the seller's cut isn't transferred at checkout; it's
+    // held on the platform's own Stripe balance and moved to the seller's
+    // Connect account by a scheduled job once 48h have passed since paidAt.
+    reserveAmountCents: integer('reserve_amount_cents').default(0),
+    reserveReleasedAt: timestamp('reserve_released_at', { withTimezone: true }),
+
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -445,7 +452,8 @@ export const shopCustomOfferStatusEnum = pgEnum('shop_custom_offer_status', [
   'expired',
   'withdrawn',
   'cancelled',
-  'no_show',     
+  'no_show',
+  'completed',
 ]);
 
 
@@ -517,6 +525,15 @@ deliveredAt: timestamp('delivered_at', { withTimezone: true }),
     stripeSessionId: varchar('stripe_session_id', { length: 255 }),
     stripePaymentIntentId: varchar('stripe_payment_intent_id', { length: 255 }),
     stripeCustomerId: varchar('stripe_customer_id', { length: 255 }),
+
+    // Delivery-based escrow — the seller's cut from each payment (deposit,
+    // remainder, tip) isn't transferred at charge time; it accumulates here
+    // and is moved to the seller's Connect account by a scheduled job 48h
+    // after deliveredAt. deliveredAt resets to null on a revision request,
+    // which naturally re-holds any not-yet-released amount too.
+    reserveAmountCents: integer('reserve_amount_cents').default(0),
+    reserveReleasedAt: timestamp('reserve_released_at', { withTimezone: true }),
+
     completedAt: timestamp('completed_at', { withTimezone: true }),
     reviewReminderSentAt: timestamp('review_reminder_sent_at', { withTimezone: true }),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
