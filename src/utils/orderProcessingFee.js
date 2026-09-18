@@ -66,3 +66,19 @@ export function calculatePaidMessageProcessingFeeCents(baseWithPlatformFeeCents)
   const tier = PAID_MESSAGE_PROCESSING_FEE_TIERS_CENTS.find(t => amount <= t.maxCents);
   return tier.feeCents;
 }
+
+// Flat 7.5% "Platform & Service Fee" — replaces the separate 5% platform fee
+// + tiered order-processing-fee split for 1:1 Video, Paid Messages, and Shop.
+// One merged line, shown to the customer as a dollar amount only (no %).
+// Event ticketing is NOT part of this — it keeps its own organizer-configurable
+// rate (see getReserveRate/platformFeePercentage in payment.service.js).
+const PLATFORM_AND_SERVICE_FEE_RATE = 0.075;
+
+/**
+ * @param {number} baseCents - the pre-fee price in cents
+ * @returns {number} the merged Platform & Service Fee in cents
+ */
+export function calculatePlatformAndServiceFeeCents(baseCents) {
+  const amount = Math.max(0, Math.round(baseCents) || 0);
+  return Math.round(amount * PLATFORM_AND_SERVICE_FEE_RATE);
+}

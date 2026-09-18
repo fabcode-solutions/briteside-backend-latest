@@ -12,7 +12,6 @@ import {
 import { eq } from 'drizzle-orm';
 import ApiError from '../utils/api-error.js';
 import { StripeConnectService, getReserveRate } from './stripeConnect.service.js';
-import { calculateOrderProcessingFeeCents } from '../utils/orderProcessingFee.js';
 
 let stripe = null;
 if (config.stripe?.secretKey) {
@@ -50,6 +49,7 @@ export class PaymentService {
           title: events.title,
           slug: events.slug,
           description: events.description,
+          platformFeePercentage: events.platformFeePercentage,
         })
         .from(events)
         .where(eq(events.id, order.eventId));
@@ -170,31 +170,19 @@ export class PaymentService {
         0
       );
 
-      // Flat, tiered order processing fee — one per order, based on the subtotal.
-      // 100% of this fee is Briteside revenue.
-      const orderProcessingFeeCents = calculateOrderProcessingFeeCents(subtotalCents);
-      if (orderProcessingFeeCents > 0) {
-        line_items.push({
-          price_data: {
-            currency: 'usd',
-            product_data: {
-              name: 'Order Processing Fee',
-              description: 'Non-refundable order processing fee',
-            },
-            unit_amount: orderProcessingFeeCents,
-          },
-          quantity: 1,
-        });
-      }
-
-      // Platform fee (5% of subtotal) — a separate, additional charge on top of
-      // the flat order processing fee. 100% Briteside revenue.
-      const platformFeeCents = Math.round(subtotalCents * 0.05);
+      // Merged "Platform & Service Fee" — only charged if the organizer set
+      // a rate during event setup (platformFeePercentage defaults to 0
+      // otherwise, see event.service.js). Uses the organizer's own
+      // configured rate, not a fixed percentage — event ticketing has its
+      // own payout/reserve model, distinct from the flat 7.5% used for 1:1
+      // video, paid messages, and shop. Dollar amount only, no % shown.
+      const eventFeeRate = Number(eventInfo?.platformFeePercentage ?? 0) / 100;
+      const platformFeeCents = Math.round(subtotalCents * eventFeeRate);
       if (platformFeeCents > 0) {
         line_items.push({
           price_data: {
             currency: 'usd',
-            product_data: { name: 'Platform Fee (5%)' },
+            product_data: { name: 'Platform & Service Fee' },
             unit_amount: platformFeeCents,
           },
           quantity: 1,
@@ -202,10 +190,10 @@ export class PaymentService {
       }
 
       // Gross = what Stripe actually collects from the customer
-      const totalCents = subtotalCents + orderProcessingFeeCents + platformFeeCents;
+      const totalCents = subtotalCents + platformFeeCents;
 
-      // Briteside keeps the entire processing fee + platform fee as revenue
-      const platformShareCents = orderProcessingFeeCents + platformFeeCents;
+      // Briteside keeps the platform fee as revenue
+      const platformShareCents = platformFeeCents;
 
       // Organizer gross = total − Briteside's processing-fee revenue
       const organizerGrossCents = totalCents - platformShareCents;
@@ -260,7 +248,7 @@ export class PaymentService {
       };
 
       if (connectAccount?.chargesEnabled) {
-        // platformShareCents → order processing fee + platform fee (5%), kept by Briteside as revenue
+        // platformShareCents → the merged Platform & Service Fee, kept by Briteside as revenue
         // reserveAmountCents → 15% of organizer gross, held for disputes, released after window
         // Stripe's processing cost is NOT included here — Briteside pays it out of its own revenue.
         checkoutParams.payment_intent_data = {

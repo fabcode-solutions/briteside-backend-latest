@@ -127,9 +127,10 @@ export const sendMessage = catchAsync(async (req, res) => {
   res.status(201).json({ success: true, message: 'Message sent', data: { message } });
 
   // ── Release priority payment per-item when talent replies ──────────────────
+  let releaseResult = null;
   try {
     const { PriorityMessageService } = await import('../services/priorityMessage.service.js');
-    await PriorityMessageService.releaseOnReply(
+    releaseResult = await PriorityMessageService.releaseOnReply(
       req.params.conversationId,
       req.user.id,
       req.body.replyToId ?? null,
@@ -176,6 +177,31 @@ export const sendMessage = catchAsync(async (req, res) => {
         conversationId,
         message: recipientMessage,
       });
+    }
+
+    // ── Notify the buyer their priority message was replied to ─────────────
+    // releaseOnReply() above only touches the DB — nothing told the buyer a
+    // reply landed, so their Priority tab badge and unread count never moved
+    // until they happened to reopen the conversation and see the "Replied"
+    // tag for themselves.
+    if (releaseResult?.released > 0 && otherUserId) {
+      const replierName =
+        (message.sender &&
+          `${message.sender.firstName || ''} ${message.sender.lastName || ''}`.trim()) ||
+        'The talent';
+      emitSocialChat(io, `user:${otherUserId}`, 'priority:message:received', {
+        messageId: message.id,
+        conversationId,
+      });
+      createNotification({
+        userId: otherUserId,
+        title: 'Priority message replied',
+        message: `${replierName} replied to your priority message.`,
+        type: 'chat_message',
+        redirectTo: '/messages?tab=priority',
+        relatedId: message.id,
+        metadata: { conversationId, messageId: message.id, isPriority: true },
+      }).catch(err => console.warn('[sendMessage] reply notify failed:', err.message));
     }
 
     try {

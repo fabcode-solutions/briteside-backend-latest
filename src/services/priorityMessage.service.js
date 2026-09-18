@@ -33,7 +33,7 @@ import config from '../config/config.js';
 import { StripeConnectService } from './stripeConnect.service.js';
 import { getRedirectUrls } from '../utils/redirect-urls.js';
 import { socialConversations } from '../db/schema/socialChat.js';
-import { calculatePaidMessageProcessingFeeCents } from '../utils/orderProcessingFee.js';
+import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 
@@ -218,6 +218,16 @@ export class PriorityMessageService {
       throw new ApiError(403, 'This talent is not currently accepting priority messages');
     }
 
+    // One outstanding paid message per talent at a time — the sender must wait
+    // for the talent's reply (status → 'replied') or the 48h auto-refund
+    // (status → 'refunded'/'partial_refunded') before paying for another.
+    if (await this.hasPendingMessage(senderId, talentProfileId)) {
+      throw new ApiError(
+        403,
+        'You already have a message pending reply with this talent. Wait for their reply or for it to expire before sending another.'
+      );
+    }
+
     // ── Units ──────────────────────────────────────────────────────────────
     const textMessageCount = msgList.filter(
       m => m.messageContent && m.messageContent.length > 0
@@ -238,36 +248,28 @@ export class PriorityMessageService {
     // split as message content — talent earns 95% of attachment price too.
     const baseCents = profile.priorityMessageFee * totalUnits + totalAttachmentCents;
 
-    // Platform fee (5% of base) — a separate, additional charge to the sender
-    // on top of the flat order processing fee. 100% Briteside revenue.
-    const platformFeeCents = Math.round(baseCents * 0.05);
-
-    // Flat, tiered order processing fee — one per checkout, based on the total
-    // of the base message cost (message + extension + attachments combined)
-    // plus the 5% platform fee. 100% Briteside revenue.
-    const orderProcessingFeeCents = calculatePaidMessageProcessingFeeCents(
-      baseCents + platformFeeCents
-    );
+    // Merged "Platform & Service Fee" (7.5% of base) — 100% Briteside revenue.
+    const platformAndServiceFeeCents = calculatePlatformAndServiceFeeCents(baseCents);
 
     // Talent's cut is 95% of base — includes their share of attachment price.
-    // This is a separate marketplace commission, unrelated to either the order
-    // processing fee or the platform fee, and is unaffected by them.
+    // This is a separate marketplace commission, unrelated to the Platform &
+    // Service Fee, and is unaffected by it.
     const talentDeductionCents = Math.round(baseCents * 0.05);
     const talentNetCents = baseCents - talentDeductionCents;
 
-    // What the sender is charged — base + processing fee + platform fee. Stripe's
-    // own processing cost is not passed to the sender via a gross-up.
-    const chargedCents = baseCents + orderProcessingFeeCents + platformFeeCents;
+    // What the sender is charged — base + the merged fee. Stripe's own
+    // processing cost is not passed to the sender via a gross-up.
+    const chargedCents = baseCents + platformAndServiceFeeCents;
 
     // Stripe's actual processing cost is a separate, Briteside-absorbed expense —
     // tracked here as an estimate for reporting only, never charged to the sender
     // or deducted from the talent's Connect transfer.
     const estimatedStripeFeeCents = Math.round(chargedCents * 0.029) + 30;
 
-    // Platform keeps: the order processing fee + platform fee (100% Briteside
-    // revenue) + talent's 5% marketplace commission. Stripe's cost comes out of
+    // Platform keeps: the Platform & Service Fee (100% Briteside revenue) +
+    // talent's 5% marketplace commission. Stripe's cost comes out of
     // Briteside's own revenue.
-    const applicationFeeCents = orderProcessingFeeCents + platformFeeCents + talentDeductionCents;
+    const applicationFeeCents = platformAndServiceFeeCents + talentDeductionCents;
 
     const talentName = `${profile.user.firstName} ${profile.user.lastName}`;
 
@@ -289,8 +291,7 @@ export class PriorityMessageService {
           baseCents,
           status: 'pending',
           metadata: {
-            orderProcessingFeeCents,
-            platformFeeCents,
+            platformAndServiceFeeCents,
             talentDeductionCents,
             talentNetCents,
             applicationFeeCents,
@@ -359,16 +360,6 @@ export class PriorityMessageService {
       )
     );
 
-    // ── Stripe Connect account + redirect URLs ──────────────────────────────
-    let connectAccount = await StripeConnectService.getForUser(profile.userId).catch(() => null);
-    // Self-heal: our chargesEnabled flag only updates via webhook or the talent
-    // visiting their earnings page — if it's stale-false, re-check Stripe live
-    // rather than silently routing this charge's full amount to the platform.
-    if (connectAccount && !connectAccount.chargesEnabled) {
-      connectAccount = await StripeConnectService.syncStatus(profile.userId).catch(
-        () => connectAccount
-      );
-    }
     const { successUrl, cancelUrl } = getRedirectUrls(
       platform,
       FRONTEND_URL,
@@ -439,32 +430,15 @@ export class PriorityMessageService {
             ]
           : []),
 
-        // Order processing fee (flat, tiered by base cost) — shows even for
+        // Merged Platform & Service Fee (7.5% of base) — shows even for
         // attachment-only sends, whenever there's any charge.
-        ...(orderProcessingFeeCents > 0
+        ...(platformAndServiceFeeCents > 0
           ? [
               {
                 price_data: {
                   currency: 'usd',
-                  unit_amount: orderProcessingFeeCents,
-                  product_data: {
-                    name: 'Order Processing Fee',
-                    description: 'Non-refundable order processing fee',
-                  },
-                },
-                quantity: 1,
-              },
-            ]
-          : []),
-
-        // Platform fee (5% of base) — separate from the order processing fee
-        ...(platformFeeCents > 0
-          ? [
-              {
-                price_data: {
-                  currency: 'usd',
-                  unit_amount: platformFeeCents,
-                  product_data: { name: 'Platform Fee (5%)' },
+                  unit_amount: platformAndServiceFeeCents,
+                  product_data: { name: 'Platform & Service Fee' },
                 },
                 quantity: 1,
               },
@@ -483,21 +457,21 @@ export class PriorityMessageService {
         talentUserId: profile.userId,
         talentName,
       },
-    };
-
-    // Stripe Connect — only transfer when the talent actually earns something
-    if (connectAccount?.chargesEnabled && talentNetCents > 0) {
-      checkoutParams.payment_intent_data = {
-        application_fee_amount: applicationFeeCents,
-        transfer_data: { destination: connectAccount.stripeAccountId },
+      // No transfer_data/application_fee_amount here on purpose — the
+      // talent's cut is no longer transferred at charge time. It's held on
+      // the platform's own Stripe balance (reserveAmountCents, set in the
+      // payment webhook) and moved to the talent's Connect account by a
+      // scheduled job 48h after the talent replies, per the SLA escrow
+      // payout rule.
+      payment_intent_data: {
         metadata: {
           type: 'priority_message',
           feature: 'priority_message',
           paymentId: payment.id,
           talentUserId: profile.userId,
         },
-      };
-    }
+      },
+    };
 
     const session = await stripe.checkout.sessions.create(checkoutParams);
 
@@ -638,23 +612,11 @@ export class PriorityMessageService {
           );
       }
 
-      // Record whether Stripe actually created the Connect transfer for this
-      // charge — lets a cron audit spot orphaned payments (talent's cut stuck
-      // in the platform balance) instead of relying on manual discovery.
-      let transferId = null;
-      if (stripe && stripeSession.payment_intent) {
-        try {
-          const pi = await stripe.paymentIntents.retrieve(stripeSession.payment_intent, {
-            expand: ['latest_charge'],
-          });
-          transferId =
-            pi.latest_charge && typeof pi.latest_charge === 'object'
-              ? (pi.latest_charge.transfer ?? null)
-              : null;
-        } catch (err) {
-          console.error('[PriorityMessage] transfer lookup failed:', err.message);
-        }
-      }
+      // Talent's net cut is held (not transferred at charge time — see
+      // createCheckout) until 48h after the talent replies, per the SLA
+      // escrow payout rule. talentNetCents was computed and stashed in
+      // metadata at checkout-creation time.
+      const reserveAmountCents = payment.metadata?.talentNetCents ?? 0;
 
       await db
         .update(priorityMessagePayments)
@@ -663,8 +625,7 @@ export class PriorityMessageService {
           stripePaymentIntent: stripeSession.payment_intent ?? null,
           conversationId: conversation.id,
           paidAt: new Date(),
-          transferId,
-          transferredAt: transferId ? new Date() : null,
+          reserveAmountCents,
           updatedAt: new Date(),
         })
         .where(eq(priorityMessagePayments.id, payment.id));
@@ -707,6 +668,15 @@ export class PriorityMessageService {
       const amountDollars = (payment.baseCents / 100).toFixed(2);
       const countLabel = items.length > 1 ? ` (${items.length} messages)` : '';
 
+      // Unlike every other createNotification() call in this file, this one
+      // wasn't wrapped in .catch() — if it ever threw (e.g. a first-time
+      // recipient hitting some edge case in notification settings/actor
+      // resolution), it aborted this whole try block, which skipped the
+      // priority:message:received socket emit just below AND fell into the
+      // outer catch marking the payment 'failed' even though the message had
+      // already been delivered. That's exactly the "talent never gets a
+      // notification or count bump" symptom, unstuck only once something
+      // else (e.g. their reply) touched the payment row again.
       await createNotification({
         userId: talentUserId,
         title: `⭐ Priority message from ${senderName}`,
@@ -723,15 +693,11 @@ export class PriorityMessageService {
           senderId,
           actorUserId: senderId,
         },
-      });
+      }).catch(err => console.error('[PriorityMessage] talent notify failed:', err.message));
       const deliveredAttachments = priorityAttachmentsPayload;
 
       if (io && deliveredMessages.length > 0) {
         const { emitSocialChat } = await import('../socket/emitter.js');
-        const chatNs = io.of('/chat');
-        const room = `user:${talentUserId}`;
-        const roomSockets = chatNs.adapter.rooms.get(room);
-        console.log(`[Webhook] emitting to room ${room}, sockets in room:`, roomSockets?.size ?? 0);
         emitSocialChat(io, `user:${talentUserId}`, 'priority:message:received', {
           messageId: deliveredMessages[0],
           conversationId: conversation.id,
@@ -1740,4 +1706,24 @@ export class PriorityMessageService {
   }
   return statusMap;
 }
+
+  /**
+   * True if this sender already has a paid message to this talent still
+   * awaiting reply (or partially replied, with items still outstanding).
+   * Shared by createCheckout()'s own guard and the proactive frontend check
+   * (GET /priority-messages/pending/:talentProfileId) so a talent-profile
+   * "Send Message" click can warn the sender before they fill out the whole
+   * form, instead of only failing at the very end.
+   */
+  static async hasPendingMessage(senderId, talentProfileId) {
+    const pendingPayment = await db.query.priorityMessagePayments.findFirst({
+      where: and(
+        eq(priorityMessagePayments.senderId, senderId),
+        eq(priorityMessagePayments.talentProfileId, talentProfileId),
+        inArray(priorityMessagePayments.status, ['paid', 'partial'])
+      ),
+      columns: { id: true },
+    });
+    return !!pendingPayment;
+  }
 }

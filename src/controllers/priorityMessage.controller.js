@@ -202,3 +202,11 @@ export async function getItemStatuses(req, res, next) {
     next(err);
   }
 }
+
+export const getPendingStatus = catchAsync(async (req, res) => {
+  const pending = await PriorityMessageService.hasPendingMessage(
+    req.user.id,
+    req.params.talentProfileId
+  );
+  res.json({ data: { pending } });
+});

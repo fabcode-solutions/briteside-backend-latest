@@ -14,7 +14,6 @@ import {
   categories,
   users,
   groups,
-  systemSettings,
   eventTeams,
   eventTeamMembers,
   orders,
@@ -216,16 +215,14 @@ export class EventService {
         throw new ApiError(400, 'Invalid session dates provided');
       }
 
-      // Use organizer-provided fee if valid (0–100); fall back to admin system setting
+      // "Platform & Service Fee" only ever applies if the organizer explicitly
+      // set one during setup — no fallback to an admin-wide default. An
+      // organizer who never touches this field gets 0, not a silently
+      // applied platform-wide rate.
       let platformFeePercentage = 0;
       const organizerFee = parseFloat(rest.platformFeePercentage);
       if (!isNaN(organizerFee) && organizerFee >= 0 && organizerFee <= 100) {
         platformFeePercentage = organizerFee;
-      } else {
-        const feeRow = await db.query.systemSettings.findFirst({
-          where: eq(systemSettings.settingKey, 'platform_fee_percentage'),
-        });
-        platformFeePercentage = feeRow ? Number(feeRow.settingValue?.percentage ?? 0) : 0;
       }
 
       // Only include valid event table columns
