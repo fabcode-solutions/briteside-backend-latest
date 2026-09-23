@@ -7,6 +7,7 @@ import {
   getActiveLivestreams,
   getFollowingLivestreams,
   joinLivestream,
+  checkConnection,
   leaveLivestream,
   addReaction,
   getReactionSummary,
@@ -45,6 +46,11 @@ router.post('/:id/end', endLivestream);
 // ─── Viewer tracking ──────────────────────────────────────────────────────
 // POST /livestream/:id/join
 router.post('/:id/join', joinLivestream);
+
+// POST /livestream/:id/check-connection — duplicate-device guard, called by
+// the host before joining their own broadcast (joinLivestream already
+// covers viewers).
+router.post('/:id/check-connection', checkConnection);
 
 // POST /livestream/:id/leave
 router.post('/:id/leave', leaveLivestream);

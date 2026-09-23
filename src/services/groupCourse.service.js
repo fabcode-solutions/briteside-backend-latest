@@ -2,7 +2,7 @@ import Stripe from 'stripe';
 import config from '../config/config.js';
 import { db } from '../db/index.js';
 import { eq, and, desc, asc, count, sum, sql, isNull, inArray } from 'drizzle-orm';
-import { groups, groupMembers } from '../db/schema/index.js';
+import { groups, groupMembers, users } from '../db/schema/index.js';
 import {
   groupCourses,
   groupCourseModules,
@@ -61,6 +61,17 @@ export class GroupCourseService {
     let stripePriceId = null;
 
     if (!isFree && price && parseFloat(price) > 0) {
+      // Selling a course is a Briteside Plus feature — a non-Plus organizer
+      // can still create a course, just not charge for it. Re-checked here
+      // (not trusted from the client) since price is real money.
+      const creator = await db.query.users.findFirst({
+        where: eq(users.id, userId),
+        columns: { isBritesidePlus: true },
+      });
+      if (!creator?.isBritesidePlus) {
+        throw new ApiError(403, 'Briteside Plus is required to sell a paid course.');
+      }
+
       const s = getStripe();
       const product = await s.products.create({
         name: title,

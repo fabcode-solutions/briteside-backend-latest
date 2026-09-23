@@ -291,6 +291,21 @@ export const declineCustomOffer = catchAsync(async (req, res) => {
   res.json({ success: true, message: 'Offer declined', data: { offer } });
 }); 
 
+/**
+ * Seller accepts a buyer-initiated service-listing purchase. Distinct from
+ * acceptCustomOfferCheckout: the buyer already paid at Buy time, so this is an
+ * approval, not a payment.
+ */
+export const approveListingPurchase = catchAsync(async (req, res) => {
+  const io = req.app.get('io');
+  const offer = await ShopCustomOfferService.approveListingPurchase(
+    req.user.id,
+    req.params.offerId,
+    io
+  );
+  res.json({ success: true, message: 'Order accepted', data: { offer } });
+});
+
 export const acceptCustomOfferCheckout = catchAsync(async (req, res) => {
   const result = await ShopCustomOfferService.createAcceptCheckout(
     req.user.id,
@@ -334,6 +349,36 @@ export const payRemainingCustomOfferCheckout = catchAsync(async (req, res) => {
     req.params.offerId
   );
   res.json({ success: true, message: 'Checkout ready', data: result });
+});
+
+// Funds EXACTLY one milestone of a 'milestones' offer — never a remaining
+// balance. Every guard (ownership, offer status, payment mode, stage
+// sequencing, seller payout readiness) is enforced in the service.
+export const fundCustomOfferMilestone = catchAsync(async (req, res) => {
+  const result = await ShopCustomOfferService.createMilestoneFundingCheckout(
+    req.user.id,
+    req.params.offerId,
+    req.params.milestoneId,
+    req.body?.platform
+  );
+  res.json({ success: true, message: 'Checkout ready', data: result });
+});
+
+// Buyer approves one delivered milestone. Starts that stage's 48h payout hold
+// and, if it was the last one, completes the whole project.
+export const completeCustomOfferMilestone = catchAsync(async (req, res) => {
+  const io = req.app.get('io');
+  const result = await ShopCustomOfferService.completeMilestone(
+    req.user.id,
+    req.params.offerId,
+    req.params.milestoneId,
+    io
+  );
+  res.json({
+    success: true,
+    message: result.projectCompleted ? 'Project completed' : 'Milestone approved',
+    data: result,
+  });
 });
 
 export const submitCustomOfferWork = catchAsync(async (req, res) => {

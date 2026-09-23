@@ -36,10 +36,13 @@ import {
   listReceivedCustomOffers,
   withdrawCustomOffer,
   declineCustomOffer,
+  approveListingPurchase,
   acceptCustomOfferCheckout,
   cancelCustomOffer,
   completeCustomOffer,
   payRemainingCustomOfferCheckout,
+  fundCustomOfferMilestone,
+  completeCustomOfferMilestone,
   submitCustomOfferWork,
   getCustomOfferDeliverables,
    listOfferActivity,
@@ -146,11 +149,26 @@ router.get('/custom-offers/sent', listSentCustomOffers);
 router.get('/custom-offers/received', listReceivedCustomOffers);
 router.post('/custom-offers/:offerId/withdraw', withdrawCustomOffer);
 router.post('/custom-offers/:offerId/decline', declineCustomOffer);
+// Seller-side approval of a buyer-initiated service-listing purchase (already
+// paid) — no charge, unlike accept-checkout below.
+router.post('/custom-offers/:offerId/approve', approveListingPurchase);
 router.post('/custom-offers/:offerId/accept-checkout', acceptCustomOfferCheckout);
 router.post('/custom-offers/:offerId/cancel', cancelCustomOffer);
 router.post('/custom-offers/:offerId/complete', completeCustomOffer);
 router.post('/custom-offers/:offerId/accept-delivery', acceptCustomOfferDelivery);
 router.post('/custom-offers/:offerId/pay-remaining-checkout', payRemainingCustomOfferCheckout);
+
+// ── Per-milestone payment ('milestones' offers only) ─────────────────────────
+// Funds one stage at a time; the previous stage must already be approved.
+router.post(
+  '/custom-offers/:offerId/milestones/:milestoneId/fund-checkout',
+  fundCustomOfferMilestone
+);
+// Buyer approves one delivered stage (48h payout hold starts for that stage).
+router.post(
+  '/custom-offers/:offerId/milestones/:milestoneId/complete',
+  completeCustomOfferMilestone
+);
 router.post(
   '/custom-offers/:offerId/deliverables',
   workUpload.array('files', 10),

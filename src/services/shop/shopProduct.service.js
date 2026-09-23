@@ -60,7 +60,19 @@ export class ShopProductService {
     };
   }
 
-  static validate(data, { partial = false } = {}) {
+  /**
+   * @param {object} data
+   * @param {object} [opts]
+   * @param {boolean} [opts.partial]
+   * @param {string|null} [opts.existingPaymentMode] The listing's CURRENT
+   *   paymentMode when this is an update. 'deposit' has been retired as a
+   *   selectable mode, but updateProduct re-validates the merged row on every
+   *   edit — so a listing that is ALREADY on 'deposit' is allowed to stay on
+   *   it (otherwise every pre-existing deposit listing becomes uneditable).
+   *   A new listing, or one switching INTO deposit from another mode, is
+   *   rejected.
+   */
+  static validate(data, { partial = false, existingPaymentMode = null } = {}) {
     const required = key => !partial || data[key] !== undefined;
 
     // Resolved up front — description and delivery checks below both branch
@@ -176,6 +188,9 @@ export class ShopProductService {
         throw new ApiError(400, `paymentMode must be one of: ${PAYMENT_MODES.join(', ')}`);
       }
       if (data.paymentMode === 'deposit') {
+        if (existingPaymentMode !== 'deposit') {
+          throw new ApiError(400, 'Deposit payments are no longer available');
+        }
         const pct = Number(data.depositPercent);
         if (!Number.isInteger(pct) || pct < 1 || pct > 100) {
           throw new ApiError(400, 'depositPercent must be a whole number between 1 and 100');
@@ -432,7 +447,9 @@ export class ShopProductService {
     const existing = await this.assertOwnership(userId, productId);
 
     const merged = { ...existing, ...data };
-    this.validate(merged);
+    // Pass the listing's current mode so an already-deposit listing stays
+    // editable while nothing new can switch into deposit mode.
+    this.validate(merged, { existingPaymentMode: existing.paymentMode ?? null });
 
     const { courseModules, ...updated } = await db.transaction(async tx => {
       const [product] = await tx

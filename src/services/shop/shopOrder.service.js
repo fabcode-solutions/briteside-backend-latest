@@ -87,6 +87,20 @@ export class ShopOrderService {
     }
     if (product.userId === buyerId) throw new ApiError(400, "You can't buy your own product");
 
+    // Service listings don't become shop_orders at all: a shop_orders row is
+    // an instant digital-download purchase with no accept/decline step, no
+    // delivery state and no activity log. Buying a service instead opens a
+    // real custom-offer workspace that waits on the seller's approval.
+    // Everything below (digital downloads, courses, links) is unaffected.
+    //
+    // Free service listings stay on the old path deliberately: there's no
+    // Stripe session to drive the webhook that would move the offer out of
+    // its pre-payment state, so it would strand at 'pending' forever.
+    if (product.listingType === 'service' && product.priceCents > 0) {
+      const { ShopCustomOfferService } = await import('./shopCustomOffer.service.js');
+      return ShopCustomOfferService.createListingPurchase(buyerId, product, platform);
+    }
+
     const alreadyOwned = await this.findPaidOrder(buyerId, productId);
     if (alreadyOwned) throw new ApiError(409, 'You already own this product');
 

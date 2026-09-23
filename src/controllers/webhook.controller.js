@@ -102,10 +102,27 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
         return;
       }
       // ── Shop custom service offer — remaining balance paid by buyer ────────
-if (session.metadata?.type === 'shop_custom_offer_remainder') {
-  await ShopCustomOfferService.handleRemainderPaymentWebhook(session);
-  return;
-} 
+      // 'shop_custom_offer_completion_retry' is the SCA/3DS fallback Checkout
+      // created by _chargeRemainderAndFinalize when the off-session charge for
+      // the remaining balance needs buyer authentication. It carries the same
+      // metadata and means the same thing — "an offer's remainder was paid" —
+      // so it routes to the same handler.
+      if (
+        session.metadata?.type === 'shop_custom_offer_remainder' ||
+        session.metadata?.type === 'shop_custom_offer_completion_retry'
+      ) {
+        await ShopCustomOfferService.handleRemainderPaymentWebhook(session);
+        return;
+      }
+
+      // ── Shop custom service offer — ONE milestone funded ──────────────────
+      // Stages 2..N of a 'milestones' offer each get their own Checkout
+      // session. Stage 1 rides the 'shop_custom_offer' branch above, since it
+      // is paid as part of accepting the offer.
+      if (session.metadata?.type === 'shop_custom_offer_milestone') {
+        await ShopCustomOfferService.handleMilestonePaymentWebhook(session);
+        return;
+      }
 
       // Route subscription checkouts to SubscriptionService
       if (session.mode === 'subscription') {
@@ -147,6 +164,14 @@ if (session.metadata?.type === 'shop_custom_offer_remainder') {
       // ── Shop order — mark abandoned checkout as expired ───────────────────
       if (session.metadata?.type === 'shop') {
         await ShopOrderService.handlePaymentExpired(session);
+      }
+
+      // ── Shop custom offer milestone — free the stage up again ─────────────
+      // Without this an abandoned checkout would leave that milestone stuck at
+      // 'awaiting_payment' forever, and the buyer could never start a new one.
+      if (session.metadata?.type === 'shop_custom_offer_milestone') {
+        await ShopCustomOfferService.handleMilestoneCheckoutExpired(session);
+        return;
       }
 
 

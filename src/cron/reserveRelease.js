@@ -9,6 +9,7 @@ import {
   shopOrders,
   priorityMessagePayments,
   shopCustomServiceOffers,
+  shopOfferMilestones,
 } from '../db/schema/index.js';
 import { stripeConnectAccounts } from '../db/schema/stripeConnect.js';
 import config from '../config/config.js';
@@ -404,6 +405,127 @@ export async function releaseCustomOfferReserves(force = false) {
   return { released, skipped, candidates: offerRows.length };
 }
 
+/**
+ * Per-milestone release for `paymentMode: 'milestones'` custom offers.
+ *
+ * Deliberately a SIBLING of releaseCustomOfferReserves, not a change to it.
+ * Milestone money never enters shop_custom_service_offers.reserve_amount_cents
+ * (see ShopCustomOfferService.handlePaymentWebhook /
+ * handleMilestonePaymentWebhook), so these two paths read disjoint pots and
+ * cannot double-pay one another. The whole-offer path above is still needed on
+ * milestone offers: TIPS accumulate into reserve_amount_cents
+ * (handleTipPaymentWebhook) and are released by it.
+ *
+ * Each row is released exactly once — status flips 'completed' → 'released' —
+ * so the idempotency key can be STATIC per milestone. That differs from the
+ * whole-offer key on purpose: that row can accumulate additional payments
+ * after an earlier release fired, so its key varies by updatedAt to stop the
+ * next batch colliding with (and being silently dropped by) the previous one.
+ * A milestone has no such second payment, so a static key is both correct and
+ * strictly safer — a retry after an ambiguous network failure can never
+ * transfer twice.
+ */
+export async function releaseCustomOfferMilestoneReserves(force = false) {
+  if (!stripe) {
+    logger.warn('[Cron] ReserveRelease: STRIPE NOT CONFIGURED — skipping custom offer milestones');
+    return { released: 0, skipped: 0, reason: 'stripe_not_configured' };
+  }
+
+  const baseConditions = and(
+    eq(shopOfferMilestones.status, 'completed'),
+    isNull(shopOfferMilestones.releasedAt),
+    gt(shopOfferMilestones.sellerReceiveCents, 0)
+  );
+  const milestoneWhere = force
+    ? baseConditions
+    : and(baseConditions, lte(shopOfferMilestones.releaseAt, new Date()));
+
+  const milestoneRows = await db
+    .select({
+      milestoneId: shopOfferMilestones.id,
+      offerId: shopOfferMilestones.offerId,
+      position: shopOfferMilestones.position,
+      label: shopOfferMilestones.label,
+      sellerReceiveCents: shopOfferMilestones.sellerReceiveCents,
+      sellerId: shopCustomServiceOffers.sellerId,
+      buyerId: shopCustomServiceOffers.buyerId,
+    })
+    .from(shopOfferMilestones)
+    .innerJoin(
+      shopCustomServiceOffers,
+      eq(shopOfferMilestones.offerId, shopCustomServiceOffers.id)
+    )
+    .where(milestoneWhere);
+
+  logger.info('[Cron] ReserveRelease: custom offer milestone candidates found', {
+    count: milestoneRows.length,
+    force,
+  });
+
+  let released = 0;
+  let skipped = 0;
+
+  for (const milestone of milestoneRows) {
+    const connectAccount = await db.query.stripeConnectAccounts.findFirst({
+      where: eq(stripeConnectAccounts.userId, milestone.sellerId),
+      columns: { stripeAccountId: true, payoutsEnabled: true },
+    });
+    if (!connectAccount?.payoutsEnabled) {
+      logger.warn('[Cron] ReserveRelease: custom offer milestone skipped — payouts not enabled', {
+        milestoneId: milestone.milestoneId,
+        offerId: milestone.offerId,
+        sellerId: milestone.sellerId,
+        hasAccount: !!connectAccount,
+      });
+      skipped++;
+      continue;
+    }
+
+    const transferId = await transferReserve(
+      connectAccount.stripeAccountId,
+      milestone.sellerReceiveCents,
+      {
+        description: `Reserve release — offer ${milestone.offerId} milestone ${milestone.position + 1}`,
+        idempotencyKey: `reserve-offer-milestone-${milestone.milestoneId}`,
+        metadata: {
+          type: 'reserve_release',
+          source: 'shop_custom_offer_milestone',
+          offerId: milestone.offerId,
+          milestoneId: milestone.milestoneId,
+          position: String(milestone.position),
+          buyerId: milestone.buyerId ?? '',
+        },
+      }
+    );
+
+    if (transferId) {
+      // Conditional on 'completed' so a concurrent pass (or a cancellation
+      // that moved the row to 'cancelled') can never be overwritten here.
+      await db
+        .update(shopOfferMilestones)
+        .set({ status: 'released', releasedAt: new Date(), transferId, updatedAt: new Date() })
+        .where(
+          and(
+            eq(shopOfferMilestones.id, milestone.milestoneId),
+            eq(shopOfferMilestones.status, 'completed')
+          )
+        );
+      released++;
+      logger.info('[Cron] ReserveRelease: custom offer milestone released', {
+        milestoneId: milestone.milestoneId,
+        offerId: milestone.offerId,
+        position: milestone.position,
+        amountUsd: (milestone.sellerReceiveCents / 100).toFixed(2),
+        transferId,
+      });
+    } else {
+      skipped++;
+    }
+  }
+
+  return { released, skipped, candidates: milestoneRows.length };
+}
+
 export async function releaseOrderReserves(force = false) {
   if (!stripe) {
     logger.warn('[Cron] ReserveRelease: STRIPE NOT CONFIGURED — skipping order reserves');
@@ -564,20 +686,28 @@ export async function releaseOrderReserves(force = false) {
 
 export async function runReserveRelease(force = false) {
   logger.info('[Cron] ReserveRelease: starting', { force });
-  const [sessions, orders, shopOrderResults, priorityMessageResults, customOfferResults] =
-    await Promise.all([
-      releaseSessionReserves(force),
-      releaseOrderReserves(force),
-      releaseShopOrderReserves(force),
-      releasePriorityMessageReserves(force),
-      releaseCustomOfferReserves(force),
-    ]);
+  const [
+    sessions,
+    orders,
+    shopOrderResults,
+    priorityMessageResults,
+    customOfferResults,
+    customOfferMilestoneResults,
+  ] = await Promise.all([
+    releaseSessionReserves(force),
+    releaseOrderReserves(force),
+    releaseShopOrderReserves(force),
+    releasePriorityMessageReserves(force),
+    releaseCustomOfferReserves(force),
+    releaseCustomOfferMilestoneReserves(force),
+  ]);
   logger.info('[Cron] ReserveRelease: done', {
     sessions,
     orders,
     shopOrders: shopOrderResults,
     priorityMessages: priorityMessageResults,
     customOffers: customOfferResults,
+    customOfferMilestones: customOfferMilestoneResults,
   });
   return {
     sessions,
@@ -585,5 +715,6 @@ export async function runReserveRelease(force = false) {
     shopOrders: shopOrderResults,
     priorityMessages: priorityMessageResults,
     customOffers: customOfferResults,
+    customOfferMilestones: customOfferMilestoneResults,
   };
 }

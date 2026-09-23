@@ -15,6 +15,7 @@ import {
   groupDiscussionNotifications,
   groupShopProducts,
   shopProducts,
+  talentProfiles,
 } from '../db/schema/index.js';
 
 // Constants for media limits
@@ -570,6 +571,7 @@ export class GroupService {
             lastName: true,
             email: true,
             username: true,
+            isBritesidePlus: true,
           },
           with: { organizer: true },
         },
@@ -617,6 +619,21 @@ export class GroupService {
     });
 
     if (!group) return null;
+
+    // Office Hours button gating — the organizer's talent profile isn't
+    // reachable via any existing `users` relation (only talentProfiles->user
+    // is defined), so it's looked up directly. `officeHoursEnabled` alone
+    // isn't enough to show the button — isBritesidePlus (selected above) is
+    // required too, so a talent who lapses on Plus loses the button even if
+    // they'd previously turned the toggle on.
+    if (group.createdBy) {
+      const organizerTalentProfile = await db.query.talentProfiles.findFirst({
+        where: and(eq(talentProfiles.userId, group.createdBy.id), isNull(talentProfiles.deletedAt)),
+        columns: { id: true, officeHoursEnabled: true },
+      });
+      group.createdBy.talentProfileId = organizerTalentProfile?.id ?? null;
+      group.createdBy.officeHoursEnabled = organizerTalentProfile?.officeHoursEnabled ?? false;
+    }
 
     // Hide media whose backing file was rejected/removed by moderation
     // (kept items get moderationStatus for frontend blur)
