@@ -78,6 +78,11 @@ export const talentProfiles = pgTable(
     // in TalentProfileService._featureFlags — both must be true for
     // priorityMessagingAvailable to be true.
     priorityMessagingEnabled: boolean('priority_messaging_enabled').notNull().default(true),
+    // Talent opt-in: whether the "Office Hours" 1:1-booking button shows on
+    // groups they organize. Gated together with the org-level isBritesidePlus
+    // flag — see group.service.js getGroup(). Off by default so a Plus talent
+    // has to explicitly turn this on.
+    officeHoursEnabled: boolean('office_hours_enabled').notNull().default(false),
     // Aggregated stats — updated after each completed session
     rating: decimal('rating', { precision: 3, scale: 2 }).default('0.00'),
     reviewCount: integer('review_count').notNull().default(0),

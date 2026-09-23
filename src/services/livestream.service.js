@@ -252,6 +252,39 @@ export class LivestreamService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // DUPLICATE-DEVICE GUARD — same account already connected (Web + Mobile,
+  // two browser tabs, etc.) must leave that session before joining again.
+  // Side-effect-free: safe to call from both the host's and a viewer's join
+  // flow, before they actually connect to the Stream call.
+  // ─────────────────────────────────────────────────────────────────────────
+  static async assertNotAlreadyConnected(streamCallId, userId) {
+    if (!streamCallId) return;
+    try {
+      const { call } = await streamClient.video.call(LIVESTREAM_CALL_TYPE, streamCallId).get();
+      const alreadyConnected = call?.session?.participants?.some(p => p.user?.id === userId);
+      if (alreadyConnected) {
+        throw new ApiError(
+          409,
+          'This account is already connected to this live stream on another device. Leave that session first.'
+        );
+      }
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      // Stream lookup failure shouldn't itself block a legitimate join —
+      // log and fall through to the normal join flow.
+      console.error('[Livestream] Stream call-session lookup failed:', err.message);
+    }
+  }
+
+  static async checkConnection({ livestreamId, userId }) {
+    const stream = await db.query.livestreams.findFirst({
+      where: eq(livestreams.id, livestreamId),
+    });
+    if (!stream) throw new ApiError(404, 'Livestream not found.');
+    await LivestreamService.assertNotAlreadyConnected(stream.streamCallId, userId);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // JOIN – track viewer joining (upsert) & increment count
   // ─────────────────────────────────────────────────────────────────────────
   static async joinLivestream({ livestreamId, userId }) {
@@ -260,6 +293,8 @@ export class LivestreamService {
     });
     if (!stream) throw new ApiError(404, 'Livestream not found.');
     if (stream.status !== 'live') throw new ApiError(400, 'This stream is not live.');
+
+    await LivestreamService.assertNotAlreadyConnected(stream.streamCallId, userId);
 
     // Upsert viewer record
     await db.insert(livestreamViewers).values({ livestreamId, userId }).onConflictDoNothing();

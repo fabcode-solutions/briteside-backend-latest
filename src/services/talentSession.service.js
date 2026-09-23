@@ -239,7 +239,7 @@ const notifyAndEmail = async ({
 // ─── TALENT PROFILE SERVICE ───────────────────────────────────────────────────
 
 export class TalentProfileService {
-    static async create(userId, data) {
+  static async create(userId, data) {
     const existing = await db.query.talentProfiles.findFirst({
       where: eq(talentProfiles.userId, userId),
     });
@@ -313,7 +313,7 @@ export class TalentProfileService {
     return profile;
   }
 
-static async update(userId, data) {
+  static async update(userId, data) {
     if (data.media !== undefined) validateMedia(data.media);
 
     // Drizzle's decimal columns expect strings, not raw numbers.
@@ -425,7 +425,7 @@ static async update(userId, data) {
 
   // Feature availability flags for a single talent — same shape the list sends.
   // Frontend uses these to disable "book session" / "priority message".
-   static async _featureFlags(talentUserId, priorityMessagingEnabled = true) {
+  static async _featureFlags(talentUserId, priorityMessagingEnabled = true) {
     const featureMap = await SubscriptionService.getActiveFeaturesForUsers([talentUserId]);
     const feats = featureMap.get(talentUserId);
     return {
@@ -435,7 +435,7 @@ static async update(userId, data) {
     };
   }
 
-   static async _getShopProductsForProfile(profile, viewerId) {
+  static async _getShopProductsForProfile(profile, viewerId) {
     if (!profile.showShopProducts) return null;
 
     try {
@@ -451,7 +451,7 @@ static async update(userId, data) {
     }
   }
 
- static async getById(profileId, userId = null) {
+  static async getById(profileId, userId = null) {
     const profile = await db.query.talentProfiles.findFirst({
       where: and(eq(talentProfiles.id, profileId), isNull(talentProfiles.deletedAt)),
       with: {
@@ -624,7 +624,7 @@ static async update(userId, data) {
       columns: { id: true },
     });
 
-        for (const msg of paidMessages) {
+    for (const msg of paidMessages) {
       const review = await db.query.talentReviews.findFirst({
         where: eq(talentReviews.priorityMessageId, msg.id),
         columns: { id: true },
@@ -680,11 +680,11 @@ static async update(userId, data) {
   }
 
 
-    static async getByUserId(userId) {
+  static async getByUserId(userId) {
     const profile = await db.query.talentProfiles.findFirst({
       where: and(eq(talentProfiles.userId, userId), isNull(talentProfiles.deletedAt)),
       with: {
-        socialLinks: true, 
+        socialLinks: true,
       },
     });
     if (!profile) throw new ApiError(404, 'Talent profile not found');
@@ -732,7 +732,7 @@ export class TalentAvailabilityService {
    * @param {string} userId
    * @param {{ isActive, rates, windows, dateOverrides, title?, category? }} input
    */
-static async saveSchedule(
+  static async saveSchedule(
     userId,
     { isActive, rates, windows, dateOverrides, title, category, city, state, country, countryCode, latitude, longitude }
   ) {
@@ -1337,7 +1337,7 @@ export class TalentSessionService {
       payment_method_types: ['card'],
       mode: 'payment',
       expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
-            line_items: [
+      line_items: [
         {
           price_data: {
             currency: 'usd',
@@ -1577,7 +1577,7 @@ export class TalentSessionService {
       title: 'New session request',
       message: `${booker.firstName} ${booker.lastName} wants to book a ${session.durationMins}-min session.`,
       type: 'purchase_confirmation',
-      redirectTo: '/bookings',
+      redirectTo: '/bookings?tab=requests',
       relatedId: session.id,
       emailFn: async () => {
         const { subject, html } = sessionEmails.newBookingRequestForTalent(
@@ -1777,7 +1777,7 @@ export class TalentSessionService {
       title: 'New session request',
       message: `${booker.firstName} ${booker.lastName} wants to book a ${durationMins}-min session.`,
       type: 'purchase_confirmation',
-      redirectTo: `/bookings`,
+      redirectTo: `/bookings?tab=requests`,
       relatedId: session.id,
       emailFn: async () => {
         const { subject: sub, html } = sessionEmails.newBookingRequestForTalent(
@@ -2076,7 +2076,7 @@ export class TalentSessionService {
         title: 'Content warning',
         message,
         type: 'system',
-      }).catch(() => {});
+      }).catch(() => { });
       // Persistent (no auto-dismiss on the frontend) — stays up until this
       // clears via the 'approved' branch above, not a fixed timer.
       if (io) {
@@ -2136,7 +2136,7 @@ export class TalentSessionService {
           title: `${trackLabel === 'screen share' ? 'Screen share' : 'Video'} blocked`,
           message,
           type: 'system',
-        }).catch(() => {});
+        }).catch(() => { });
         if (io) {
           emitSocialChat(io, `user:${participantId}`, 'session:moderation_action', {
             sessionId,
@@ -2181,7 +2181,7 @@ export class TalentSessionService {
         title: 'Removed from session',
         message: kickedMessage,
         type: 'system',
-      }).catch(() => {});
+      }).catch(() => { });
       return;
     }
 
@@ -2198,7 +2198,7 @@ export class TalentSessionService {
         title: 'Session ended',
         message: 'This session was ended automatically due to a serious content violation.',
         type: 'system',
-      }).catch(() => {});
+      }).catch(() => { });
     }
   }
 
@@ -2518,6 +2518,26 @@ export class TalentSessionService {
     const isBooker = userId === session.bookerId;
     const isTalent = userId === session.talentProfile.userId;
     if (!isBooker && !isTalent) throw new ApiError(403, 'Not a participant in this session');
+
+    if (session.streamCallCid) {
+      try {
+        const { call } = await streamClient.video
+          .call('talent-session', session.streamCallCid)
+          .get();
+        const alreadyConnected = call?.session?.participants?.some(p => p.user?.id === userId);
+        if (alreadyConnected) {
+          throw new ApiError(
+            409,
+            'This account is already connected to this call on another device. Leave that session first.'
+          );
+        }
+      } catch (err) {
+        if (err instanceof ApiError) throw err;
+        // Stream lookup failure shouldn't itself block a legitimate join —
+        // log and fall through to the normal join flow.
+        console.error('[TalentSession] Stream call-session lookup failed:', err.message);
+      }
+    }
 
     // Recording consent gate — each party must acknowledge the disclosure
     // (POST .../acknowledge-recording) before they can join, independently.
@@ -2983,7 +3003,7 @@ export class TalentSessionService {
    * @param {object} newTime  { date: 'YYYY-MM-DD', time: 'HH:MM' }
    * @returns {{ oldSession, newSession }}
    */
-  static async reschedule(sessionId, requestingUserId, { date, time, reason , io }) {
+  static async reschedule(sessionId, requestingUserId, { date, time, reason, io }) {
     // ── 1. Load original session ────────────────────────────────────────────
     const session = await db.query.talentSessions.findFirst({
       where: eq(talentSessions.id, sessionId),
@@ -3087,7 +3107,7 @@ export class TalentSessionService {
         rescheduledFromId: sessionId, // link back
       })
       .returning();
-  if (io) {
+    if (io) {
       try {
         emitSocialChat(io, `user:${session.talentProfile.userId}`, 'talent:request:new', {
           sessionId: newSession.id,
@@ -3665,12 +3685,12 @@ export class TalentReviewService {
    *
    * Common fields: rating (1-5, required), communicationRating?, valueRating?, title?, comment?
    */
-    static async create(
+  static async create(
     reviewerId,
     {
       sessionId,
       priorityMessageId,
-      shopCustomOfferId, 
+      shopCustomOfferId,
       rating,
       communicationRating,
       valueRating,
@@ -3722,7 +3742,7 @@ export class TalentReviewService {
       });
       if (existing) throw new ApiError(409, 'You have already reviewed this priority message');
 
-            talentProfileId = payment.talentProfileId;
+      talentProfileId = payment.talentProfileId;
       sourceType = 'priority_message';
       sessionId = null;
       talentUserId = payment.talentUserId;
@@ -3777,7 +3797,7 @@ export class TalentReviewService {
         sourceType,
         sessionId,
         priorityMessageId,
-         shopCustomOfferId: shopCustomOfferId ?? null,
+        shopCustomOfferId: shopCustomOfferId ?? null,
         rating,
         communicationRating: communicationRating ?? null,
         valueRating: valueRating ?? null,
@@ -3797,16 +3817,16 @@ export class TalentReviewService {
     // ── Shared: recompute + notify ────────────────────────────────────────
     await TalentReviewService._recomputeRating(talentProfileId);
     if (sourceType === 'shop_custom_offer' && shopCustomOfferId) {
-  const { ShopCustomOfferService } = await import('./shop/shopCustomOffer.service.js');
-  await ShopCustomOfferService.logActivity(shopCustomOfferId, reviewerId, 'review_submitted', {
-    reviewId: review.id,
-    rating,
-    communicationRating: communicationRating ?? null,
-    valueRating: valueRating ?? null,
-    title: title?.trim() || null,
-    comment: comment?.trim() || null,
-  });
-}
+      const { ShopCustomOfferService } = await import('./shop/shopCustomOffer.service.js');
+      await ShopCustomOfferService.logActivity(shopCustomOfferId, reviewerId, 'review_submitted', {
+        reviewId: review.id,
+        rating,
+        communicationRating: communicationRating ?? null,
+        valueRating: valueRating ?? null,
+        title: title?.trim() || null,
+        comment: comment?.trim() || null,
+      });
+    }
     const reviewer = await db.query.users.findFirst({ where: eq(users.id, reviewerId) });
     await notifyAndEmail({
       userId: talentUserId,

@@ -616,6 +616,34 @@ export const processAutoEndSessions = async () => {
         }
       }
     }
+
+    // Confirmed sessions whose scheduled window closed without a call ever
+    // starting (billingStartedAt never set, so they never reached 'live')
+    // otherwise sat at 'confirmed' forever — nothing else ever closes these
+    // out once their scheduled end time has passed.
+    const confirmedSessions = await db.query.talentSessions.findMany({
+      where: eq(talentSessions.status, 'confirmed'),
+    });
+
+    for (const session of confirmedSessions) {
+      const scheduledEnd = new Date(
+        new Date(session.scheduledAt).getTime() + session.durationMins * 60_000
+      );
+      if (now >= scheduledEnd) {
+        try {
+          await TalentSessionService.endSession(session.id);
+          logger.info('[SessionReminder] Auto-ended never-started session', {
+            sessionId: session.id,
+          });
+        } catch (err) {
+          logger.error('[SessionReminder] Auto-end (never-started) failed', {
+            sessionId: session.id,
+            error: err.message,
+            stack: err.stack,
+          });
+        }
+      }
+    }
   } catch (err) {
     logger.error('[SessionReminder] Auto-end query failed', {
       error: err.message,

@@ -7,7 +7,7 @@ import { cronLogger as logger } from '../config/logger.js';
  * Checks for unresponded priority messages past 48h and issues refunds.
  */
 export function startPriorityMessageRefundCron() {
-  cron.schedule('*/30 * * * *', async () => {
+  const runCheck = async () => {
     logger.info('[Cron] Running priority message refund check');
     try {
       await PriorityMessageService.processExpiredRefunds();
@@ -17,7 +17,17 @@ export function startPriorityMessageRefundCron() {
         stack: err.stack,
       });
     }
-  });
+  };
 
-  logger.info('[Cron] Priority message refund job scheduled (every 30 min)');
+  cron.schedule('*/30 * * * *', runCheck);
+
+  // node-cron's schedule only lives in this process's memory — every restart
+  // resets the 30-minute countdown to zero. A payment whose 48h window
+  // closes while the server is down (or was just restarted) would otherwise
+  // sit unrefunded until this process survives a full uninterrupted 30
+  // minutes, which on a frequently-restarting server can stretch into days.
+  // Running one catch-up check immediately on startup closes that gap.
+  runCheck();
+
+  logger.info('[Cron] Priority message refund job scheduled (every 30 min, plus on startup)');
 }

@@ -23,6 +23,7 @@ import {
   varchar,
   text,
   integer,
+  numeric,
   boolean,
   jsonb,
   timestamp,
@@ -447,6 +448,10 @@ export const shopCourseLessonProgress = pgTable(
 
 export const shopCustomOfferStatusEnum = pgEnum('shop_custom_offer_status', [
   'pending',
+  // Buyer-initiated purchase of a `listingType: 'service'` shop listing: the
+  // buyer has already paid, and the offer is parked here until the seller
+  // explicitly accepts (→ 'accepted') or declines (→ 'declined' + refund).
+  'pending_talent_approval',
   'accepted',
   'declined',
   'expired',
@@ -490,6 +495,11 @@ export const shopCustomServiceOffers = pgTable(
     // Optional — the shop listing this was customized from. No cascade: the
     // offer must survive if that listing is later deleted or edited.
     basedOnProductId: uuid('based_on_product_id').references(() => shopProducts.id),
+
+    // How this offer came to exist. null = the normal seller-initiated custom
+    // offer. 'shop_listing' = the buyer clicked Buy on a service listing and
+    // paid up front, so the offer waits at 'pending_talent_approval'.
+    origin: varchar('origin', { length: 30 }),
 
     title: varchar('title', { length: 200 }).notNull(),
     description: text('description').notNull(),
@@ -548,6 +558,80 @@ deliveredAt: timestamp('delivered_at', { withTimezone: true }),
   ]
 );
 
+
+/**
+ * LIVE per-milestone state for a `paymentMode: 'milestones'` offer.
+ *
+ * Deliberately separate from shop_custom_service_offers.milestones, which
+ * stays a read-only TEMPLATE ([{label, percent}]) that several frontend
+ * components read verbatim for display. Nothing in this file or the service
+ * layer ever writes back into that jsonb column.
+ *
+ * status: pending          — not billable yet (an earlier stage is still open)
+ *       → awaiting_payment — a Stripe Checkout session is open for it
+ *       → funded           — the buyer paid; money is held on the platform
+ *       → completed        — the buyer approved the stage; 48h hold started
+ *       → released         — transferred to the seller's Connect account
+ *       → cancelled        — terminal, set when the offer is cancelled/refunded
+ *
+ * Money invariant: SUM(amount_cents) for one offer EXACTLY equals that
+ * offer's price_cents. The last row absorbs any rounding remainder — see
+ * ShopCustomOfferService._computeMilestoneAmounts.
+ *
+ * Milestone money never passes through shop_custom_service_offers
+ * .reserve_amount_cents; each row is paid out on its own by
+ * releaseCustomOfferMilestoneReserves. That separation is what makes a
+ * double transfer structurally impossible.
+ */
+export const shopOfferMilestones = pgTable(
+  'shop_offer_milestones',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    offerId: uuid('offer_id')
+      .notNull()
+      .references(() => shopCustomServiceOffers.id, { onDelete: 'cascade' }),
+    // 0-based, matching the template array's own ordering.
+    position: integer('position').notNull(),
+
+    // Snapshotted from the template at first-charge time so a later template
+    // edit can never move money that was already agreed.
+    label: varchar('label', { length: 200 }).notNull(),
+    // Numeric, not integer: validate() only requires each percent to be a
+    // finite number > 0 summing to 100, so 33.33/33.33/33.34 is legal.
+    percent: numeric('percent', { precision: 7, scale: 4 }).notNull(),
+    amountCents: integer('amount_cents').notNull(),
+
+    status: varchar('status', { length: 20 }).notNull().default('pending'),
+
+    // Filled once funded — same fee split shape as ShopOrderService.computeFees.
+    chargedCents: integer('charged_cents'),
+    sellerReceiveCents: integer('seller_receive_cents'),
+    platformShareCents: integer('platform_share_cents'),
+
+    stripeSessionId: varchar('stripe_session_id', { length: 255 }),
+    stripePaymentIntentId: varchar('stripe_payment_intent_id', { length: 255 }),
+
+    fundedAt: timestamp('funded_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    // completedAt + 48h — what the per-milestone release cron scans on.
+    releaseAt: timestamp('release_at', { withTimezone: true }),
+    releasedAt: timestamp('released_at', { withTimezone: true }),
+    transferId: varchar('transfer_id', { length: 255 }),
+
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    // Makes Stripe's at-least-once webhook redelivery a no-op — same guard
+    // shop_orders / shop_custom_service_offers use for their own session ids.
+    uniqueIndex('idx_offer_milestones_stripe_session').on(table.stripeSessionId),
+    // One row per stage, ever — the structural guard against a retried
+    // checkout creating a second schedule.
+    uniqueIndex('idx_offer_milestones_offer_position').on(table.offerId, table.position),
+    index('idx_offer_milestones_release_scan').on(table.status, table.releaseAt),
+    index('idx_offer_milestones_offer').on(table.offerId, table.position),
+  ]
+);
 
 export const shopCustomOfferDeliverables = pgTable(
   'shop_custom_offer_deliverables',

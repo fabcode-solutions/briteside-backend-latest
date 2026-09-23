@@ -75,6 +75,14 @@ export const joinLivestream = catchAsync(async (req, res) => {
   res.json({ success: true, data: result });
 });
 
+// ─── POST /livestream/:id/check-connection ────────────────────────────────
+export const checkConnection = catchAsync(async (req, res) => {
+  const userId = req.user.id;
+  const { id: livestreamId } = req.params;
+  await LivestreamService.checkConnection({ livestreamId, userId });
+  res.json({ success: true, data: { ok: true } });
+});
+
 // ─── POST /livestream/:id/leave ───────────────────────────────────────────
 export const leaveLivestream = catchAsync(async (req, res) => {
   const userId = req.user.id;

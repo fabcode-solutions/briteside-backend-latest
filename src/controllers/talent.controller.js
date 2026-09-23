@@ -905,12 +905,10 @@ export const submitReviewFromCustomOffer = catchAsync(async (req, res) => {
     comment,
   });
 
-  // Best-effort — surfaces this in the offer's Activity tab for both parties.
-  await ShopCustomOfferService.logActivity(offerId, req.user.id, 'review_submitted', {
-    rating: parseInt(rating),
-    title,
-    comment,
-  });
+  // TalentReviewService.create already logs this to the offer's Activity
+  // tab (shopCustomOfferId + sourceType === 'shop_custom_offer' path) — a
+  // second logActivity call here was duplicating every review as two
+  // identical "Customer left a review" entries.
 
   res.status(201).json({ success: true, data: { review } });
 });
