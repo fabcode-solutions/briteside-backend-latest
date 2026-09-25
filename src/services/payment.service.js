@@ -155,7 +155,12 @@ export class PaymentService {
           price_data: {
             currency: 'usd',
             product_data: {
-              name: productInfo.name,
+              // Stripe's hosted Checkout only ever shows the product name/qty
+              // for each line item — without the event title prefixed here,
+              // a buyer paying for e.g. an "Early Bird" tier has no way to
+              // tell which event that's actually for. Quantity itself is
+              // shown natively by Stripe whenever it's greater than 1.
+              name: eventInfo?.title ? `${eventInfo.title} — ${productInfo.name}` : productInfo.name,
               description: productInfo.description,
             },
             unit_amount: Math.round(parseFloat(productInfo.price) * 100),
