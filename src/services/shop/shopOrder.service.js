@@ -253,7 +253,7 @@ export class ShopOrderService {
       // cut is no longer transferred at charge time. It's held on the
       // platform's own Stripe balance (reserveAmountCents, set in the payment
       // webhook below) and moved to the seller's Connect account by a
-      // scheduled job 48h after paidAt, per the digital-content payout hold.
+      // scheduled job 7 days after paidAt, per the digital-content payout hold.
       payment_intent_data: {
         metadata,
       },
@@ -303,7 +303,7 @@ export class ShopOrderService {
         status: 'paid',
         paidAt,
         stripePaymentIntentId: paymentIntentId,
-        // Held for 48h from paidAt, then released to the seller's Connect
+        // Held for 7 days from paidAt, then released to the seller's Connect
         // account by the reserve-release cron — see reserveAmountCents comment
         // on the shopOrders schema.
         reserveAmountCents: order.sellerReceiveCents,

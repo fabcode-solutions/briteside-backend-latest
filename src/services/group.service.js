@@ -202,6 +202,9 @@ export class GroupService {
     if (!groupFields.coverImageUrl) {
       throw new ApiError(400, 'Cover image is required for creating a group.');
     }
+    if (!isPlus && MediaModerationService.isVideoUrl(groupFields.coverImageUrl)) {
+      throw new ApiError(403, 'Video group covers are a Briteside Plus feature.');
+    }
     if (media.length > MAX_GROUP_MEDIA) {
       throw new ApiError(400, `Maximum ${MAX_GROUP_MEDIA} media items allowed.`);
     }
@@ -750,6 +753,9 @@ export class GroupService {
       groupFields.coverImageUrl !== undefined &&
       groupFields.coverImageUrl !== oldGroup.coverImageUrl
     ) {
+      if (!isPlus && MediaModerationService.isVideoUrl(groupFields.coverImageUrl)) {
+        throw new ApiError(403, 'Video group covers are a Briteside Plus feature.');
+      }
       try {
         if (oldGroup.coverImageUrl) {
           const file = await FileManagementService.findByUrlOrKey(oldGroup.coverImageUrl);
@@ -1804,7 +1810,15 @@ export class GroupTagService {
     if (!tagNames || tagNames.length === 0) return [];
 
     return await db.transaction(async tx => {
-      const uniqueNames = [...new Set(tagNames.map(n => n.trim().toLowerCase()))];
+      // Strip any leading '#' the caller typed — the tag-input UI already
+      // shows a decorative '#' next to the field, so a user typing their own
+      // on top of it is the expected friction point, not the exception. Done
+      // server-side (not just client-side) since the "rename saved tag" flow
+      // posts here directly too.
+      const uniqueNames = [
+        ...new Set(tagNames.map(n => n.trim().replace(/^#+/, '').toLowerCase()).filter(Boolean)),
+      ];
+      if (uniqueNames.length === 0) return [];
 
       await tx
         .insert(tags)
