@@ -23,6 +23,8 @@ import {
   getShopSettings,
   setShopRefundPolicy,
   createShopCheckout,
+  getShopIapBuyOptions,
+  finalizeShopIapPurchase,
   listShopPurchases,
   getShopDownload,
   getShopStats,
@@ -217,6 +219,9 @@ router.put(
 router.delete('/products/:productId', deleteShopProduct);
 router.post('/products/:productId/view', recordShopProductView);
 router.post('/products/:productId/checkout', createShopCheckout);
+// App-only — the web checkout above is untouched by these two.
+router.get('/products/:productId/iap/buy-options', getShopIapBuyOptions);
+router.post('/products/:productId/iap/purchase', finalizeShopIapPurchase);
 router.post('/products/:productId/pin', pinShopProduct);
 router.delete('/products/:productId/pin', unpinShopProduct);
 router.get('/products/:productId/analytics', getShopProductAnalytics);

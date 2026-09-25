@@ -108,6 +108,21 @@ export const shopProducts = pgTable(
     viewsCount: integer('views_count').notNull().default(0),
     salesCount: integer('sales_count').notNull().default(0),
 
+    // ── In-app purchase store registration (App-only; web checkout never
+    // reads these) — 'product' | 'course' | 'link' listings with a price get
+    // mirrored as a purchasable item on Apple/Google so the App can offer a
+    // "Pay in App" option alongside the existing Stripe "Pay on Web" one.
+    // iapProductId is the same identifier registered with BOTH stores (a
+    // product only needs one, generated once and reused).
+    iapProductId: varchar('iap_product_id', { length: 40 }),
+    appleIapStatus: varchar('apple_iap_status', { length: 20 }).notNull().default('not_registered'),
+    // not_registered | pending | registered | failed
+    appleIapRegisteredAt: timestamp('apple_iap_registered_at', { withTimezone: true }),
+    appleIapError: text('apple_iap_error'),
+    googleIapStatus: varchar('google_iap_status', { length: 20 }).notNull().default('not_registered'),
+    googleIapRegisteredAt: timestamp('google_iap_registered_at', { withTimezone: true }),
+    googleIapError: text('google_iap_error'),
+
     // Soft delete: past buyers must still be able to download, and refund
     // disputes must still resolve, so rows are never physically removed.
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
@@ -119,6 +134,7 @@ export const shopProducts = pgTable(
     index('idx_shop_products_deleted').on(table.deletedAt),
     index('idx_shop_products_created_at').on(table.createdAt),
     index('idx_shop_products_user_pinned').on(table.userId, table.isPinned, table.pinOrder),
+    uniqueIndex('idx_shop_products_iap_product_id').on(table.iapProductId),
     check(
       'shop_pin_order_range',
       sql`${table.pinOrder} IS NULL OR ${table.pinOrder} BETWEEN 1 AND 9`
@@ -191,8 +207,35 @@ export const shopOrders = pgTable(
     // 7-day payout hold — the seller's cut isn't transferred at checkout; it's
     // held on the platform's own Stripe balance and moved to the seller's
     // Connect account by a scheduled job once 7 days have passed since paidAt.
+    // Not used for an in-app-purchase order (see purchaseChannel below) — an
+    // IAP sale never touches Stripe, so there's no Stripe balance to release
+    // from; reserveAmountCents stays 0 and reserveReleasedAt stays null for
+    // those, and sellerReceiveCents there is owed-but-settled-separately.
     reserveAmountCents: integer('reserve_amount_cents').default(0),
     reserveReleasedAt: timestamp('reserve_released_at', { withTimezone: true }),
+
+    // ── In-app purchase (App-only) ──────────────────────────────────────────
+    // 'web' orders (the only kind before this feature, and everything the
+    // existing web frontend creates) are charged the plain priceCents via
+    // Stripe as before. An App buyer choosing "Pay in App" instead pays
+    // priceCents + 30% through Apple's/Google's own purchase flow — no
+    // Stripe session, no stripePaymentIntentId, verified server-to-server
+    // against the store's API instead of a Stripe webhook.
+    purchaseChannel: varchar('purchase_channel', { length: 12 }).notNull().default('web'),
+    // 'web' | 'apple_iap' | 'google_iap'
+    iapProductId: varchar('iap_product_id', { length: 40 }),
+    // Apple: transactionId. Google: purchaseToken. Unique per store purchase —
+    // makes a redelivered/retried verification call a no-op.
+    iapTransactionId: varchar('iap_transaction_id', { length: 255 }),
+    // Apple only — the transaction chain's original id (renewals/restores
+    // share one; for a one-time non-consumable it equals iapTransactionId,
+    // kept separately since Apple always reports both).
+    iapOriginalTransactionId: varchar('iap_original_transaction_id', { length: 255 }),
+    iapVerifiedAt: timestamp('iap_verified_at', { withTimezone: true }),
+    // Google requires the purchase to be acknowledged within 3 days or it
+    // auto-refunds the buyer — set once ShopIapService.acknowledgeGooglePurchase
+    // succeeds. Always true/irrelevant for 'web' and 'apple_iap' orders.
+    iapAcknowledged: boolean('iap_acknowledged').notNull().default(false),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -206,6 +249,8 @@ export const shopOrders = pgTable(
     index('idx_shop_orders_seller_paid').on(table.sellerId, table.paidAt),
     // Makes Stripe's at-least-once webhook redelivery a no-op.
     uniqueIndex('idx_shop_orders_stripe_session').on(table.stripeSessionId),
+    // Makes a redelivered/retried IAP verification call a no-op the same way.
+    uniqueIndex('idx_shop_orders_iap_transaction').on(table.iapTransactionId),
   ]
 );
 
