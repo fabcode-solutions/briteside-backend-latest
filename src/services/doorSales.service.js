@@ -285,7 +285,10 @@ export class DoorSalesService {
       price_data: {
         currency: 'usd',
         product_data: {
-          name: li.tier.name,
+          // Same as the regular checkout path (payment.service.js) — without
+          // the event title, a buyer only sees the tier name on Stripe's
+          // hosted page with no indication of which event it's for.
+          name: event.title ? `${event.title} — ${li.tier.name}` : li.tier.name,
           description: li.tier.description || 'Door sale ticket',
         },
         unit_amount: Math.round(Number(li.tier.doorSalePrice) * 100),

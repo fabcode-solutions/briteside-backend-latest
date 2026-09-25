@@ -4,7 +4,7 @@ import { cronLogger as logger } from '../config/logger.js';
 
 /**
  * Runs every 30 minutes.
- * Checks for unresponded priority messages past 48h and issues refunds.
+ * Checks for unresponded priority messages past 72h and issues refunds.
  */
 export function startPriorityMessageRefundCron() {
   const runCheck = async () => {
@@ -22,7 +22,7 @@ export function startPriorityMessageRefundCron() {
   cron.schedule('*/30 * * * *', runCheck);
 
   // node-cron's schedule only lives in this process's memory — every restart
-  // resets the 30-minute countdown to zero. A payment whose 48h window
+  // resets the 30-minute countdown to zero. A payment whose 72h window
   // closes while the server is down (or was just restarted) would otherwise
   // sit unrefunded until this process survives a full uninterrupted 30
   // minutes, which on a frequently-restarting server can stretch into days.

@@ -38,6 +38,7 @@ import {
   getMyReviews,
   getTalentProfileByUsername,
   rescheduleSession,
+  createSessionTipCheckout,
   getMyFavoriteIds,
   toggleFavorite,
   shareTalentProfile,
@@ -133,6 +134,7 @@ router.delete('/me/payout-methods/:methodId', authMiddleware, deletePayoutMethod
 
 router.post('/sessions/checkout', authMiddleware, createSessionCheckout);
 router.post('/sessions/book', authMiddleware, bookSession);
+router.post('/sessions/:sessionId/tip/checkout', authMiddleware, createSessionTipCheckout);
 
 router.get('/sessions/:sessionId', authMiddleware, getSession);
 router.put(

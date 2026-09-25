@@ -9,6 +9,7 @@ import {
   jsonb,
   index,
   decimal,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { users } from './users.js';
@@ -57,6 +58,13 @@ export const talentSessions = pgTable(
     // Scheduling
     scheduledAt: timestamp('scheduled_at', { withTimezone: true }).notNull(),
     durationMins: integer('duration_mins').notNull(), // 15 | 30 | 45 | 60
+
+    // How long the talent has to confirm/decline before this auto-cancels —
+    // set once at booking time (see TalentSessionService._computeBookingWindow):
+    // 24h if scheduledAt is under 7 days out, 72h if it's 7+ days out. Nullable
+    // so pre-existing rows just fall back to the older scheduledAt-passed check
+    // in processExpiredPendingSessions.
+    acceptDeadline: timestamp('accept_deadline', { withTimezone: true }),
 
     // Join & billing timestamps
     joinAllowedAt: timestamp('join_allowed_at', { withTimezone: true }).notNull(), // scheduledAt - 5min
@@ -156,5 +164,40 @@ export const talentSessions = pgTable(
     index('idx_talent_sessions_reminder_1h').on(table.reminder1hSentAt),
     index('idx_talent_sessions_reminder_10m').on(table.reminder10mSentAt),
     index('idx_talent_sessions_reminder_1m').on(table.reminder1mSentAt),
+  ]
+);
+
+/**
+ * talent_session_tips — same shape and money flow as shop_custom_offer_tips:
+ * a tip is a second, standalone Stripe Checkout charge, the standard 7.5%
+ * Platform & Service Fee is added on top (buyer pays it, talent keeps the
+ * full tip amount), and it's held (not transferred) until the same 7-day
+ * clearing window applies via the reserve-release cron.
+ */
+export const talentSessionTips = pgTable(
+  'talent_session_tips',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    sessionId: uuid('session_id')
+      .notNull()
+      .references(() => talentSessions.id, { onDelete: 'cascade' }),
+    bookerId: uuid('booker_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    talentUserId: uuid('talent_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    amountCents: integer('amount_cents').notNull(), // what the talent receives (100%)
+    chargedCents: integer('charged_cents').notNull(), // what the booker pays (tip + 7.5% fee)
+    platformAndServiceFeeCents: integer('platform_and_service_fee_cents').notNull(),
+    status: varchar('status', { length: 20 }).notNull().default('pending'), // pending → paid
+    stripeSessionId: varchar('stripe_session_id', { length: 255 }),
+    stripePaymentIntentId: varchar('stripe_payment_intent_id', { length: 255 }),
+    paidAt: timestamp('paid_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    index('idx_talent_session_tips_session').on(table.sessionId),
+    uniqueIndex('idx_talent_session_tips_stripe_session').on(table.stripeSessionId),
   ]
 );

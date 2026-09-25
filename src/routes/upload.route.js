@@ -35,6 +35,14 @@ const upload = multer({
       'application/vnd.ms-excel', // .xls
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
       'text/csv', // csv (often uploaded as spreadsheets)
+      // Word variations
+      'application/msword', // .doc
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+      // PowerPoint variations
+      'application/vnd.ms-powerpoint', // .ppt
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation', // .pptx
+      'text/plain', // .txt
+      'application/rtf', // .rtf
     ]);
 
     // Extension-based fallback for when browsers send generic types
@@ -45,6 +53,12 @@ const upload = multer({
       '.xls',
       '.xlsx',
       '.csv',
+      '.doc',
+      '.docx',
+      '.ppt',
+      '.pptx',
+      '.txt',
+      '.rtf',
       // common audio extensions
       '.mp3',
       '.wav',
@@ -69,7 +83,9 @@ const upload = multer({
     }
 
     return cb(
-      new Error('Only images, videos, audio, PDF, ZIP, and Excel files are allowed'),
+      new Error(
+        'Only images, videos, audio, PDF, Word, PowerPoint, Excel, ZIP, and text files are allowed'
+      ),
       false
     );
   },

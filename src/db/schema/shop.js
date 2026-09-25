@@ -188,9 +188,9 @@ export const shopOrders = pgTable(
 
     paidAt: timestamp('paid_at', { withTimezone: true }),
 
-    // 48h payout hold — the seller's cut isn't transferred at checkout; it's
+    // 7-day payout hold — the seller's cut isn't transferred at checkout; it's
     // held on the platform's own Stripe balance and moved to the seller's
-    // Connect account by a scheduled job once 48h have passed since paidAt.
+    // Connect account by a scheduled job once 7 days have passed since paidAt.
     reserveAmountCents: integer('reserve_amount_cents').default(0),
     reserveReleasedAt: timestamp('reserve_released_at', { withTimezone: true }),
 
@@ -538,7 +538,7 @@ deliveredAt: timestamp('delivered_at', { withTimezone: true }),
 
     // Delivery-based escrow — the seller's cut from each payment (deposit,
     // remainder, tip) isn't transferred at charge time; it accumulates here
-    // and is moved to the seller's Connect account by a scheduled job 48h
+    // and is moved to the seller's Connect account by a scheduled job 7 days
     // after deliveredAt. deliveredAt resets to null on a revision request,
     // which naturally re-holds any not-yet-released amount too.
     reserveAmountCents: integer('reserve_amount_cents').default(0),
@@ -570,7 +570,7 @@ deliveredAt: timestamp('delivered_at', { withTimezone: true }),
  * status: pending          — not billable yet (an earlier stage is still open)
  *       → awaiting_payment — a Stripe Checkout session is open for it
  *       → funded           — the buyer paid; money is held on the platform
- *       → completed        — the buyer approved the stage; 48h hold started
+ *       → completed        — the buyer approved the stage; 7-day hold started
  *       → released         — transferred to the seller's Connect account
  *       → cancelled        — terminal, set when the offer is cancelled/refunded
  *
@@ -613,7 +613,7 @@ export const shopOfferMilestones = pgTable(
 
     fundedAt: timestamp('funded_at', { withTimezone: true }),
     completedAt: timestamp('completed_at', { withTimezone: true }),
-    // completedAt + 48h — what the per-milestone release cron scans on.
+    // completedAt + 7 days — what the per-milestone release cron scans on.
     releaseAt: timestamp('release_at', { withTimezone: true }),
     releasedAt: timestamp('released_at', { withTimezone: true }),
     transferId: varchar('transfer_id', { length: 255 }),

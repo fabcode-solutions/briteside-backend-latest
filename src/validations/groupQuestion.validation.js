@@ -46,7 +46,12 @@ export const reorderQuestionsSchema = z.object({
 
 export const joinAnswerItemSchema = z.object({
   questionId: z.string().uuid('Invalid question ID'),
-  answer: z.string().min(1, 'Answer cannot be empty'),
+  // Deliberately no .min(1) here — an empty/blank answer is a "missing
+  // answer", and groupQuestion.service.js's own missing-answers check
+  // already produces a friendly, per-field {missing: [...]} error for that.
+  // Rejecting it here instead would short-circuit the request before it
+  // ever reaches that check, surfacing a raw Zod error to the user instead.
+  answer: z.string(),
   meta: z.record(z.string(), z.unknown()).optional().default({}),
 });
 
