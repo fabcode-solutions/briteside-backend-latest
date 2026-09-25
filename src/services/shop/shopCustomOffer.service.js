@@ -16,6 +16,7 @@ import { getRedirectUrls } from '../../utils/redirect-urls.js';
 import { UserSpendService } from '../userSpend.service.js';
 import { createNotification } from '../notification.service.js';
 import { ShopOrderService } from './shopOrder.service.js';
+import { calculatePlatformAndServiceFeeCents } from '../../utils/orderProcessingFee.js';
 import { emitSocialChat } from '../../socket/emitter.js';
 import { ShopDeliverableService } from './shopDeliverable.service.js';
 import { shopCustomOfferDeliverables } from '../../db/schema/index.js';
@@ -38,10 +39,10 @@ const CREATABLE_PAYMENT_MODES = PAYMENT_MODES.filter(m => m !== 'deposit');
 const MAX_MILESTONES = 10;
 const OFFER_TTL_DAYS = 7;
 const AUTO_APPROVE_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
-// A milestone's funds are transferred to the seller 48h after the BUYER
+// A milestone's funds are transferred to the seller 7 days after the BUYER
 // approves that stage — the per-stage equivalent of the whole-offer
-// deliveredAt + 48h hold in cron/reserveRelease.js.
-const MILESTONE_RELEASE_HOLD_MS = 48 * 60 * 60 * 1000;
+// deliveredAt + 7-day hold in cron/reserveRelease.js (CUSTOM_OFFER_RESERVE_HOLD_HOURS).
+const MILESTONE_RELEASE_HOLD_MS = 7 * 24 * 60 * 60 * 1000;
 // Statuses a milestone can no longer be moved INTO 'funded' from. Every
 // funding write is conditional on NOT being one of these, which is what makes
 // Stripe's at-least-once webhook redelivery a no-op instead of a second charge
@@ -346,6 +347,7 @@ export class ShopCustomOfferService {
         note: shopCustomServiceOffers.note,
         attachments: shopCustomServiceOffers.attachments,
         deliveryState: shopCustomServiceOffers.deliveryState, // NEW
+        deliveredAt: shopCustomServiceOffers.deliveredAt,
         revisionsUsedCount: shopCustomServiceOffers.revisionsUsedCount,
         status: shopCustomServiceOffers.status,
         chargedCents: shopCustomServiceOffers.chargedCents,
@@ -959,7 +961,13 @@ export class ShopCustomOfferService {
             currency: 'usd',
             unit_amount: installmentBase,
             product_data: {
-              name: offer.title,
+              // Same "which milestone is this?" label as createMilestoneFundingCheckout
+              // below — milestone 1 is charged right here at purchase time, so
+              // without this the buyer only ever sees the bare offer title on
+              // Stripe's checkout page with no indication of what's being billed.
+              name: milestoneRows
+                ? `${offer.title} — ${milestoneRows[0].label} (milestone 1 of ${milestoneRows.length})`
+                : offer.title,
               ...(product.coverUrl ? { images: [product.coverUrl] } : {}),
             },
           },
@@ -982,7 +990,7 @@ export class ShopCustomOfferService {
       ...(paymentMode !== 'full' && { customer_creation: 'always' }),
       metadata,
       // No transfer_data/application_fee_amount — the seller's cut accumulates
-      // in reserveAmountCents and is released 48h after delivery.
+      // in reserveAmountCents and is released 7 days after delivery.
       payment_intent_data: {
         metadata,
         ...(paymentMode !== 'full' && { setup_future_usage: 'off_session' }),
@@ -1122,7 +1130,11 @@ export class ShopCustomOfferService {
           price_data: {
             currency: 'usd',
             unit_amount: installmentBase,
-            product_data: { name: offer.title },
+            product_data: {
+              name: milestoneRows
+                ? `${offer.title} — ${milestoneRows[0].label} (milestone 1 of ${milestoneRows.length})`
+                : offer.title,
+            },
           },
           quantity: 1,
         },
@@ -1148,7 +1160,7 @@ export class ShopCustomOfferService {
       // No transfer_data/application_fee_amount here on purpose — the
       // seller's cut is no longer transferred at charge time. It accumulates
       // in reserveAmountCents and is moved to the seller's Connect account by
-      // a scheduled job 48h after the work is delivered.
+      // a scheduled job 7 days after the work is delivered.
       payment_intent_data: {
         metadata,
         // NEW — tells Stripe to keep this payment method attached to the
@@ -1212,7 +1224,7 @@ export class ShopCustomOfferService {
 
     // A milestones offer's money must NEVER enter reserveAmountCents. That
     // column is what releaseCustomOfferReserves pays out against the WHOLE
-    // offer 48h after deliveredAt; milestone money is released per stage by
+    // offer 7 days after deliveredAt; milestone money is released per stage by
     // releaseCustomOfferMilestoneReserves instead. Feeding both from the same
     // payment would transfer it twice. Leaving it at 0 here keeps the two
     // release paths structurally incapable of overlapping — and still lets
@@ -1227,7 +1239,7 @@ export class ShopCustomOfferService {
         stripeCustomerId, // NEW
         dueDate: computedDueDate, // NEW — the real due date, set here for the first time
         resolvedAt: paidAt,
-        // Held (not transferred) until 48h after delivery — see createAcceptCheckout.
+        // Held (not transferred) until 7 days after delivery — see createAcceptCheckout.
         ...(isMilestones ? {} : { reserveAmountCents: offer.sellerReceiveCents ?? 0 }),
         updatedAt: paidAt,
       })
@@ -1387,7 +1399,7 @@ export class ShopCustomOfferService {
    * Refunds every refundable stage of a milestones offer.
    *
    * Refundable = 'funded' (paid, buyer hasn't approved it yet) and 'completed'
-   * with releasedAt still null (approved, but still inside its 48h hold, so the
+   * with releasedAt still null (approved, but still inside its 7-day hold, so the
    * money is on the platform's own balance).
    *
    * POLICY — a stage that has already 'released' CANNOT be refunded: those
@@ -1937,7 +1949,7 @@ export class ShopCustomOfferService {
         sellerReceiveCents: (offer.sellerReceiveCents || 0) + fees.sellerReceiveCents,
         basePriceCoveredCents: (offer.basePriceCoveredCents || 0) + remainingCents,
         platformShareCents: (offer.platformShareCents || 0) + fees.platformShareCents,
-        // Held (not transferred) until 48h after delivery — see createAcceptCheckout.
+        // Held (not transferred) until 7 days after delivery — see createAcceptCheckout.
         reserveAmountCents: (offer.reserveAmountCents || 0) + fees.sellerReceiveCents,
         stripePaymentIntentId: paymentIntentId,
         updatedAt: paidAt,
@@ -2106,7 +2118,7 @@ export class ShopCustomOfferService {
         : { customer_email: buyer?.email }),
       metadata,
       // No transfer_data/application_fee_amount here on purpose — see
-      // createAcceptCheckout. This stage's seller cut is held until 48h after
+      // createAcceptCheckout. This stage's seller cut is held until 7 days after
       // the buyer approves it, then transferred by
       // releaseCustomOfferMilestoneReserves.
       payment_intent_data: { metadata },
@@ -2286,7 +2298,7 @@ export class ShopCustomOfferService {
       title: 'Milestone approved',
       message: `"${approved.label}" on "${offer.title}" was approved${
         auto ? ' automatically' : ''
-      } — those funds are released to you in 48 hours.`,
+      } — those funds are held for 7 days, then take 2-3 more business days to reach your account (about 10 days total).`,
       type: 'shop_custom_offer',
       relatedId: offer.id,
       redirectTo: `/bookings?offerId=${offer.id}`,
@@ -2718,10 +2730,20 @@ export class ShopCustomOfferService {
 
   // ═══════════════════════════════ Tipping ═════════════════════════════════
 
-  /** No platform commission — buyer covers just the card processing cost. */
+  /**
+   * Standard 7.5% Platform & Service Fee, same formula and buyer-pays-on-top
+   * shape as the base order (ShopOrderService.computeFees) — the seller still
+   * receives the full tip amount; the fee is additional revenue on top of it,
+   * not deducted from it.
+   */
   static computeTipFees(amountCents) {
-    const chargedCents = Math.round((amountCents + 30) / 0.971);
-    return { chargedCents, applicationFeeCents: chargedCents - amountCents };
+    const platformAndServiceFeeCents = calculatePlatformAndServiceFeeCents(amountCents);
+    const chargedCents = amountCents + platformAndServiceFeeCents;
+    return {
+      chargedCents,
+      platformAndServiceFeeCents,
+      applicationFeeCents: platformAndServiceFeeCents,
+    };
   }
 
   static async createTipCheckout(buyerId, offerId, { amountCents } = {}) {
@@ -2777,8 +2799,16 @@ export class ShopCustomOfferService {
         {
           price_data: {
             currency: 'usd',
-            unit_amount: fees.chargedCents,
+            unit_amount: amountCents,
             product_data: { name: `Tip for "${offer.title}"` },
+          },
+          quantity: 1,
+        },
+        {
+          price_data: {
+            currency: 'usd',
+            unit_amount: fees.platformAndServiceFeeCents,
+            product_data: { name: 'Platform & Service Fee' },
           },
           quantity: 1,
         },
@@ -2825,8 +2855,9 @@ export class ShopCustomOfferService {
       .returning();
     if (!updated) return;
 
-    // No platform commission on tips — the seller's cut is the full tip
-    // amount. Held (not transferred) until 48h after delivery, same as the
+    // The seller's cut is the full tip amount (the 7.5% Platform & Service
+    // Fee is paid on top by the buyer, not deducted from it — see
+    // computeTipFees). Held (not transferred) until 7 days after delivery, same as the
     // rest of the offer's payments — see createAcceptCheckout. A tip often
     // arrives after the offer's earlier reserve already released, which is
     // exactly why release zeroes reserveAmountCents instead of just

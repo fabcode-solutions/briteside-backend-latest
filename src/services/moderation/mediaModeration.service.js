@@ -346,11 +346,15 @@ export class MediaModerationService {
   /** Split a mixed URL list into image/video buckets by extension. */
   static splitUrls(urls) {
     const cleaned = (urls || []).filter(Boolean);
-    const videoUrls = cleaned.filter(
-      u => SUPPORTED_VIDEO_URL.test(u) || /\.(webm|avi|mpe?g)(\?.*)?$/i.test(u)
-    );
+    const videoUrls = cleaned.filter(u => MediaModerationService.isVideoUrl(u));
     const imageUrls = cleaned.filter(u => !videoUrls.includes(u));
     return { imageUrls, videoUrls };
+  }
+
+  /** Whether a single URL points at a video file, by extension. */
+  static isVideoUrl(url) {
+    if (!url) return false;
+    return SUPPORTED_VIDEO_URL.test(url) || /\.(webm|avi|mpe?g)(\?.*)?$/i.test(url);
   }
 
   /**

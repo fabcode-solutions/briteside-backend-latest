@@ -19,30 +19,36 @@ const stripe = config.stripe?.secretKey
   ? new Stripe(config.stripe.secretKey, { apiVersion: '2026-03-25.dahlia' })
   : null;
 
-// Session reserves ("deliver-first escrow"): released 48h after the session
-// is marked completed (billingEndedAt), not after it was merely scheduled.
-const SESSION_RESERVE_HOLD_HOURS = 48;
+// Session reserves ("deliver-first escrow"): released 7 days (168h) after the
+// session is marked completed (billingEndedAt), not after it was merely
+// scheduled — confirmed payout policy, matching the same 7-day hold used
+// everywhere else money is held for a seller/talent.
+const SESSION_RESERVE_HOLD_HOURS = 24 * 7;
 
 // Order reserves: released N days after the event ends (dispute buffer).
 // Per Briteside payout guidelines: T+2 (48 hours / 2 business days) post-event.
 const EVENT_RESERVE_HOLD_DAYS = 2;
 
-// Shop orders (digital content, courses, services): flat 48h rolling payout
-// from paidAt — delivery is instant/electronic, so there's nothing to wait
-// on besides the hold window itself.
-const SHOP_ORDER_RESERVE_HOLD_HOURS = 48;
+// Shop orders (digital content, courses, services): flat 7-day (168h) rolling
+// payout from paidAt — delivery is instant/electronic, so there's nothing to
+// wait on besides the hold window itself.
+const SHOP_ORDER_RESERVE_HOLD_HOURS = 24 * 7;
 
 // Priority messages ("SLA escrow"): released 48h after the talent replies
 // (repliedAt), not at purchase.
 const PRIORITY_MESSAGE_RESERVE_HOLD_HOURS = 48;
 
-// Custom service offers: released 48h after delivery (deliveredAt). Unlike
-// the other three, an offer can accumulate multiple payments (deposit,
-// remainder, tip) — some arriving after an earlier release already fired —
-// so this one transfers only the current reserveAmountCents and decrements
-// by that same amount rather than gating on reserveReleasedAt being null,
-// letting a later payment always be picked up on its own next pass.
-const CUSTOM_OFFER_RESERVE_HOLD_HOURS = 48;
+// Custom service offers: released 7 days (168h) after delivery (deliveredAt) —
+// confirmed payout policy: a 7-day hold, then ~2-3 further business days for
+// Stripe's own Connect payout schedule to actually deposit it in the
+// talent's bank (that second leg is Stripe's timing, not something this
+// cron controls). Unlike the other three, an offer can accumulate multiple
+// payments (deposit, remainder, tip) — some arriving after an earlier
+// release already fired — so this one transfers only the current
+// reserveAmountCents and decrements by that same amount rather than gating
+// on reserveReleasedAt being null, letting a later payment always be
+// picked up on its own next pass.
+const CUSTOM_OFFER_RESERVE_HOLD_HOURS = 24 * 7;
 
 export async function transferReserve(
   stripeAccountId,
@@ -78,19 +84,23 @@ export async function releaseSessionReserves(force = false) {
   }
   const cutoff = new Date(Date.now() - SESSION_RESERVE_HOLD_HOURS * 3_600_000);
 
+  // Not gated on reserveReleasedAt being null — same reasoning as
+  // releaseCustomOfferReserves below. A tip (TalentSessionService.
+  // handleTipPaymentWebhook) can land well after the session's own payout
+  // already released, adding back into reserveAmountCents; gating on "never
+  // released before" would leave that tip stuck forever.
   const sessionWhere = force
-    ? and(gt(talentSessions.reserveAmountCents, 0), isNull(talentSessions.reserveReleasedAt))
+    ? gt(talentSessions.reserveAmountCents, 0)
     : and(
         eq(talentSessions.status, 'completed'),
         gt(talentSessions.reserveAmountCents, 0),
-        isNull(talentSessions.reserveReleasedAt),
         lte(talentSessions.billingEndedAt, cutoff)
       );
 
   const sessions = await db.query.talentSessions.findMany({
     where: sessionWhere,
     with: { talentProfile: { columns: { userId: true } } },
-    columns: { id: true, reserveAmountCents: true, bookerId: true },
+    columns: { id: true, reserveAmountCents: true, bookerId: true, updatedAt: true },
   });
 
   logger.info('[Cron] ReserveRelease: session candidates found', { count: sessions.length, force });
@@ -120,29 +130,38 @@ export async function releaseSessionReserves(force = false) {
       continue;
     }
 
-    const transferId = await transferReserve(
-      connectAccount.stripeAccountId,
-      session.reserveAmountCents,
-      {
-        description: `Reserve release — session ${session.id}`,
-        idempotencyKey: `reserve-session-${session.id}`,
-        metadata: {
-          type: 'reserve_release',
-          source: 'talent_session',
-          sessionId: session.id,
-          bookerId: session.bookerId ?? '',
-        },
-      }
-    );
+    // Snapshot the amount to transfer — a concurrent payment (e.g. a tip
+    // landing mid-loop) only adds to reserveAmountCents after this point, so
+    // decrementing by this exact amount below never loses it.
+    const amountToRelease = session.reserveAmountCents;
+
+    const transferId = await transferReserve(connectAccount.stripeAccountId, amountToRelease, {
+      description: `Reserve release — session ${session.id}`,
+      // Keyed on updatedAt, not the amount — stays stable if the cron
+      // retries this exact batch, but changes once new money (e.g. a late
+      // tip) bumps updatedAt again, so that next batch gets its own key
+      // instead of colliding with (and being silently dropped by) this one.
+      idempotencyKey: `reserve-session-${session.id}-${new Date(session.updatedAt).getTime()}`,
+      metadata: {
+        type: 'reserve_release',
+        source: 'talent_session',
+        sessionId: session.id,
+        bookerId: session.bookerId ?? '',
+      },
+    });
 
     if (transferId) {
       await db
         .update(talentSessions)
-        .set({ reserveReleasedAt: new Date() })
+        .set({
+          reserveAmountCents: sql`${talentSessions.reserveAmountCents} - ${amountToRelease}`,
+          reserveReleasedAt: new Date(),
+        })
         .where(eq(talentSessions.id, session.id));
       released++;
       logger.info('[Cron] ReserveRelease: session reserve released', {
         sessionId: session.id,
+        amountUsd: (amountToRelease / 100).toFixed(2),
         transferId,
       });
     } else {

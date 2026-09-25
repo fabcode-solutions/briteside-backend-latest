@@ -41,6 +41,13 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3330';
 const WEBHOOK_SECRET =
   process.env.STRIPE_PRIORITY_MESSAGE_WEBHOOK_SECRET || process.env.STRIPE_WEBHOOK_SECRET;
 
+// The talent's guaranteed-reply SLA window. A reply landing after this closes
+// the item out as 'expired' instead of 'replied' — no money changes hands —
+// and the cron (processExpiredRefunds) refunds the sender for whatever is
+// still unreplied once it elapses. Shared by releaseOnReply() and the cron so
+// the two can never disagree about when the window closes.
+const REPLY_WINDOW_MS = 72 * 60 * 60 * 1000;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const MONTH_ABBR = [
@@ -219,7 +226,7 @@ export class PriorityMessageService {
     }
 
     // One outstanding paid message per talent at a time — the sender must wait
-    // for the talent's reply (status → 'replied') or the 48h auto-refund
+    // for the talent's reply (status → 'replied') or the 72h auto-refund
     // (status → 'refunded'/'partial_refunded') before paying for another.
     if (await this.hasPendingMessage(senderId, talentProfileId)) {
       throw new ApiError(
@@ -385,7 +392,7 @@ export class PriorityMessageService {
                       msgList.length > 1
                         ? `${msgList.length} Priority Messages to ${talentName}`
                         : `Priority Message to ${talentName}`,
-                    description: 'Guaranteed response within 48 hours',
+                    description: 'Guaranteed response within 72 hours',
                   },
                 },
                 quantity: 1,
@@ -973,7 +980,7 @@ export class PriorityMessageService {
       );
       for (const a of attachmentRows) {
         const moderationStatus = attachmentModerationMap.get(a.mediaId) ?? 'approved';
-        // A refund not caused by moderation (e.g. 48h no-reply) stays hidden,
+        // A refund not caused by moderation (e.g. 72h no-reply) stays hidden,
         // same as before. A moderation-rejected one stays visible so the
         // inbox can show a "removed for violating guidelines" placeholder.
         if (a.status === 'refunded' && moderationStatus !== 'rejected') continue;
@@ -1245,7 +1252,7 @@ export class PriorityMessageService {
    * Call this from SocialChatService.sendMessage() (or the controller right
    * after it) whenever the SENDER of the new message is a talent who has
    * outstanding priority payments in that conversation. Marks them 'replied'
-   * immediately rather than waiting for the 48h cron — matches the UI's
+   * immediately rather than waiting for the 72h cron — matches the UI's
    * "Reply to release $X payment" promise.
    *
    * Safe to call on every message send; it's a no-op if there's nothing
@@ -1283,25 +1290,66 @@ export class PriorityMessageService {
           inArray(priorityMessageItems.paymentId, paymentIds),
           eq(priorityMessageItems.messageId, replyToMessageId)
         ),
-        columns: { id: true, paymentId: true, repliedAt: true },
+        columns: { id: true, paymentId: true, repliedAt: true, deliveredAt: true },
       });
     }
 
     if (!itemToRelease) {
-      // Fallback: first delivered item by position (prefer unreplied first)
-      itemToRelease = await db.query.priorityMessageItems.findFirst({
+      // Fallback: first delivered item by position, preferring one that's
+      // still within the reply window over one that's already expired —
+      // a plain (non-quoted) reply should land on something it can still
+      // earn for, when there's a choice.
+      const candidates = await db.query.priorityMessageItems.findMany({
         where: and(
           inArray(priorityMessageItems.paymentId, paymentIds),
           sql`${priorityMessageItems.messageId} IS NOT NULL`
         ),
         orderBy: (i, { asc }) => [asc(i.position)],
-        columns: { id: true, paymentId: true, repliedAt: true },
+        columns: { id: true, paymentId: true, repliedAt: true, deliveredAt: true },
       });
+      itemToRelease =
+        candidates.find(
+          i => !i.repliedAt && (!i.deliveredAt || Date.now() - i.deliveredAt.getTime() <= REPLY_WINDOW_MS)
+        ) ?? candidates[0] ?? null;
     }
 
     if (!itemToRelease) return { released: 0 };
 
     const wasAlreadyReplied = !!itemToRelease.repliedAt;
+
+    if (wasAlreadyReplied) {
+      // Already settled (replied or expired) — just record that the talent
+      // sent another follow-up, nothing to release or close out again.
+      await db
+        .update(priorityMessageItems)
+        .set({
+          replyCount: sql`${priorityMessageItems.replyCount} + 1`,
+          replyMessageId: newMessageId ?? null,
+        })
+        .where(eq(priorityMessageItems.id, itemToRelease.id));
+      return { released: 0, replyCountIncremented: true };
+    }
+
+    const isExpired =
+      !!itemToRelease.deliveredAt &&
+      Date.now() - itemToRelease.deliveredAt.getTime() > REPLY_WINDOW_MS;
+
+    if (isExpired) {
+      // Past the 72h SLA — this reply is too late to earn. Label it
+      // 'expired' but deliberately leave repliedAt null: the outstanding-
+      // payments query above and processExpiredRefunds' cron both key off
+      // repliedAt IS NULL to find items still owed a refund, so this keeps
+      // the sender's refund flowing through that existing path untouched.
+      await db
+        .update(priorityMessageItems)
+        .set({
+          replyCount: sql`${priorityMessageItems.replyCount} + 1`,
+          replyMessageId: newMessageId ?? null,
+          status: 'expired',
+        })
+        .where(eq(priorityMessageItems.id, itemToRelease.id));
+      return { released: 0, expired: true };
+    }
 
     // Always increment replyCount; set repliedAt + status only on first reply
     await db
@@ -1309,13 +1357,10 @@ export class PriorityMessageService {
       .set({
         replyCount: sql`${priorityMessageItems.replyCount} + 1`,
         replyMessageId: newMessageId ?? null,
-        ...(wasAlreadyReplied ? {} : { repliedAt: new Date(), status: 'replied' }),
+        repliedAt: new Date(),
+        status: 'replied',
       })
       .where(eq(priorityMessageItems.id, itemToRelease.id));
-
-    if (wasAlreadyReplied) {
-      return { released: 0, replyCountIncremented: true };
-    }
 
     // Check if ALL items in this payment are now replied
     const remainingUnreplied = await db.query.priorityMessageItems.findMany({
@@ -1353,7 +1398,7 @@ export class PriorityMessageService {
   static async processExpiredRefunds() {
     if (!stripe) return;
 
-    const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const cutoff = new Date(Date.now() - REPLY_WINDOW_MS);
 
     const expired = await db.query.priorityMessagePayments.findMany({
       where: and(
@@ -1392,7 +1437,7 @@ export class PriorityMessageService {
             amount: refundCents,
             reason: 'requested_by_customer',
             metadata: {
-              reason: '48h_no_response',
+              reason: '72h_no_response',
               paymentId: payment.id,
               unrepliedItems: unrepliedItems.length,
               totalItems,
@@ -1419,10 +1464,11 @@ export class PriorityMessageService {
           })
           .where(eq(priorityMessagePayments.id, payment.id));
 
-        // Mark unreplied items as closed via refund
+        // Mark unreplied items as closed — 'expired' (not 'replied', not
+        // eligible for a late reply to earn) now that the refund has issued.
         await db
           .update(priorityMessageItems)
-          .set({ repliedAt: new Date(), status: 'refunded' })
+          .set({ repliedAt: new Date(), status: 'expired' })
           .where(
             inArray(
               priorityMessageItems.id,
@@ -1439,19 +1485,19 @@ export class PriorityMessageService {
             ? '💸 Priority message refunded'
             : '💸 Priority message partially refunded',
           message: isFullRefund
-            ? `Your priority message wasn't answered within 48 hours. A $${refundDollars} refund has been issued.`
-            : `${unrepliedItems.length} of ${totalItems} priority messages weren't answered within 48 hours. A $${refundDollars} refund has been issued.`,
+            ? `Your priority message wasn't answered within 72 hours. A $${refundDollars} refund has been issued.`
+            : `${unrepliedItems.length} of ${totalItems} priority messages weren't answered within 72 hours. A $${refundDollars} refund has been issued.`,
           type: 'payment',
           metadata: {
             paymentId: payment.id,
-            reason: isFullRefund ? '48h_no_response' : '48h_partial_no_response',
+            reason: isFullRefund ? '72h_no_response' : '72h_partial_no_response',
             unrepliedItems: unrepliedItems.length,
             totalItems,
             refundCents,
           },
         });
 
-        // Refund all attachments (viewed or not) if talent never replied within 48h
+        // Refund all attachments (viewed or not) if talent never replied within 72h
         const refundableAttachments = await db.query.priorityMessageAttachments.findMany({
           where: and(
             eq(priorityMessageAttachments.paymentId, payment.id),
@@ -1598,6 +1644,11 @@ export class PriorityMessageService {
 
   static async getConversationSpend(senderId, conversationId) {
     await SocialChatService.getConversation(senderId, conversationId);
+    // Same status list as getTotalSpent() — every payment that actually took
+    // money and wasn't fully refunded, not just the currently-outstanding
+    // ('paid'/'partial') ones. Otherwise this reads $0 the moment the talent
+    // replies and the payment resolves to 'replied', even though the sender
+    // clearly did spend money in this conversation.
     const totalSpentRow = await db
       .select({ total: sql`COALESCE(SUM(${priorityMessagePayments.amountCents}), 0)::int` })
       .from(priorityMessagePayments)
@@ -1605,7 +1656,7 @@ export class PriorityMessageService {
         and(
           eq(priorityMessagePayments.senderId, senderId),
           eq(priorityMessagePayments.conversationId, conversationId),
-          inArray(priorityMessagePayments.status, ['paid', 'partial'])
+          inArray(priorityMessagePayments.status, ['paid', 'partial', 'replied', 'partial_refunded'])
         )
       );
 

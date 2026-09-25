@@ -124,6 +124,21 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
         return;
       }
 
+      // ── Shop custom service offer — tip ────────────────────────────────────
+      // Was previously unhandled here — createTipCheckout charged the buyer
+      // but nothing ever credited the seller. Fixed alongside adding the
+      // equivalent talent-session tip flow below.
+      if (session.metadata?.type === 'shop_custom_offer_tip') {
+        await ShopCustomOfferService.handleTipPaymentWebhook(session);
+        return;
+      }
+
+      // ── Talent session — tip ───────────────────────────────────────────────
+      if (session.metadata?.type === 'talent_session_tip') {
+        await TalentSessionService.handleTipPaymentWebhook(session);
+        return;
+      }
+
       // Route subscription checkouts to SubscriptionService
       if (session.mode === 'subscription') {
         if (session.metadata?.type === 'group_subscription') {

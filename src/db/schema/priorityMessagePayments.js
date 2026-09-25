@@ -123,7 +123,9 @@ export const priorityMessageItems = pgTable(
 
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
 
-    // Item-level status: pending | replied | refunded
+    // Item-level status: pending | replied | expired
+    // ('expired' = the 72h reply window closed with no on-time reply; a
+    // late reply after that still increments replyCount but never earns.)
     status: varchar('status', { length: 20 }).notNull().default('pending'),
     // How many times talent has replied to this specific item
     replyCount: integer('reply_count').notNull().default(0),

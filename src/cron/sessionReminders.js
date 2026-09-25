@@ -375,7 +375,11 @@ export const processNoShowCancellations = async () => {
 };
 
 /**
- * Auto-cancel pending sessions whose scheduledAt has passed.
+ * Auto-cancel pending sessions whose accept deadline (24h/72h from request,
+ * depending how far out the session is — see
+ * TalentSessionService._computeAcceptDeadline) has passed, or — as an older
+ * fallback for rows from before that column existed — whose scheduledAt
+ * itself has passed with no response at all.
  * Booker gets a full refund — talent never confirmed in time.
  */
 export const processExpiredPendingSessions = async () => {
@@ -385,7 +389,10 @@ export const processExpiredPendingSessions = async () => {
 
   try {
     const sessions = await db.query.talentSessions.findMany({
-      where: and(eq(talentSessions.status, 'pending'), lte(talentSessions.scheduledAt, now)),
+      where: and(
+        eq(talentSessions.status, 'pending'),
+        or(lte(talentSessions.acceptDeadline, now), lte(talentSessions.scheduledAt, now))
+      ),
     });
 
     for (const session of sessions) {

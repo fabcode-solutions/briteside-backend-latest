@@ -777,6 +777,13 @@ export const rescheduleSession = catchAsync(async (req, res) => {
   });
 });
 
+export const createSessionTipCheckout = catchAsync(async (req, res) => {
+  const result = await TalentSessionService.createTipCheckout(req.user.id, req.params.sessionId, {
+    amountCents: req.body?.amountCents,
+  });
+  res.json({ success: true, message: 'Checkout ready', data: result });
+});
+
 export const shareTalentProfile = catchAsync(async (req, res) => {
   const { profileId } = req.params;
   const result = await TalentProfileShareService.recordShare(profileId);

@@ -36,7 +36,7 @@ import {
   sendBookingRescheduledEmail,
 } from '../templates/index.js';
 import { talentDateOverrides } from '../db/schema/talentDateOverrides.js';
-import { talentSessions } from '../db/schema/talentSessions.js';
+import { talentSessions, talentSessionTips } from '../db/schema/talentSessions.js';
 import { talentSessionFrames } from '../db/schema/talentSessionFrames.js';
 import { UserSpendService } from './userSpend.service.js';
 import { talentFavorites } from '../db/schema/talentFavorites.js';
@@ -1184,7 +1184,18 @@ export class TalentAvailabilityService {
         const mm = String(cursor % 60).padStart(2, '0');
         const time = `${hh}:${mm}`;
         const priceCents = applyPriceOverrideLocal(basePriceCents, time, win.priceOverrides || {});
-        slots.push({ time, durationMins, priceCents, available: !isSlotBusy(cursor) });
+        // Bookings under 36h out aren't allowed (see
+        // TalentSessionService._assertMinBookingLeadTime) — exclude those
+        // slots here too, rather than only rejecting at submit time, so the
+        // picker never offers a slot the booker can't actually take.
+        const slotStart = dayjs.tz(`${date}T${time}:00`, talentTzForDay).utc().toDate();
+        const withinMinLeadTime = slotStart.getTime() - Date.now() < MIN_BOOKING_LEAD_TIME_MS;
+        slots.push({
+          time,
+          durationMins,
+          priceCents,
+          available: !isSlotBusy(cursor) && !withinMinLeadTime,
+        });
         cursor += durationMins;
       }
     }
@@ -1205,7 +1216,43 @@ export class TalentAvailabilityService {
 
 // ─── SESSION SERVICE ──────────────────────────────────────────────────────────
 
+// A booking can't be made for less than 36 hours from now.
+const MIN_BOOKING_LEAD_TIME_MS = 36 * 60 * 60 * 1000;
+
+// How long the talent has to confirm/decline once a request comes in —
+// shorter for near-term requests (booker needs a quick answer) than for ones
+// scheduled well in advance.
+const ACCEPT_WINDOW_UNDER_7_DAYS_MS = 24 * 60 * 60 * 1000;
+const ACCEPT_WINDOW_7_DAYS_OR_MORE_MS = 72 * 60 * 60 * 1000;
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
 export class TalentSessionService {
+  /**
+   * Rejects a booking request for a session under 36h from now — called
+   * before any charge/Stream call is created, by both createCheckout() and
+   * book(). Throws ApiError(400).
+   */
+  static _assertMinBookingLeadTime(scheduledAt) {
+    if (scheduledAt.getTime() - Date.now() < MIN_BOOKING_LEAD_TIME_MS) {
+      throw new ApiError(400, 'Bookings must be made at least 36 hours in advance');
+    }
+  }
+
+  /**
+   * How long the talent has to confirm/decline a request, counted from NOW
+   * (i.e. from whenever a booking actually becomes visible to them as
+   * 'pending' — the payment webhook, not the earlier checkout-creation
+   * step): 24h if the session itself is under 7 days out, 72h otherwise.
+   * Pure calculation, never throws — the 36h floor is already enforced by
+   * _assertMinBookingLeadTime before payment is ever taken.
+   */
+  static _computeAcceptDeadline(scheduledAt) {
+    const msUntilSession = scheduledAt.getTime() - Date.now();
+    const acceptWindowMs =
+      msUntilSession < SEVEN_DAYS_MS ? ACCEPT_WINDOW_UNDER_7_DAYS_MS : ACCEPT_WINDOW_7_DAYS_OR_MORE_MS;
+    return new Date(Date.now() + acceptWindowMs);
+  }
+
   // ── Initiate Stripe Checkout for a session booking ────────────────────────
 
   static async createCheckout({
@@ -1275,6 +1322,8 @@ export class TalentSessionService {
     // Convert talent local time → UTC
     const scheduledAt = dayjs.tz(`${date}T${time}:00`, talentTz).utc().toDate();
     const joinAllowedAt = new Date(scheduledAt.getTime() - 5 * 60 * 1000);
+
+    TalentSessionService._assertMinBookingLeadTime(scheduledAt);
 
     const callId = randomUUID();
     const streamCall = await StreamCallService.createCall({
@@ -1421,6 +1470,14 @@ export class TalentSessionService {
 
     // Gift purchases: status = gift_purchased (not pending) — recipient books separately
     const newStatus = existing.isGift ? 'gift_purchased' : 'pending';
+    // The accept-deadline clock starts now — this is the moment the request
+    // actually becomes visible to the talent as 'pending', not whenever
+    // checkout was first created (which could've sat abandoned for a while).
+    // Not set for gift purchases — the recipient's own later booking is what
+    // gets a real deadline, via book()/createCheckout() above.
+    const acceptDeadline = existing.isGift
+      ? null
+      : TalentSessionService._computeAcceptDeadline(existing.scheduledAt);
 
     // Atomic claim, not a SELECT-then-UPDATE: Stripe can redeliver the same
     // event, or fire both `checkout.session.completed` and
@@ -1432,7 +1489,7 @@ export class TalentSessionService {
     // update can actually affect a row.
     const [session] = await db
       .update(talentSessions)
-      .set({ status: newStatus, updatedAt: new Date() })
+      .set({ status: newStatus, acceptDeadline, updatedAt: new Date() })
       .where(and(eq(talentSessions.id, sessionId), eq(talentSessions.status, 'awaiting_payment')))
       .returning();
 
@@ -1665,6 +1722,9 @@ export class TalentSessionService {
     const scheduledAt = dayjs.tz(`${date}T${time}:00`, talentTz).utc().toDate();
     const joinAllowedAt = new Date(scheduledAt.getTime() - 3 * 60 * 1000);
 
+    TalentSessionService._assertMinBookingLeadTime(scheduledAt);
+    const acceptDeadline = TalentSessionService._computeAcceptDeadline(scheduledAt);
+
     // 3. Create the Stream call (scheduled, not live yet)
     const callId = randomUUID();
     const streamCall = await StreamCallService.createCall({
@@ -1696,6 +1756,7 @@ export class TalentSessionService {
         joinAllowedAt,
         priceCents: slot.priceCents,
         status: 'pending',
+        acceptDeadline,
         subject,
         discussion,
         isGift: !!isGift,
@@ -2291,7 +2352,7 @@ export class TalentSessionService {
 
     const [updated] = await db
       .update(talentSessions)
-      .set({ status: 'declined', updatedAt: new Date() })
+      .set({ status: 'declined', reserveAmountCents: 0, updatedAt: new Date() })
       .where(eq(talentSessions.id, sessionId))
       .returning();
 
@@ -2363,10 +2424,24 @@ export class TalentSessionService {
 
     const now = new Date();
     const hoursUntil = (new Date(session.scheduledAt) - now) / 3_600_000;
+    const isTalentCancel = cancelledByUserId !== session.bookerId;
+    // Booker cancelling before the talent has even accepted gets a full,
+    // unconditional refund regardless of how close to the session this is —
+    // distinct from the tiered 72h policy below, which only applies once
+    // the talent has confirmed and the booker is backing out of a session
+    // that's actually on.
+    const isBeforeAcceptance = session.status === 'pending';
 
-    let refundNote = 'No refund — cancelled within 24 hours of session.';
-    if (hoursUntil >= 48) refundNote = 'Full refund will be issued within 3–5 business days.';
-    else if (hoursUntil >= 24) refundNote = '50% refund will be issued within 3–5 business days.';
+    let refundNote;
+    if (isTalentCancel) {
+      refundNote = 'Full refund will be issued within 3–5 business days.';
+    } else if (isBeforeAcceptance || hoursUntil >= 72) {
+      refundNote =
+        'Full refund will be issued within 3–5 business days. The Platform & Service Fee is non-refundable.';
+    } else {
+      refundNote =
+        'A 50% refund will be issued within 3–5 business days (cancelled within 72 hours of the session). The Platform & Service Fee is non-refundable.';
+    }
 
     const [updated] = await db
       .update(talentSessions)
@@ -2374,18 +2449,26 @@ export class TalentSessionService {
         status: 'cancelled',
         cancelledBy: cancelledByUserId,
         cancellationReason: reason,
+        // Nothing has been transferred to the talent yet (see
+        // handlePaymentWebhook / releaseSessionReserves) — this session will
+        // never reach 'completed', so its reserve would otherwise sit here
+        // forever, inert but still positive, and only a manual force-release
+        // pass (runReserveRelease(true), which ignores the status filter)
+        // stands between that and an incorrect payout for a session that
+        // didn't happen.
+        reserveAmountCents: 0,
         updatedAt: now,
       })
       .where(eq(talentSessions.id, sessionId))
       .returning();
 
-    // Issue Stripe refund based on who cancelled and how far out
+    // Issue Stripe refund based on who cancelled, whether the talent had
+    // already accepted, and how far out the session is.
     if (session.stripePaymentIntentId && stripe) {
-      const isTalentCancel = cancelledByUserId !== session.bookerId;
       let refundAmountCents = 0;
-      if (isTalentCancel || hoursUntil >= 48) {
+      if (isTalentCancel || isBeforeAcceptance || hoursUntil >= 72) {
         refundAmountCents = session.priceCents;
-      } else if (hoursUntil >= 24) {
+      } else {
         refundAmountCents = Math.round(session.priceCents * 0.5);
       }
       if (refundAmountCents > 0) {
@@ -2660,6 +2743,153 @@ export class TalentSessionService {
     return updated;
   }
 
+  // ═══════════════════════════════ Tipping ═════════════════════════════════
+  // Same shape as ShopCustomOfferService's tip flow: a second, standalone
+  // Stripe Checkout charge, standard 7.5% Platform & Service Fee added on
+  // top (booker pays it, talent keeps the full tip amount), held on the
+  // session's own reserveAmountCents and released by the same 7-day
+  // (SESSION_RESERVE_HOLD_HOURS) cron as the rest of the session's payout.
+
+  static computeTipFees(amountCents) {
+    const platformAndServiceFeeCents = calculatePlatformAndServiceFeeCents(amountCents);
+    return {
+      chargedCents: amountCents + platformAndServiceFeeCents,
+      platformAndServiceFeeCents,
+    };
+  }
+
+  static async createTipCheckout(bookerId, sessionId, { amountCents } = {}) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+
+    const session = await db.query.talentSessions.findFirst({
+      where: eq(talentSessions.id, sessionId),
+    });
+    if (!session) throw new ApiError(404, 'Session not found');
+    if (session.bookerId !== bookerId) throw new ApiError(403, 'This session is not yours');
+    if (session.status !== 'completed')
+      throw new ApiError(409, 'You can only tip after the session is completed');
+    if (!Number.isInteger(amountCents) || amountCents <= 0) {
+      throw new ApiError(400, 'Enter a valid tip amount');
+    }
+
+    const profile = await db.query.talentProfiles.findFirst({
+      where: eq(talentProfiles.id, session.talentProfileId),
+    });
+    if (!profile) throw new ApiError(404, 'Talent not found');
+
+    let connectAccount = await StripeConnectService.getForUser(profile.userId);
+    if (connectAccount && !connectAccount.chargesEnabled) {
+      connectAccount = await StripeConnectService.syncStatus(profile.userId).catch(
+        () => connectAccount
+      );
+    }
+    if (!connectAccount?.chargesEnabled)
+      throw new ApiError(400, "This talent can't accept payments yet");
+
+    const fees = TalentSessionService.computeTipFees(amountCents);
+    const booker = await db.query.users.findFirst({
+      where: eq(users.id, bookerId),
+      columns: { email: true },
+    });
+    const { talentName } = await TalentSessionService._getParties(session);
+
+    const [tip] = await db
+      .insert(talentSessionTips)
+      .values({
+        sessionId,
+        bookerId,
+        talentUserId: profile.userId,
+        amountCents,
+        chargedCents: fees.chargedCents,
+        platformAndServiceFeeCents: fees.platformAndServiceFeeCents,
+      })
+      .returning();
+
+    const metadata = {
+      type: 'talent_session_tip',
+      tipId: tip.id,
+      sessionId,
+      bookerId,
+      talentUserId: profile.userId,
+    };
+
+    const checkoutSession = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      mode: 'payment',
+      expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            unit_amount: amountCents,
+            product_data: { name: `Tip for ${talentName}` },
+          },
+          quantity: 1,
+        },
+        {
+          price_data: {
+            currency: 'usd',
+            unit_amount: fees.platformAndServiceFeeCents,
+            product_data: { name: 'Platform & Service Fee' },
+          },
+          quantity: 1,
+        },
+      ],
+      success_url: `${FRONTEND_URL}/bookings`,
+      cancel_url: `${FRONTEND_URL}/bookings`,
+      customer_email: booker?.email,
+      metadata,
+      // No transfer_data/application_fee_amount on purpose — the talent's cut
+      // accumulates into the session's reserveAmountCents instead of
+      // transferring immediately, same as the base session charge.
+      payment_intent_data: {
+        metadata,
+      },
+    });
+
+    await db
+      .update(talentSessionTips)
+      .set({ stripeSessionId: checkoutSession.id })
+      .where(eq(talentSessionTips.id, tip.id));
+
+    return { checkoutUrl: checkoutSession.url, tipId: tip.id };
+  }
+
+  static async handleTipPaymentWebhook(stripeSession) {
+    const tipId = stripeSession.metadata?.tipId;
+    if (!tipId) return;
+
+    const tip = await db.query.talentSessionTips.findFirst({
+      where: eq(talentSessionTips.id, tipId),
+    });
+    if (!tip || tip.status !== 'pending') return;
+
+    const paidAt = new Date();
+    const paymentIntentId =
+      typeof stripeSession.payment_intent === 'string'
+        ? stripeSession.payment_intent
+        : (stripeSession.payment_intent?.id ?? null);
+
+    const [updated] = await db
+      .update(talentSessionTips)
+      .set({ status: 'paid', paidAt, stripePaymentIntentId: paymentIntentId })
+      .where(and(eq(talentSessionTips.id, tipId), eq(talentSessionTips.status, 'pending')))
+      .returning();
+    if (!updated) return;
+
+    // The talent's cut is the full tip amount (the 7.5% fee was paid on top
+    // by the booker, not deducted from it). Accumulates into the session's
+    // own reserve — same 7-day hold as the base session charge — rather than
+    // transferring immediately.
+    await db
+      .update(talentSessions)
+      .set({
+        reserveAmountCents: sql`${talentSessions.reserveAmountCents} + ${tip.amountCents}`,
+        updatedAt: paidAt,
+      })
+      .where(eq(talentSessions.id, tip.sessionId));
+  }
+
   // ── Auto-cancel no-show (called by cron) ─────────────────────────────────
 
   static async handleNoShow(sessionId) {
@@ -2687,6 +2917,10 @@ export class TalentSessionService {
           status: 'cancelled',
           cancelledBy: talentUser.id,
           cancellationReason: 'talent_no_show',
+          // Same reasoning as cancel() — nothing was ever transferred, and
+          // this session will never reach 'completed', so its reserve must
+          // be cleared or a force-release pass could still pay it out.
+          reserveAmountCents: 0,
           updatedAt: now,
         })
         .where(eq(talentSessions.id, sessionId))
@@ -3231,7 +3465,12 @@ export class TalentSessionService {
 
     const [updated] = await db
       .update(talentSessions)
-      .set({ status: 'cancelled', cancellationReason: 'talent_did_not_confirm', updatedAt: now })
+      .set({
+        status: 'cancelled',
+        cancellationReason: 'talent_did_not_confirm',
+        reserveAmountCents: 0,
+        updatedAt: now,
+      })
       .where(eq(talentSessions.id, sessionId))
       .returning();
 
