@@ -1,6 +1,7 @@
 import { ShopProductService } from '../services/shop/shopProduct.service.js';
 import { ShopDeliverableService } from '../services/shop/shopDeliverable.service.js';
 import { ShopOrderService } from '../services/shop/shopOrder.service.js';
+import { ShopIapService } from '../services/shop/shopIap.service.js';
 import { ShopRefundService } from '../services/shop/shopRefund.service.js';
 import * as userService from '../services/user.service.js';
 import { catchAsync } from '../utils/catch-async.js';
@@ -159,6 +160,22 @@ export const createShopCheckout = catchAsync(async (req, res) => {
     message: result.free ? 'Product added to your purchases' : 'Checkout ready',
     data: result,
   });
+});
+
+// ── In-app purchase (App-only — the web checkout above is untouched) ───────
+
+export const getShopIapBuyOptions = catchAsync(async (req, res) => {
+  const result = await ShopIapService.getBuyOptions(req.params.productId);
+  res.json({ success: true, data: result });
+});
+
+export const finalizeShopIapPurchase = catchAsync(async (req, res) => {
+  const { store, transactionId, purchaseToken } = req.body || {};
+  const result = await ShopIapService.finalizePurchase(req.user.id, req.params.productId, store, {
+    transactionId,
+    purchaseToken,
+  });
+  res.json({ success: true, message: 'Purchase confirmed', data: result });
 });
 
 export const listShopPurchases = catchAsync(async (req, res) => {

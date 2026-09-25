@@ -46,9 +46,25 @@ export class ShopProductService {
 
     const hasDeliverable = !!(product.deliveryFileKey || product.deliveryLink);
 
+    // App-only convenience field — the raw iapProductId/appleIapStatus/
+    // googleIapStatus columns are already in publicFields above (nothing
+    // strips them), this just saves the App from re-deriving the same
+    // eligibility rule and the "Pay in App" price itself. The web frontend
+    // has never read this field and never will; purely additive.
+    const iap = { iapEligible: false };
+    if (
+      product.buttonAction === 'payment' &&
+      ['product', 'course', 'link'].includes(product.listingType) &&
+      product.priceCents > 0
+    ) {
+      iap.iapEligible = true;
+      iap.iapWebPriceCents = product.priceCents;
+      iap.iapAppPriceCents = Math.round(product.priceCents * 1.3);
+    }
+
     if (!isOwner) {
       // Non-owners still need to know a file is included, just not what or where.
-      return { ...publicFields, hasDeliverable };
+      return { ...publicFields, hasDeliverable, ...iap };
     }
 
     return {
@@ -57,6 +73,7 @@ export class ShopProductService {
       deliveryLink: product.deliveryLink,
       deliveryFileName: product.deliveryFileName,
       hasDeliverable,
+      ...iap,
     };
   }
 
@@ -423,6 +440,15 @@ export class ShopProductService {
       };
     });
 
+    // App-only, fire-and-forget — mirrors this product to Apple/Google as an
+    // in-app purchase if it's eligible. Never awaited: a store outage must
+    // never slow down or fail a seller's create request. Dynamic import
+    // avoids a circular dependency (shopIap.service.js imports this class
+    // for getShopSettings).
+    import('./shopIap.service.js')
+      .then(({ ShopIapService }) => ShopIapService.registerProductWithStores(created))
+      .catch(err => console.error(`[Shop] IAP registration import failed: ${err.message}`));
+
     return { ...this.sanitize(created, true), courseModules };
   try {
     const [created] = await db
@@ -473,6 +499,11 @@ export class ShopProductService {
         courseModules: modules.map(m => ({ title: m.title, lessonsCount: m.lessonsCount })),
       };
     });
+
+    // App-only, fire-and-forget — see the identical call in createProduct.
+    import('./shopIap.service.js')
+      .then(({ ShopIapService }) => ShopIapService.registerProductWithStores(updated))
+      .catch(err => console.error(`[Shop] IAP registration import failed: ${err.message}`));
 
     return { ...this.sanitize(updated, true), courseModules };
   }

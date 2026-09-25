@@ -37,6 +37,22 @@ const EnvVariables = z.object({
   APPLE_CLIENT_ID: z.string().optional(),
   APPLE_PRIVATE_KEY: z.string().optional(),
   APPLE_CALLBACK_URL: z.string().optional(),
+
+  // Apple In-App Purchase — App Store Server API (transaction verification)
+  APPLE_IAP_ISSUER_ID: z.string().optional(),
+  APPLE_IAP_KEY_ID: z.string().optional(),
+  APPLE_IAP_BUNDLE_ID: z.string().optional(),
+  APPLE_IAP_ENVIRONMENT: z.enum(['Sandbox', 'Production']).optional().default('Sandbox'),
+  APPLE_IAP_PRIVATE_KEY: z.string().optional(),
+  // App Store Connect API (automatic in-app-purchase product registration) —
+  // a separate key pair/scope from the App Store Server API above.
+  APPLE_ASC_KEY_ID: z.string().optional(),
+  APPLE_ASC_PRIVATE_KEY: z.string().optional(),
+  APPLE_ASC_APP_ID: z.string().optional(),
+
+  // Google Play In-App Purchase — Play Developer API (service account)
+  GOOGLE_PLAY_PACKAGE_NAME: z.string().optional(),
+  GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: z.string().optional(),
 });
 
 let envVars;
@@ -93,6 +109,28 @@ const env = {
     clientId: envVars.APPLE_CLIENT_ID,
     privateKey: envVars.APPLE_PRIVATE_KEY,
     callbackUrl: envVars.APPLE_CALLBACK_URL,
+  },
+  appleIap: {
+    issuerId: envVars.APPLE_IAP_ISSUER_ID,
+    keyId: envVars.APPLE_IAP_KEY_ID,
+    bundleId: envVars.APPLE_IAP_BUNDLE_ID,
+    environment: envVars.APPLE_IAP_ENVIRONMENT,
+    // .env stores this with literal \n escapes (real newlines inside a .env
+    // value are unreliable across parsers) — unescape back to a real PEM.
+    privateKey: envVars.APPLE_IAP_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    ascKeyId: envVars.APPLE_ASC_KEY_ID,
+    ascPrivateKey: envVars.APPLE_ASC_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    ascAppId: envVars.APPLE_ASC_APP_ID,
+    configured: !!(
+      envVars.APPLE_IAP_ISSUER_ID &&
+      envVars.APPLE_IAP_KEY_ID &&
+      envVars.APPLE_IAP_PRIVATE_KEY
+    ),
+  },
+  googleIap: {
+    packageName: envVars.GOOGLE_PLAY_PACKAGE_NAME,
+    serviceAccountJson: envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON,
+    configured: !!(envVars.GOOGLE_PLAY_PACKAGE_NAME && envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON),
   },
 };
 

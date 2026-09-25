@@ -827,6 +827,13 @@
       "when": 1790321332410,
       "tag": "0125_cool_typhoid_mary",
       "breakpoints": true
+    },
+    {
+      "idx": 126,
+      "version": "7",
+      "when": 1790334520313,
+      "tag": "0126_sweet_power_man",
+      "breakpoints": true
     }
   ]
 }
