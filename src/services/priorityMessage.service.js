@@ -31,7 +31,8 @@ import { TextModerationService, TEXT_ENTITY } from './moderation/textModeration.
 import { MediaModerationService } from './moderation/mediaModeration.service.js';
 import config from '../config/config.js';
 import { StripeConnectService } from './stripeConnect.service.js';
-import { getRedirectUrls } from '../utils/redirect-urls.js';
+import { ShopIapService } from './shop/shopIap.service.js';
+import { getRedirectUrls, isNativePlatform } from '../utils/redirect-urls.js';
 import { socialConversations } from '../db/schema/socialChat.js';
 import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
 
@@ -80,12 +81,17 @@ export class PriorityMessageService {
    * @param {{ talentProfileId, subject, messageContent }} input
    * @returns {{ checkoutUrl, paymentId }}
    */
-  static async createCheckout(
+  /**
+   * Validates the request, prices it, and persists a PENDING payment + items
+   * + attachments — everything checkout needs except taking the money. Shared
+   * by the Stripe Checkout flow (createCheckout) and the native App Store /
+   * Google Play flow (PriorityMessageIapService), so both charge for and
+   * store exactly the same thing.
+   */
+  static async _createPendingPayment(
     senderId,
-    { talentProfileId, subject, messageContent, messages, platform, contentExtended, attachmentIds }
+    { talentProfileId, subject, messageContent, messages, contentExtended, attachmentIds }
   ) {
-    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
-
     const deriveSubject = text => {
       const trimmed = (text || '').trim();
       if (!trimmed) return null;
@@ -367,11 +373,71 @@ export class PriorityMessageService {
       )
     );
 
+    return {
+      payment,
+      items,
+      profile,
+      msgList,
+      sender,
+      talentName,
+      textMessageCount,
+      totalExtensionUnits,
+      totalUnits,
+      totalAttachments,
+      totalAttachmentCents,
+      baseCents,
+      chargedCents,
+      platformAndServiceFeeCents,
+      applicationFeeCents,
+      talentNetCents,
+    };
+  }
+
+  static async createCheckout(
+    senderId,
+    { talentProfileId, subject, messageContent, messages, platform, contentExtended, attachmentIds }
+  ) {
+    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+
+    const {
+      payment,
+      profile,
+      msgList,
+      sender,
+      talentName,
+      textMessageCount,
+      totalExtensionUnits,
+      totalUnits,
+      totalAttachments,
+      totalAttachmentCents,
+      baseCents,
+      chargedCents,
+      platformAndServiceFeeCents,
+      applicationFeeCents,
+      talentNetCents,
+    } = await this._createPendingPayment(senderId, {
+      talentProfileId,
+      subject,
+      messageContent,
+      messages,
+      contentExtended,
+      attachmentIds,
+    });
+
+    // Native: land on the app's /message tab with a status flag — the app's
+    // in-app checkout session (openAuthSessionAsync) waits for exactly this
+    // briteside://message URL and reads `status` to know whether payment went
+    // through. Web keeps redirecting to the talent's public pages.
+    const nativeRedirect = isNativePlatform(platform);
     const { successUrl, cancelUrl } = getRedirectUrls(
       platform,
       FRONTEND_URL,
-      `/talent/${profile.user.username}`,
-      `/profile/${profile.user.username}`
+      nativeRedirect
+        ? '/message?checkout_session_id={CHECKOUT_SESSION_ID}&status=success'
+        : `/talent/${profile.user.username}`,
+      nativeRedirect
+        ? '/message?checkout_session_id={CHECKOUT_SESSION_ID}&status=cancelled'
+        : `/profile/${profile.user.username}`
     );
 
     // ── Stripe Checkout session ─────────────────────────────────────────────
@@ -519,10 +585,47 @@ export class PriorityMessageService {
     console.log('[handleWebhook] paymentId:', paymentId, 'status check...');
     if (!paymentId) return;
 
+    await this._deliverPaidPayment(paymentId, {
+      senderId,
+      talentUserId,
+      io,
+      paidFields: { stripePaymentIntent: stripeSession.payment_intent ?? null },
+      spendFields: {
+        stripePaymentIntentId: stripeSession.payment_intent ?? null,
+        stripeSessionId: stripeSession.id,
+      },
+    });
+  }
+
+  /**
+   * Payment-channel-agnostic delivery of an already-paid priority payment:
+   * posts each drafted item into the conversation, marks the payment paid,
+   * records spend, notifies the talent. Shared by the Stripe webhook above
+   * and native App Store / Google Play purchases (PriorityMessageIapService).
+   *
+   * @param {object} opts
+   * @param {object} opts.paidFields   channel-specific columns set on the payment row
+   * @param {object} opts.spendFields  channel-specific fields for UserSpendService
+   * @param {boolean} opts.reserveTalentCut  hold talentNetCents for the Stripe
+   *   Connect release cron. false for IAP — Apple/Google collect that money,
+   *   not Stripe, so there's nothing in Stripe to transfer (same as shop IAP).
+   * @returns {{ conversationId, messageIds } | null}
+   */
+  static async _deliverPaidPayment(
+    paymentId,
+    {
+      senderId,
+      talentUserId,
+      io = null,
+      paidFields = {},
+      spendFields = {},
+      reserveTalentCut = true,
+    }
+  ) {
     const payment = await db.query.priorityMessagePayments.findFirst({
       where: eq(priorityMessagePayments.id, paymentId),
     });
-    if (!payment || payment.status === 'paid') return;
+    if (!payment || payment.status === 'paid') return null;
     try {
       const conversation = await SocialChatService.getOrCreateConversation(senderId, talentUserId);
 
@@ -623,13 +726,13 @@ export class PriorityMessageService {
       // createCheckout) until 48h after the talent replies, per the SLA
       // escrow payout rule. talentNetCents was computed and stashed in
       // metadata at checkout-creation time.
-      const reserveAmountCents = payment.metadata?.talentNetCents ?? 0;
+      const reserveAmountCents = reserveTalentCut ? (payment.metadata?.talentNetCents ?? 0) : 0;
 
       await db
         .update(priorityMessagePayments)
         .set({
           status: 'paid',
-          stripePaymentIntent: stripeSession.payment_intent ?? null,
+          ...paidFields,
           conversationId: conversation.id,
           paidAt: new Date(),
           reserveAmountCents,
@@ -661,8 +764,7 @@ export class PriorityMessageService {
           subject: items[0]?.subject ?? null,
           messages: items.map(i => i.messageContent).filter(Boolean),
         },
-        stripePaymentIntentId: stripeSession.payment_intent ?? null,
-        stripeSessionId: stripeSession.id,
+        ...spendFields,
         paidAt: new Date(),
       }).catch(err => console.error('[UserSpend] priority_message record failed:', err.message));
 
@@ -718,12 +820,14 @@ export class PriorityMessageService {
           attachments: deliveredAttachments,
         });
       }
+      return { conversationId: conversation.id, messageIds: deliveredMessages };
     } catch (err) {
       console.error('[fPriorityMessage] Webhook delivery failed:', err.message);
       await db
         .update(priorityMessagePayments)
         .set({ status: 'failed', updatedAt: new Date() })
         .where(eq(priorityMessagePayments.id, payment.id));
+      return null;
     }
   }
 
@@ -746,8 +850,25 @@ export class PriorityMessageService {
       columns: { messageId: true },
     });
 
+    // The webhook is what flips `status` to 'paid', and it can land a few
+    // seconds after Stripe redirects back to the app. So while the row is
+    // still pending, ask Stripe directly whether the session was paid — this
+    // only reports it (fulfillment stays with the webhook), letting the app's
+    // "Pay in App" flow confirm success even when the in-app browser closes
+    // before the briteside:// redirect is seen (common on Android).
+    let paymentConfirmed = payment.status === 'paid' || payment.status === 'replied';
+    if (!paymentConfirmed && payment.stripeSessionId && stripe) {
+      try {
+        const session = await stripe.checkout.sessions.retrieve(payment.stripeSessionId);
+        paymentConfirmed = session.payment_status === 'paid';
+      } catch (err) {
+        console.error('[PriorityMessage.getStatus] Stripe session lookup failed:', err.message);
+      }
+    }
+
     return {
       status: payment.status,
+      paymentConfirmed,
       conversationId: payment.conversationId,
       messageIds: items.map(i => i.messageId).filter(Boolean),
       paidAt: payment.paidAt,
@@ -1309,8 +1430,12 @@ export class PriorityMessageService {
       });
       itemToRelease =
         candidates.find(
-          i => !i.repliedAt && (!i.deliveredAt || Date.now() - i.deliveredAt.getTime() <= REPLY_WINDOW_MS)
-        ) ?? candidates[0] ?? null;
+          i =>
+            !i.repliedAt &&
+            (!i.deliveredAt || Date.now() - i.deliveredAt.getTime() <= REPLY_WINDOW_MS)
+        ) ??
+        candidates[0] ??
+        null;
     }
 
     if (!itemToRelease) return { released: 0 };
@@ -1395,9 +1520,72 @@ export class PriorityMessageService {
     }
   }
 
-  static async processExpiredRefunds() {
-    if (!stripe) return;
+  /**
+   * 72h no-reply handling for an App Store / Google Play payment. The stores
+   * don't allow Stripe-style partial refunds: Google's API can only refund a
+   * whole order, and Apple has no refund API at all (only the buyer can ask
+   * Apple). So:
+   *   - Google, nothing answered → full refund via Play (status 'refunded')
+   *   - Apple, or partly answered → close it as 'expired' (no money moves),
+   *     and tell the sender how to request a refund from the store.
+   * Either way the payment leaves 'paid'/'partial', so the sender is no
+   * longer blocked from messaging this talent (hasPendingMessage).
+   */
+  static async _closeExpiredIapPayment(payment, { unrepliedItems, repliedItems, totalItems }) {
+    const isGoogle = payment.purchaseChannel === 'google_iap';
+    const canRefundInFull = isGoogle && repliedItems === 0 && !!payment.iapOrderId;
 
+    if (canRefundInFull) {
+      await ShopIapService.refundGoogleOrder(payment.iapOrderId);
+    }
+
+    const now = new Date();
+    await db
+      .update(priorityMessagePayments)
+      .set({
+        status: canRefundInFull ? 'refunded' : 'expired',
+        ...(canRefundInFull ? { refundedAt: now } : {}),
+        updatedAt: now,
+      })
+      .where(eq(priorityMessagePayments.id, payment.id));
+
+    await db
+      .update(priorityMessageItems)
+      .set({ repliedAt: now, status: 'expired' })
+      .where(
+        inArray(
+          priorityMessageItems.id,
+          unrepliedItems.map(i => i.id)
+        )
+      );
+
+    const unansweredLabel =
+      repliedItems === 0
+        ? "Your priority message wasn't answered within 72 hours."
+        : `${unrepliedItems.length} of ${totalItems} priority messages weren't answered within 72 hours.`;
+    const refundHow = canRefundInFull
+      ? 'A full refund has been issued to your Google Play payment method.'
+      : isGoogle
+        ? 'You can request a refund from Google Play (Play Store › Payments & subscriptions › Budget & history).'
+        : 'You can request a refund from Apple at reportaproblem.apple.com.';
+
+    await createNotification({
+      userId: payment.senderId,
+      title: canRefundInFull ? '💸 Priority message refunded' : '⏱️ Priority message expired',
+      message: `${unansweredLabel} ${refundHow}`,
+      type: 'payment',
+      metadata: {
+        paymentId: payment.id,
+        reason: repliedItems === 0 ? '72h_no_response' : '72h_partial_no_response',
+        purchaseChannel: payment.purchaseChannel,
+        refunded: canRefundInFull,
+        unrepliedItems: unrepliedItems.length,
+        totalItems,
+      },
+    });
+  }
+
+  static async processExpiredRefunds() {
     const cutoff = new Date(Date.now() - REPLY_WINDOW_MS);
 
     const expired = await db.query.priorityMessagePayments.findMany({
@@ -1429,6 +1617,17 @@ export class PriorityMessageService {
         const repliedItems = totalItems - unrepliedItems.length;
         const refundRatio = unrepliedItems.length / totalItems;
         const refundCents = Math.round(payment.amountCents * refundRatio);
+
+        // Paid in the App Store / Google Play — no Stripe charge to refund.
+        if (payment.purchaseChannel === 'apple_iap' || payment.purchaseChannel === 'google_iap') {
+          await this._closeExpiredIapPayment(payment, { unrepliedItems, repliedItems, totalItems });
+          continue;
+        }
+
+        if (!stripe) {
+          console.warn(`[PriorityMessage] Stripe not configured — can't refund ${payment.id}`);
+          continue;
+        }
 
         // Only update DB if Stripe refund actually succeeds (or no payment intent)
         if (payment.stripePaymentIntent) {
@@ -1656,7 +1855,15 @@ export class PriorityMessageService {
         and(
           eq(priorityMessagePayments.senderId, senderId),
           eq(priorityMessagePayments.conversationId, conversationId),
-          inArray(priorityMessagePayments.status, ['paid', 'partial', 'replied', 'partial_refunded'])
+          // 'expired' = an App Store / Google Play payment closed after 72h
+          // without a store refund — the sender's money was still taken.
+          inArray(priorityMessagePayments.status, [
+            'paid',
+            'partial',
+            'replied',
+            'partial_refunded',
+            'expired',
+          ])
         )
       );
 
@@ -1729,34 +1936,34 @@ export class PriorityMessageService {
       totalSpent: Math.round(totalSpentCents / 100),
     };
   }
-   static async getItemStatuses(requesterId, conversationId) {
-  // Same participant check used by getConversationBanner/getConversationSpend —
-  // works whether requester is the sender or the talent.
-  await SocialChatService.getConversation(requesterId, conversationId);
+  static async getItemStatuses(requesterId, conversationId) {
+    // Same participant check used by getConversationBanner/getConversationSpend —
+    // works whether requester is the sender or the talent.
+    await SocialChatService.getConversation(requesterId, conversationId);
 
-  const rows = await db
-    .select({
-      messageId: priorityMessageItems.messageId,
-      status: priorityMessageItems.status,
-    })
-    .from(priorityMessageItems)
-    .innerJoin(
-      priorityMessagePayments,
-      eq(priorityMessageItems.paymentId, priorityMessagePayments.id)
-    )
-    .where(
-      and(
-        eq(priorityMessagePayments.conversationId, conversationId),
-        sql`${priorityMessageItems.messageId} IS NOT NULL`
+    const rows = await db
+      .select({
+        messageId: priorityMessageItems.messageId,
+        status: priorityMessageItems.status,
+      })
+      .from(priorityMessageItems)
+      .innerJoin(
+        priorityMessagePayments,
+        eq(priorityMessageItems.paymentId, priorityMessagePayments.id)
       )
-    );
+      .where(
+        and(
+          eq(priorityMessagePayments.conversationId, conversationId),
+          sql`${priorityMessageItems.messageId} IS NOT NULL`
+        )
+      );
 
-  const statusMap = {};
-  for (const row of rows) {
-    statusMap[row.messageId] = row.status;
+    const statusMap = {};
+    for (const row of rows) {
+      statusMap[row.messageId] = row.status;
+    }
+    return statusMap;
   }
-  return statusMap;
-}
 
   /**
    * True if this sender already has a paid message to this talent still

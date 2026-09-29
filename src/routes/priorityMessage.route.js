@@ -11,6 +11,9 @@ import { requireFeature } from '../middlewares/subscription.middleware.js';
 import { FEATURES } from '../constants/features.js';
 import {
   createCheckout,
+  prepareIapPurchase,
+  getIapTiers,
+  finalizeIapPurchase,
   stripeWebhook,
   getPaymentStatus,
   getReceivedMessages,
@@ -35,6 +38,11 @@ router.use(authMiddleware);
 
 // Customer sends a priority message — no Plus required (paying per message)
 router.post('/', createCheckout);
+// "Pay in App" — native App Store / Google Play purchase (price tiers).
+// Registered before '/:paymentId/...' so 'iap' is never read as a paymentId.
+router.get('/iap/tiers', getIapTiers);
+router.post('/iap/prepare', prepareIapPurchase);
+router.post('/:paymentId/iap/finalize', finalizeIapPurchase);
 // Proactive check before the sender even fills out the form — lets the
 // talent-profile "Send Message" dialog warn about an outstanding pending
 // message immediately, instead of only failing at checkout submission.

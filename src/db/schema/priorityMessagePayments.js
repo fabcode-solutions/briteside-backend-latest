@@ -7,6 +7,7 @@ import {
   jsonb,
   text,
   index,
+  uniqueIndex,
   check,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -78,10 +79,27 @@ export const priorityMessagePayments = pgTable(
 
     metadata: jsonb('metadata').default(sql`'{}'::jsonb`),
 
+    // How the sender paid: 'stripe' (web / in-app browser Checkout) or a
+    // native store purchase ('apple_iap' | 'google_iap') — see
+    // PriorityMessageIapService. IAP money is collected by Apple/Google, not
+    // Stripe, so those rows keep reserveAmountCents 0 and have no
+    // stripePaymentIntent (the 72h auto-refund skips them).
+    purchaseChannel: varchar('purchase_channel', { length: 12 }).notNull().default('stripe'),
+    // Consumable price-tier product the sender bought (e.g. 'pm_tier_999').
+    iapProductId: varchar('iap_product_id', { length: 40 }),
+    // Apple transactionId / Google purchaseToken — unique, so a retried
+    // finalize call can never deliver the same purchase twice.
+    iapTransactionId: varchar('iap_transaction_id', { length: 255 }),
+    // Google Play order id (GPA.xxxx) — what Play's orders.refund API takes
+    // for the 72h no-reply refund. Null for Apple (Apple has no refund API).
+    iapOrderId: varchar('iap_order_id', { length: 64 }),
+    iapVerifiedAt: timestamp('iap_verified_at', { withTimezone: true }),
+
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }),
   },
   table => [
+    uniqueIndex('idx_pmp_iap_transaction_id').on(table.iapTransactionId),
     index('idx_pmp_sender').on(table.senderId),
     index('idx_pmp_talent_user').on(table.talentUserId),
     index('idx_pmp_status').on(table.status),
