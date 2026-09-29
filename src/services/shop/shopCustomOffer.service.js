@@ -17,6 +17,8 @@ import { UserSpendService } from '../userSpend.service.js';
 import { createNotification } from '../notification.service.js';
 import { ShopOrderService } from './shopOrder.service.js';
 import { calculatePlatformAndServiceFeeCents } from '../../utils/orderProcessingFee.js';
+import { StripeSmartCheckoutService } from '../stripeSmartCheckout.service.js';
+import { PayoutLedgerService } from '../payoutLedger.service.js';
 import { emitSocialChat } from '../../socket/emitter.js';
 import { ShopDeliverableService } from './shopDeliverable.service.js';
 import { shopCustomOfferDeliverables } from '../../db/schema/index.js';
@@ -39,10 +41,13 @@ const CREATABLE_PAYMENT_MODES = PAYMENT_MODES.filter(m => m !== 'deposit');
 const MAX_MILESTONES = 10;
 const OFFER_TTL_DAYS = 7;
 const AUTO_APPROVE_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
-// A milestone's funds are transferred to the seller 7 days after the BUYER
-// approves that stage — the per-stage equivalent of the whole-offer
-// deliveredAt + 7-day hold in cron/reserveRelease.js (CUSTOM_OFFER_RESERVE_HOLD_HOURS).
-const MILESTONE_RELEASE_HOLD_MS = 7 * 24 * 60 * 60 * 1000;
+// Two-stage per PAYMENTS_ARCHITECTURE.md Phase 1, same split every other
+// flow's reserve uses: 85% releases 14 days after the BUYER approves a
+// stage, the remaining 15% at 21 days — the per-stage equivalent of the
+// whole-offer deliveredAt + Day14/Day21 hold in cron/reserveRelease.js
+// (STANDARD_RELEASE_HOLD_DAYS / FINAL_RELEASE_HOLD_DAYS there).
+const MILESTONE_STANDARD_RELEASE_HOLD_MS = 14 * 24 * 60 * 60 * 1000;
+const MILESTONE_FINAL_RELEASE_HOLD_MS = 21 * 24 * 60 * 60 * 1000;
 // Statuses a milestone can no longer be moved INTO 'funded' from. Every
 // funding write is conditional on NOT being one of these, which is what makes
 // Stripe's at-least-once webhook redelivery a no-op instead of a second charge
@@ -822,10 +827,19 @@ export class ShopCustomOfferService {
       const refund = await stripe.refunds.create({
         payment_intent: paymentIntentId,
         reason: 'requested_by_customer',
-        // Claw the money back out of the seller's Connect balance while
-        // the platform keeps its own fee.
-        reverse_transfer: true,
-        refund_application_fee: false,
+        // No reverse_transfer/refund_application_fee here — unlike a Connect
+        // destination charge, this charge was never given transfer_data at
+        // creation (see createAcceptCheckout's comment: the seller's cut
+        // accumulates in reserveAmountCents and moves via a separate,
+        // unlinked stripe.transfers.create() call from reserveRelease.js,
+        // not a Stripe-tracked transfer on this charge). Passing
+        // reverse_transfer: true against a charge with no linked transfer to
+        // reverse made Stripe reject every refund attempt outright — the
+        // exact "error when cancelling" this was fixed for. Callers that
+        // need to guard against a reserve that already released to the
+        // seller (so there's nothing left on the platform balance to refund
+        // from) must check that before calling this, same as the
+        // already-released-milestone guard in _refundMilestoneCharges below.
         metadata: { offerId, cancelledBy: actorUserId, ...metadata },
       });
       return refund.id;
@@ -990,7 +1004,8 @@ export class ShopCustomOfferService {
       ...(paymentMode !== 'full' && { customer_creation: 'always' }),
       metadata,
       // No transfer_data/application_fee_amount — the seller's cut accumulates
-      // in reserveAmountCents and is released 7 days after delivery.
+      // in reserveAmountCents and releases in two stages after delivery:
+      // 85% at Day 14, the remaining 15% at Day 21.
       payment_intent_data: {
         metadata,
         ...(paymentMode !== 'full' && { setup_future_usage: 'off_session' }),
@@ -1079,6 +1094,88 @@ export class ShopCustomOfferService {
    * take rate as catalog sales.
    */
   static async createAcceptCheckout(buyerId, offerId, platform) {
+    const prep = await this._prepareAcceptCheckout(buyerId, offerId);
+
+    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId).catch(
+      err => {
+        logger.error(`[ShopCustomOffer] getOrCreateStripeCustomer failed: ${err.message}`);
+        return null;
+      }
+    );
+
+    return this._createHostedAcceptSession(prep, stripeCustomerId);
+  }
+
+  /**
+   * POST /shop/custom-offers/:offerId/smart-accept-checkout
+   *
+   * Identical validation/persistence to createAcceptCheckout(), but if the
+   * buyer already has a saved card on file (attached during an earlier
+   * purchase anywhere on the platform — the Stripe customer is shared, see
+   * StripeSmartCheckoutService), charges it directly and accepts the offer
+   * immediately — no redirect, no checkout screen. Falls back to a normal
+   * hosted Checkout session whenever there's no saved card yet, or Stripe
+   * requires additional authentication (SCA).
+   */
+  static async createSmartAcceptCheckout(buyerId, offerId) {
+    const prep = await this._prepareAcceptCheckout(buyerId, offerId);
+    const { offer, installmentBase, fees, milestoneRows } = prep;
+
+    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId);
+    const intent = await StripeSmartCheckoutService.tryOffSessionCharge({
+      stripeCustomerId,
+      amountCents: fees.chargedCents,
+      metadata: {
+        type: 'shop_custom_offer',
+        offerId: offer.id,
+        buyerId,
+        sellerId: offer.sellerId,
+      },
+    });
+
+    if (intent) {
+      await db
+        .update(shopCustomServiceOffers)
+        .set({
+          chargedCents: fees.chargedCents,
+          basePriceCoveredCents: installmentBase,
+          sellerReceiveCents: fees.sellerReceiveCents,
+          platformShareCents: fees.platformShareCents,
+          updatedAt: new Date(),
+        })
+        .where(eq(shopCustomServiceOffers.id, offer.id));
+
+      // No _stampMilestoneSession park-step here (unlike the hosted path) —
+      // handlePaymentWebhook below runs synchronously and immediately calls
+      // _markMilestoneFunded, so there's no window where a stripeSessionId
+      // stamp would matter, and there's no real Checkout Session id to give it.
+
+      // Reuses the exact accept/reserve/delivery bookkeeping the webhook
+      // path runs — a synthetic "session" carrying just the fields
+      // handlePaymentWebhook actually reads. customer is included since
+      // handlePaymentWebhook persists it as the offer's own stripeCustomerId
+      // (used later for the remainder/completion off-session charge).
+      await this.handlePaymentWebhook({
+        id: null,
+        payment_intent: intent.id,
+        customer: stripeCustomerId,
+        metadata: {
+          type: 'shop_custom_offer',
+          offerId: offer.id,
+          buyerId,
+          sellerId: offer.sellerId,
+        },
+      });
+
+      return { instant: true, offerId: offer.id };
+    }
+
+    const hosted = await this._createHostedAcceptSession(prep, stripeCustomerId);
+    return { instant: false, ...hosted };
+  }
+
+  // ── Shared validation + fee computation for both accept-checkout paths ────
+  static async _prepareAcceptCheckout(buyerId, offerId) {
     const offer = await this.loadOffer(offerId);
     if (offer.buyerId !== buyerId) throw new ApiError(403, 'This offer is not for you');
     if (offer.status !== 'pending')
@@ -1114,10 +1211,17 @@ export class ShopCustomOfferService {
       columns: { email: true },
     });
 
+    return { offer, buyer, milestoneRows, installmentBase, fees };
+  }
+
+  // ── Hosted Stripe Checkout session — shared tail for both accept paths ────
+  static async _createHostedAcceptSession(prep, stripeCustomerId) {
+    const { offer, buyer, milestoneRows, installmentBase, fees } = prep;
+
     const metadata = {
       type: 'shop_custom_offer',
       offerId: offer.id,
-      buyerId,
+      buyerId: offer.buyerId,
       sellerId: offer.sellerId,
     };
 
@@ -1149,25 +1253,26 @@ export class ShopCustomOfferService {
       ],
       success_url: `${process.env.FRONTEND_URL}/bookings`,
       cancel_url: `${process.env.FRONTEND_URL}/bookings`,
-      customer_email: buyer?.email,
-      // NEW — only worth saving the card when there's a remainder left to
-      // collect later. A 'full' payment offer has nothing left to charge, so
-      // skip the Customer object and setup_future_usage entirely for it.
-      ...(offer.paymentMode !== 'full' && {
-        customer_creation: 'always',
-      }),
+      // Attaching to the buyer's canonical Stripe customer (shared across
+      // every feature, see StripeSmartCheckoutService) replaces the old
+      // per-offer customer_creation: 'always' — Checkout still saves the
+      // card, but now against the one customer smart-checkout looks up
+      // everywhere else, not a throwaway customer scoped to this offer.
+      ...StripeSmartCheckoutService.customerParamsFor(stripeCustomerId, buyer?.email),
       metadata,
       // No transfer_data/application_fee_amount here on purpose — the
       // seller's cut is no longer transferred at charge time. It accumulates
-      // in reserveAmountCents and is moved to the seller's Connect account by
-      // a scheduled job 7 days after the work is delivered.
+      // in reserveAmountCents and is moved to the seller's Connect account in
+      // two stages: 85% 14 days after the work is delivered, the remaining
+      // 15% at 21 days.
       payment_intent_data: {
         metadata,
-        // NEW — tells Stripe to keep this payment method attached to the
-        // Customer for a later off-session charge (the completion charge).
-        ...(offer.paymentMode !== 'full' && {
-          setup_future_usage: 'off_session',
-        }),
+        // Only worth saving the card when there's a remainder left to
+        // collect later. A 'full' payment offer has nothing left to charge,
+        // so skip setup_future_usage entirely for it.
+        ...(offer.paymentMode !== 'full' && stripeCustomerId
+          ? { setup_future_usage: 'off_session' }
+          : {}),
       },
     });
 
@@ -1223,12 +1328,13 @@ export class ShopCustomOfferService {
     const paidStatus = offer.origin === 'shop_listing' ? 'pending_talent_approval' : 'accepted';
 
     // A milestones offer's money must NEVER enter reserveAmountCents. That
-    // column is what releaseCustomOfferReserves pays out against the WHOLE
-    // offer 7 days after deliveredAt; milestone money is released per stage by
-    // releaseCustomOfferMilestoneReserves instead. Feeding both from the same
-    // payment would transfer it twice. Leaving it at 0 here keeps the two
-    // release paths structurally incapable of overlapping — and still lets
-    // the whole-offer path do its other job on these offers, releasing tips.
+    // column is what releaseCustomOfferStandard/FinalReserves pay out
+    // against the WHOLE offer, 14/21 days after deliveredAt; milestone money
+    // is released per stage by releaseCustomOfferMilestoneStandard/FinalReserves
+    // instead. Feeding both from the same payment would transfer it twice.
+    // Leaving it at 0 here keeps the two release paths structurally
+    // incapable of overlapping — and still lets the whole-offer path do its
+    // other job on these offers, releasing tips.
     const isMilestones = offer.paymentMode === 'milestones';
 
     const [updated] = await db
@@ -1239,7 +1345,7 @@ export class ShopCustomOfferService {
         stripeCustomerId, // NEW
         dueDate: computedDueDate, // NEW — the real due date, set here for the first time
         resolvedAt: paidAt,
-        // Held (not transferred) until 7 days after delivery — see createAcceptCheckout.
+        // Held (not transferred) until 14/21 days after delivery — see createAcceptCheckout.
         ...(isMilestones ? {} : { reserveAmountCents: offer.sellerReceiveCents ?? 0 }),
         updatedAt: paidAt,
       })
@@ -1249,6 +1355,15 @@ export class ShopCustomOfferService {
       .returning();
 
     if (!updated) return; // claimed concurrently
+
+    if (!isMilestones && updated.reserveAmountCents > 0) {
+      await PayoutLedgerService.creditHold(updated.sellerId, updated.reserveAmountCents, {
+        sourceType: 'shop_custom_offer',
+        sourceId: updated.id,
+      }).catch(err =>
+        logger.error(`[ShopCustomOffer] ledger creditHold failed for offer ${updated.id}: ${err.message}`)
+      );
+    }
 
     // Stage 1 of a milestones offer is paid by this very session, so its live
     // row is marked funded here. The offer's own chargedCents /
@@ -1338,15 +1453,52 @@ export class ShopCustomOfferService {
       );
     }
 
-    // A milestones offer has one payment intent PER FUNDED STAGE, so the
-    // single-intent path below would refund at most the first one. Refunds run
-    // BEFORE the row is marked cancelled: if one throws, the offer stays
-    // 'accepted' and the whole cancellation can simply be retried (every
-    // refund call is idempotent).
-    const stripeRefundId =
-      offer.paymentMode === 'milestones'
-        ? await this._refundMilestoneCharges(offer, userId)
-        : await this._refundOfferCharge(offer, userId);
+    // POLICY: cancelling is not a self-serve refund. A buyer who cancels
+    // gets no automatic refund — money already charged stays charged. The
+    // only way a buyer gets money back is a Report an Issue dispute that
+    // Customer Service reviews and approves. A seller/talent who cancels
+    // (backing out on a project they accepted) still refunds the buyer in
+    // full automatically, same as declining a paid listing purchase.
+    const isBuyerCancelling = userId === offer.buyerId;
+
+    let stripeRefundId = null;
+    if (!isBuyerCancelling) {
+      // Whatever hasn't already been paid out to the seller can still be
+      // refunded from the platform balance. A non-milestone offer's reserve
+      // can release before the offer is ever marked 'completed' (see
+      // releaseCustomOfferStandard/FinalReserves — they fire on 'accepted'
+      // offers too, once deliveredAt is old enough), and since Phase 1 that
+      // happens in TWO stages: 85% at Day 14 (standardReleasedAt set,
+      // reserveAmountCents still > 0 for the remaining 15%), the rest at Day
+      // 21 (reserveAmountCents reaches 0). Refunding the FULL charge — which
+      // is all _refundOfferCharge ever does, no partial amount — is unsafe
+      // the moment ANY portion has gone out, not only once ALL of it has.
+      // Gating on reserveAmountCents === 0 alone missed exactly that
+      // in-between state and would have double-paid: buyer refunded in
+      // full, seller keeps the 85% already transferred. Route both cases to
+      // the dispute/admin path instead, mirroring the already-released
+      // guard in _refundMilestoneCharges just below.
+      if (
+        offer.paymentMode !== 'milestones' &&
+        offer.chargedCents > 0 &&
+        (offer.standardReleasedAt || (offer.reserveAmountCents ?? 0) === 0)
+      ) {
+        throw new ApiError(
+          409,
+          'This project has already been paid out to the seller and can no longer be auto-refunded — raise an issue instead so Customer Service can review it.'
+        );
+      }
+
+      // A milestones offer has one payment intent PER FUNDED STAGE, so the
+      // single-intent path above would refund at most the first one. Refunds
+      // run BEFORE the row is marked cancelled: if one throws, the offer
+      // stays 'accepted' and the whole cancellation can simply be retried
+      // (every refund call is idempotent).
+      stripeRefundId =
+        offer.paymentMode === 'milestones'
+          ? await this._refundMilestoneCharges(offer, userId)
+          : await this._refundOfferCharge(offer, userId);
+    }
 
     const now = new Date();
     const [updated] = await db
@@ -1355,6 +1507,12 @@ export class ShopCustomOfferService {
         status: 'cancelled',
         resolvedAt: now,
         updatedAt: now,
+        // Only zero the reserve when a refund actually fired (seller
+        // cancelling) — the buyer already got that money back, so the
+        // release cron must never also pay it out to the seller. A buyer
+        // cancelling with no refund leaves reserveAmountCents untouched, so
+        // the seller is still paid on the normal schedule.
+        ...(stripeRefundId ? { reserveAmountCents: 0 } : {}),
       })
       .where(
         and(eq(shopCustomServiceOffers.id, offerId), eq(shopCustomServiceOffers.status, 'accepted'))
@@ -1365,10 +1523,10 @@ export class ShopCustomOfferService {
 
     await this.logActivity(offerId, userId, 'offer_cancelled', {
       reason: reason || null,
-      refundedCents: offer.chargedCents ?? 0,
+      refundedCents: stripeRefundId ? (offer.chargedCents ?? 0) : 0,
     });
 
-    if (offer.chargedCents > 0) {
+    if (stripeRefundId) {
       await UserSpendService.markSpendRefunded({
         userId: offer.buyerId,
         referenceId: offer.id,
@@ -1390,7 +1548,10 @@ export class ShopCustomOfferService {
       type: 'shop_custom_offer',
       relatedId: offer.id,
       redirectTo: `/bookings?offerId=${offer.id}`,
-      metadata: { offerId: offer.id, refundedCents: offer.chargedCents ?? 0 },
+      metadata: {
+        offerId: offer.id,
+        refundedCents: stripeRefundId ? (offer.chargedCents ?? 0) : 0,
+      },
     }).catch(err => logger.error(`[ShopCustomOffer] cancel notify failed: ${err.message}`));
     this._emitOfferUpdate(io, updated);
     return this._stripAttachments(updated);
@@ -1398,21 +1559,30 @@ export class ShopCustomOfferService {
   /**
    * Refunds every refundable stage of a milestones offer.
    *
-   * Refundable = 'funded' (paid, buyer hasn't approved it yet) and 'completed'
-   * with releasedAt still null (approved, but still inside its 7-day hold, so the
-   * money is on the platform's own balance).
+   * Refundable = 'funded' (paid, buyer hasn't approved it yet) and
+   * 'completed' with NEITHER release stage fired yet — i.e. still fully
+   * inside its Day 14/21 hold, so the money is entirely on the platform's
+   * own balance.
    *
-   * POLICY — a stage that has already 'released' CANNOT be refunded: those
-   * funds left the platform for the seller's own Connect account. Rather than
-   * silently issuing a partial refund and leaving the offer in an ambiguous
-   * half-paid state, the WHOLE cancellation is blocked with a 409 naming the
-   * released stages, so the parties resolve it through the dispute flow (or an
-   * admin) with the real numbers visible.
+   * POLICY — a stage with ANY portion already released CANNOT be refunded:
+   * _refundPaymentIntent always refunds the FULL stage charge (it never
+   * takes a partial amount), so as soon as the Day 14 "standard" 85% has
+   * transferred out — status is still 'completed', releasedAt is still
+   * null at that point, only standardReleasedAt is set — a full refund
+   * would double-pay: buyer refunded in full, seller keeps the 85% already
+   * received. Checking releasedAt alone (the Day 21 "fully released"
+   * marker) missed that in-between state entirely. Rather than silently
+   * issuing a refund that's wrong by the released portion, the WHOLE
+   * cancellation is blocked with a 409 naming the affected stages, so the
+   * parties resolve it through the dispute flow (or an admin) with the real
+   * numbers visible.
    */
   static async _refundMilestoneCharges(offer, actorUserId) {
     const rows = await this._loadMilestoneRows(offer.id);
 
-    const released = rows.filter(r => r.status === 'released' || r.releasedAt);
+    const released = rows.filter(
+      r => r.status === 'released' || r.releasedAt || r.standardReleasedAt
+    );
     if (released.length > 0) {
       const labels = released.map(r => `#${r.position + 1} "${r.label}"`).join(', ');
       throw new ApiError(
@@ -1423,7 +1593,7 @@ export class ShopCustomOfferService {
 
     const refundable = rows.filter(
       r =>
-        (r.status === 'funded' || (r.status === 'completed' && !r.releasedAt)) &&
+        (r.status === 'funded' || (r.status === 'completed' && !r.standardReleasedAt)) &&
         r.stripePaymentIntentId &&
         r.chargedCents > 0
     );
@@ -1590,6 +1760,13 @@ export class ShopCustomOfferService {
           stripePaymentIntentId: paymentIntent.id,
         },
         actorUserId
+      );
+
+      await PayoutLedgerService.creditHold(offer.sellerId, fees.sellerReceiveCents, {
+        sourceType: 'shop_custom_offer',
+        sourceId: offer.id,
+      }).catch(err =>
+        logger.error(`[ShopCustomOffer] ledger creditHold failed for offer ${offer.id} completion charge: ${err.message}`)
       );
 
       return { offer: updated, requiresBuyerPayment: false };
@@ -1815,6 +1992,69 @@ export class ShopCustomOfferService {
   // }
 
   static async createRemainderCheckout(buyerId, offerId) {
+    const prep = await this._prepareRemainderCheckout(buyerId, offerId);
+
+    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId).catch(
+      err => {
+        logger.error(`[ShopCustomOffer] getOrCreateStripeCustomer failed: ${err.message}`);
+        return null;
+      }
+    );
+
+    return this._createHostedRemainderSession(prep, stripeCustomerId);
+  }
+
+  /**
+   * POST /shop/custom-offers/:offerId/smart-remainder-checkout
+   *
+   * Identical validation/persistence to createRemainderCheckout(), but if
+   * the buyer already has a saved card on file (attached during an earlier
+   * purchase anywhere on the platform — the Stripe customer is shared, see
+   * StripeSmartCheckoutService), charges it directly and records the
+   * payment immediately — no redirect, no checkout screen. Falls back to a
+   * normal hosted Checkout session whenever there's no saved card yet, or
+   * Stripe requires additional authentication (SCA).
+   */
+  static async createSmartRemainderCheckout(buyerId, offerId) {
+    const prep = await this._prepareRemainderCheckout(buyerId, offerId);
+    const { offer, remainingCents, fees } = prep;
+
+    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId);
+    const intent = await StripeSmartCheckoutService.tryOffSessionCharge({
+      stripeCustomerId,
+      amountCents: fees.chargedCents,
+      metadata: {
+        type: 'shop_custom_offer_remainder',
+        offerId: offer.id,
+        buyerId,
+        sellerId: offer.sellerId,
+      },
+    });
+
+    if (intent) {
+      // Reuses the exact bookkeeping/notification logic the webhook path
+      // runs — a synthetic "session" carrying just the fields
+      // handleRemainderPaymentWebhook actually reads.
+      await this.handleRemainderPaymentWebhook({
+        id: null,
+        payment_intent: intent.id,
+        metadata: {
+          type: 'shop_custom_offer_remainder',
+          offerId: offer.id,
+          buyerId,
+          sellerId: offer.sellerId,
+        },
+      });
+
+      return { instant: true, offerId: offer.id };
+    }
+
+    const hosted = await this._createHostedRemainderSession(prep, stripeCustomerId);
+    return { instant: false, ...hosted };
+  }
+
+  // ── Shared validation + fee computation for both remainder-checkout paths ─
+  static async _prepareRemainderCheckout(buyerId, offerId) {
     const offer = await this.loadOffer(offerId);
     if (offer.buyerId !== buyerId) throw new ApiError(403, 'This offer is not for you');
     if (offer.status !== 'accepted') {
@@ -1856,10 +2096,17 @@ export class ShopCustomOfferService {
       columns: { email: true },
     });
 
+    return { offer, buyer, remainingCents, fees };
+  }
+
+  // ── Hosted Stripe Checkout session — shared tail for both remainder paths ─
+  static async _createHostedRemainderSession(prep, stripeCustomerId) {
+    const { offer, buyer, remainingCents, fees } = prep;
+
     const metadata = {
       type: 'shop_custom_offer_remainder',
       offerId: offer.id,
-      buyerId,
+      buyerId: offer.buyerId,
       sellerId: offer.sellerId,
     };
 
@@ -1887,12 +2134,15 @@ export class ShopCustomOfferService {
       ],
       success_url: `${process.env.FRONTEND_URL}/bookings`,
       cancel_url: `${process.env.FRONTEND_URL}/bookings?tab=requests&status=cancelled`,
-      // Stripe rejects a session that sets both `customer` and
-      // `customer_email`, so these stay mutually exclusive: reuse the saved
-      // Customer when the offer has one, otherwise prefill the buyer's email.
-      ...(offer.stripeCustomerId
-        ? { customer: offer.stripeCustomerId }
-        : { customer_email: buyer?.email }),
+      // Prefer the buyer's canonical Stripe customer (shared across every
+      // feature, see StripeSmartCheckoutService) over the offer's own
+      // stripeCustomerId — the canonical one is what smart-checkout looks
+      // up everywhere else, so paying here keeps them in sync rather than
+      // diverging onto a second, offer-scoped customer.
+      ...StripeSmartCheckoutService.customerParamsFor(
+        stripeCustomerId || offer.stripeCustomerId,
+        buyer?.email
+      ),
       metadata,
       // No transfer_data/application_fee_amount here on purpose — see
       // createAcceptCheckout.
@@ -1949,7 +2199,7 @@ export class ShopCustomOfferService {
         sellerReceiveCents: (offer.sellerReceiveCents || 0) + fees.sellerReceiveCents,
         basePriceCoveredCents: (offer.basePriceCoveredCents || 0) + remainingCents,
         platformShareCents: (offer.platformShareCents || 0) + fees.platformShareCents,
-        // Held (not transferred) until 7 days after delivery — see createAcceptCheckout.
+        // Held (not transferred) until 14/21 days after delivery — see createAcceptCheckout.
         reserveAmountCents: (offer.reserveAmountCents || 0) + fees.sellerReceiveCents,
         stripePaymentIntentId: paymentIntentId,
         updatedAt: paidAt,
@@ -1960,6 +2210,13 @@ export class ShopCustomOfferService {
       .returning();
 
     if (!updated) return; // claimed concurrently
+
+    await PayoutLedgerService.creditHold(updated.sellerId, fees.sellerReceiveCents, {
+      sourceType: 'shop_custom_offer',
+      sourceId: updated.id,
+    }).catch(err =>
+      logger.error(`[ShopCustomOffer] ledger creditHold failed for offer ${updated.id} remainder: ${err.message}`)
+    );
 
     await this.logActivity(updated.id, updated.buyerId, 'remainder_paid', {
       chargedCents: fees.chargedCents,
@@ -2118,9 +2375,9 @@ export class ShopCustomOfferService {
         : { customer_email: buyer?.email }),
       metadata,
       // No transfer_data/application_fee_amount here on purpose — see
-      // createAcceptCheckout. This stage's seller cut is held until 7 days after
-      // the buyer approves it, then transferred by
-      // releaseCustomOfferMilestoneReserves.
+      // createAcceptCheckout. This stage's seller cut releases in two
+      // stages after the buyer approves it — 85% at 14 days, the remaining
+      // 15% at 21 days — via releaseCustomOfferMilestoneStandard/FinalReserves.
       payment_intent_data: { metadata },
     });
 
@@ -2273,17 +2530,25 @@ export class ShopCustomOfferService {
    */
   static async _approveMilestoneStage(offer, milestone, rows, { actorUserId, auto = false, io = null } = {}) {
     const now = new Date();
-    const releaseAt = new Date(now.getTime() + MILESTONE_RELEASE_HOLD_MS);
+    const standardReleaseAt = new Date(now.getTime() + MILESTONE_STANDARD_RELEASE_HOLD_MS);
+    const releaseAt = new Date(now.getTime() + MILESTONE_FINAL_RELEASE_HOLD_MS);
 
     const [approved] = await db
       .update(shopOfferMilestones)
-      .set({ status: 'completed', completedAt: now, releaseAt, updatedAt: now })
+      .set({ status: 'completed', completedAt: now, standardReleaseAt, releaseAt, updatedAt: now })
       .where(
         and(eq(shopOfferMilestones.id, milestone.id), eq(shopOfferMilestones.status, 'funded'))
       )
       .returning();
 
     if (!approved) throw new ApiError(409, 'This milestone was already approved');
+
+    await PayoutLedgerService.creditHold(offer.sellerId, approved.sellerReceiveCents ?? 0, {
+      sourceType: 'shop_offer_milestone',
+      sourceId: approved.id,
+    }).catch(err =>
+      logger.error(`[ShopCustomOffer] ledger creditHold failed for milestone ${approved.id}: ${err.message}`)
+    );
 
     await this.logActivity(offer.id, offer.buyerId, 'milestone_approved', {
       milestoneId: approved.id,
@@ -2298,7 +2563,7 @@ export class ShopCustomOfferService {
       title: 'Milestone approved',
       message: `"${approved.label}" on "${offer.title}" was approved${
         auto ? ' automatically' : ''
-      } — those funds are held for 7 days, then take 2-3 more business days to reach your account (about 10 days total).`,
+      } — those funds are held for 14 days, then take 2-3 more business days to reach your account (the remaining 15% follows the same way at 21 days).`,
       type: 'shop_custom_offer',
       relatedId: offer.id,
       redirectTo: `/bookings?offerId=${offer.id}`,
@@ -2857,9 +3122,9 @@ export class ShopCustomOfferService {
 
     // The seller's cut is the full tip amount (the 7.5% Platform & Service
     // Fee is paid on top by the buyer, not deducted from it — see
-    // computeTipFees). Held (not transferred) until 7 days after delivery, same as the
-    // rest of the offer's payments — see createAcceptCheckout. A tip often
-    // arrives after the offer's earlier reserve already released, which is
+    // computeTipFees). Held (not transferred) until 14/21 days after delivery,
+    // same as the rest of the offer's payments — see createAcceptCheckout. A
+    // tip often arrives after the offer's earlier reserve already released, which is
     // exactly why release zeroes reserveAmountCents instead of just
     // stamping reserveReleasedAt: this accumulation is always safe to add
     // to, and a late tip on an already-released offer is simply picked up
@@ -2871,6 +3136,13 @@ export class ShopCustomOfferService {
         updatedAt: paidAt,
       })
       .where(eq(shopCustomServiceOffers.id, updated.offerId));
+
+    await PayoutLedgerService.creditHold(updated.sellerId, updated.amountCents, {
+      sourceType: 'shop_custom_offer_tip',
+      sourceId: updated.id,
+    }).catch(err =>
+      logger.error(`[ShopCustomOffer] ledger creditHold failed for tip ${updated.id}: ${err.message}`)
+    );
 
     await UserSpendService.recordSpend({
       userId: updated.buyerId,

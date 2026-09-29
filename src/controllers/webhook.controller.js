@@ -28,7 +28,8 @@ import { GroupCourseService } from '../services/groupCourse.service.js';
 import { PriorityMessageService } from '../services/priorityMessage.service.js';
 import { TalentSessionService } from '../services/talentSession.service.js';
 import { ShopOrderService } from '../services/shop/shopOrder.service.js';
-import { ShopCustomOfferService } from '../services/shop/shopCustomOffer.service.js';   
+import { ShopCustomOfferService } from '../services/shop/shopCustomOffer.service.js';
+import { handleDisputeCreated, handleDisputeClosed } from '../services/paymentDispute.service.js';
 import { priorityMessagePayments } from '../db/schema/priorityMessagePayments.js';
 import { stripeConnectAccounts } from '../db/schema/stripeConnect.js';
 import {
@@ -247,6 +248,13 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
       } else {
         await SubscriptionService.handleInvoicePaymentFailed(invoice);
       }
+    } else if (event.type === 'charge.dispute.created') {
+      // Phase 4 of the payout architecture — see PAYMENTS_ARCHITECTURE.md §5.
+      // Requires this webhook endpoint to be subscribed to
+      // charge.dispute.created / .closed in the Stripe Dashboard.
+      await handleDisputeCreated(event.data.object);
+    } else if (event.type === 'charge.dispute.closed') {
+      await handleDisputeClosed(event.data.object);
     } else if (event.type === 'account.updated') {
       const account = event.data.object;
       await db
@@ -266,7 +274,7 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
   }
 });
 
-async function handleCheckoutSession(session) {
+export async function handleCheckoutSession(session) {
   const paymentId = session.payment_intent || session.id;
   let order = await db.query.orders.findFirst({
     where: eq(orders.paymentIntentId, paymentId),

@@ -210,6 +210,35 @@ export class TalentIssueService {
     // ── Stripe refund ──────────────────────────────────────────────────────
     if (action === 'refund' && refundFullAmount && issue.stripePaymentIntentId) {
       if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+
+      // The talent's cut is held on the platform's own balance and only
+      // moves to their Connect account later via a standalone transfer —
+      // there is no automatic clawback path once that's happened. Same
+      // guard shopRefund.service.js and shopCustomOffer.service.js apply.
+      if (issue.entityType === 'session') {
+        const session = await db.query.talentSessions.findFirst({
+          where: eq(talentSessions.id, issue.entityId),
+          columns: { standardReleasedAt: true, reserveAmountCents: true },
+        });
+        if (session?.standardReleasedAt || (session?.reserveAmountCents ?? 0) === 0) {
+          throw new ApiError(
+            409,
+            'This session has already been paid out to the talent and can no longer be auto-refunded.'
+          );
+        }
+      } else {
+        const payment = await db.query.priorityMessagePayments.findFirst({
+          where: eq(priorityMessagePayments.id, issue.entityId),
+          columns: { standardReleasedAt: true, reserveAmountCents: true },
+        });
+        if (payment?.standardReleasedAt || (payment?.reserveAmountCents ?? 0) === 0) {
+          throw new ApiError(
+            409,
+            'This message has already been paid out to the talent and can no longer be auto-refunded.'
+          );
+        }
+      }
+
       try {
         const stripeRefund = await stripe.refunds.create({
           payment_intent: issue.stripePaymentIntentId,

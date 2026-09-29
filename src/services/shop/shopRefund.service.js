@@ -160,6 +160,18 @@ export class ShopRefundService {
     });
     if (!order) throw new ApiError(404, 'Order not found');
     if (order.status === 'refunded') throw new ApiError(409, 'This order was already refunded');
+    // The seller's cut is held on the PLATFORM's own balance and only moves
+    // to their Connect account later via a standalone, untracked
+    // stripe.transfers.create() (see the "No transfer_data" comment in
+    // ShopOrderService) — there is no linked Transfer for Stripe to reverse,
+    // and once released there is no automatic clawback path at all. Same
+    // guard shopCustomOffer.service.js's cancelOffer() applies.
+    if (order.standardReleasedAt || (order.reserveAmountCents ?? 0) === 0) {
+      throw new ApiError(
+        409,
+        'This order has already been paid out to the seller and can no longer be auto-refunded — raise an issue instead so Customer Service can review it.'
+      );
+    }
 
     let stripeRefundId = null;
 
@@ -173,16 +185,15 @@ export class ShopRefundService {
       // Refund the base price only — the order processing fee and the 5%
       // platform fee are flat/percentage, non-refundable Briteside revenue
       // charges (see ShopOrderService.computeFees), same as ticket and
-      // priority-message refunds.
+      // priority-message refunds. No reverse_transfer/refund_application_fee
+      // here — this charge was never split with transfer_data, so there is
+      // no Transfer or application fee tied to it to reverse (see the guard
+      // above for why the seller's cut has to still be UNRELEASED for this
+      // refund path to even be reachable).
       const refund = await stripe.refunds.create({
         payment_intent: order.stripePaymentIntentId,
         amount: order.priceCents,
         reason: 'requested_by_customer',
-        // Claws the money back out of the seller's Connect balance while the
-        // platform keeps its fee — the seller made the sale, so the seller
-        // returns it. Same choice event ticket refunds make.
-        reverse_transfer: true,
-        refund_application_fee: false,
         metadata: { requestId: request.id, orderId: order.id },
       });
       stripeRefundId = refund.id;

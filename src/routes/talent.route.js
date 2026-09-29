@@ -18,6 +18,7 @@ import {
   getAvailability,
   getAvailableSlots,
   createSessionCheckout,
+  createSmartSessionCheckout,
   bookSession,
   confirmSession,
   declineSession,
@@ -62,6 +63,13 @@ import {
   listTransactions,
   getWalletSummary,
 } from '../controllers/talentEarnings.controller.js';
+import {
+  getLedger,
+  setPayoutSchedule,
+  requestWithdrawal,
+  getEarlyPayoutEligibility,
+  claimEarlyPayoutHandler,
+} from '../controllers/payoutLedger.controller.js';
 
 const router = express.Router();
 
@@ -132,7 +140,17 @@ router.post('/me/payout-methods', authMiddleware, addPayoutMethod);
 router.put('/me/payout-methods/:methodId/default', authMiddleware, setDefaultPayoutMethod);
 router.delete('/me/payout-methods/:methodId', authMiddleware, deletePayoutMethod);
 
+// ── Payout ledger (Pending/Available/Reserve) — see PAYMENTS_ARCHITECTURE.md ──
+router.get('/me/payout-ledger', authMiddleware, getLedger);
+router.put('/me/payout-ledger/schedule', authMiddleware, setPayoutSchedule);
+router.post('/me/payout-ledger/withdraw', authMiddleware, requestWithdrawal);
+router.get('/me/payout-ledger/early-payout', authMiddleware, getEarlyPayoutEligibility);
+router.post('/me/payout-ledger/early-payout/claim', authMiddleware, claimEarlyPayoutHandler);
+
 router.post('/sessions/checkout', authMiddleware, createSessionCheckout);
+// Same booking, charges a saved card directly (no redirect) when the booker
+// already has one on file.
+router.post('/sessions/smart-checkout', authMiddleware, createSmartSessionCheckout);
 router.post('/sessions/book', authMiddleware, bookSession);
 router.post('/sessions/:sessionId/tip/checkout', authMiddleware, createSessionTipCheckout);
 

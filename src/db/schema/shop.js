@@ -204,14 +204,17 @@ export const shopOrders = pgTable(
 
     paidAt: timestamp('paid_at', { withTimezone: true }),
 
-    // 7-day payout hold — the seller's cut isn't transferred at checkout; it's
-    // held on the platform's own Stripe balance and moved to the seller's
-    // Connect account by a scheduled job once 7 days have passed since paidAt.
+    // Payout hold, two-stage per PAYMENTS_ARCHITECTURE.md Phase 1: 85% of
+    // reserveAmountCents releases at Day 14 (standardReleasedAt), the
+    // remaining 15% at Day 21 (reserveReleasedAt — same column/meaning as
+    // before: "fully released"). Neither leg transfers at checkout; both are
+    // held on the platform's own Stripe balance until their own cron pass.
     // Not used for an in-app-purchase order (see purchaseChannel below) — an
     // IAP sale never touches Stripe, so there's no Stripe balance to release
-    // from; reserveAmountCents stays 0 and reserveReleasedAt stays null for
-    // those, and sellerReceiveCents there is owed-but-settled-separately.
+    // from; reserveAmountCents stays 0 and both release timestamps stay null
+    // for those, and sellerReceiveCents there is owed-but-settled-separately.
     reserveAmountCents: integer('reserve_amount_cents').default(0),
+    standardReleasedAt: timestamp('standard_released_at', { withTimezone: true }),
     reserveReleasedAt: timestamp('reserve_released_at', { withTimezone: true }),
 
     // ── In-app purchase (App-only) ──────────────────────────────────────────
@@ -582,11 +585,15 @@ deliveredAt: timestamp('delivered_at', { withTimezone: true }),
     stripeCustomerId: varchar('stripe_customer_id', { length: 255 }),
 
     // Delivery-based escrow — the seller's cut from each payment (deposit,
-    // remainder, tip) isn't transferred at charge time; it accumulates here
-    // and is moved to the seller's Connect account by a scheduled job 7 days
-    // after deliveredAt. deliveredAt resets to null on a revision request,
-    // which naturally re-holds any not-yet-released amount too.
+    // remainder, tip) isn't transferred at charge time; it accumulates here.
+    // Two-stage per PAYMENTS_ARCHITECTURE.md Phase 1: 85% moves to the
+    // seller's Connect account at Day 14 after deliveredAt
+    // (standardReleasedAt), the remaining 15% at Day 21 (reserveReleasedAt —
+    // same column/meaning as before: "fully released"). deliveredAt resets
+    // to null on a revision request, which naturally re-holds any
+    // not-yet-released amount and both release timestamps too.
     reserveAmountCents: integer('reserve_amount_cents').default(0),
+    standardReleasedAt: timestamp('standard_released_at', { withTimezone: true }),
     reserveReleasedAt: timestamp('reserve_released_at', { withTimezone: true }),
 
     completedAt: timestamp('completed_at', { withTimezone: true }),
@@ -658,7 +665,14 @@ export const shopOfferMilestones = pgTable(
 
     fundedAt: timestamp('funded_at', { withTimezone: true }),
     completedAt: timestamp('completed_at', { withTimezone: true }),
-    // completedAt + 7 days — what the per-milestone release cron scans on.
+    // Two-stage per PAYMENTS_ARCHITECTURE.md Phase 1, same split as every
+    // other flow's reserve: completedAt + 14 days for the 85% "standard"
+    // portion (standardReleaseAt / standardReleasedAt), completedAt + 21
+    // days for the remaining 15% (releaseAt / releasedAt — same
+    // columns/meaning as before: "fully released"; previously completedAt +
+    // 7 days for the whole amount in one pass).
+    standardReleaseAt: timestamp('standard_release_at', { withTimezone: true }),
+    standardReleasedAt: timestamp('standard_released_at', { withTimezone: true }),
     releaseAt: timestamp('release_at', { withTimezone: true }),
     releasedAt: timestamp('released_at', { withTimezone: true }),
     transferId: varchar('transfer_id', { length: 255 }),

@@ -7,6 +7,7 @@ import {
 } from '../middlewares/eventAccess.middleware.js';
 import {
   createCheckoutSession,
+  createSmartCheckoutSession,
   getPublishableKey,
   checkRefundEligibility,
   applyRefund,
@@ -24,6 +25,9 @@ router.get('/config', getPublishableKey);
 
 // Protected route: create a Stripe Checkout Session for an order
 router.post('/create-checkout-session', authMiddleware, createCheckoutSession);
+// Same purchase, charges a saved card directly (no redirect) when the buyer
+// already has one on file.
+router.post('/smart-checkout-session', authMiddleware, createSmartCheckoutSession);
 // Refund endpoints
 router.get('/orders/:orderId/refund-eligibility', authMiddleware, checkRefundEligibility);
 router.post('/orders/:orderId/refund', authMiddleware, teamMemberAuthMiddleware, applyRefund);

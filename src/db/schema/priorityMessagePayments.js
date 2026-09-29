@@ -71,9 +71,13 @@ export const priorityMessagePayments = pgTable(
     refundedAt: timestamp('refunded_at', { withTimezone: true }),
 
     // SLA escrow — the talent's cut isn't transferred at checkout; it's held
-    // on the platform's own Stripe balance and moved to the talent's Connect
-    // account by a scheduled job 48h after repliedAt.
+    // on the platform's own Stripe balance. Two-stage per
+    // PAYMENTS_ARCHITECTURE.md Phase 1: 85% releases at Day 14 after
+    // repliedAt (standardReleasedAt), the remaining 15% at Day 21
+    // (reserveReleasedAt — same column/meaning as before: "fully released";
+    // previously a single 48h hold for the whole amount).
     reserveAmountCents: integer('reserve_amount_cents').default(0),
+    standardReleasedAt: timestamp('standard_released_at', { withTimezone: true }),
     reserveReleasedAt: timestamp('reserve_released_at', { withTimezone: true }),
 
     metadata: jsonb('metadata').default(sql`'{}'::jsonb`),

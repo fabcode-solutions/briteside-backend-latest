@@ -11,6 +11,7 @@ import { requireFeature } from '../middlewares/subscription.middleware.js';
 import { FEATURES } from '../constants/features.js';
 import {
   createCheckout,
+  createSmartCheckout,
   stripeWebhook,
   getPaymentStatus,
   getReceivedMessages,
@@ -35,6 +36,9 @@ router.use(authMiddleware);
 
 // Customer sends a priority message — no Plus required (paying per message)
 router.post('/', createCheckout);
+// Same payment, but charges a saved card directly (no redirect) when the
+// sender already has one on file from an earlier priority message.
+router.post('/smart-checkout', createSmartCheckout);
 // Proactive check before the sender even fills out the form — lets the
 // talent-profile "Send Message" dialog warn about an outstanding pending
 // message immediately, instead of only failing at checkout submission.

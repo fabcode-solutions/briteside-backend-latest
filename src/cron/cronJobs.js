@@ -17,6 +17,7 @@ import {
   processCustomOfferReviewReminders,
 } from './sessionReminders.js';
 import { runReserveRelease } from './reserveRelease.js';
+import { runPayoutSweep } from './payoutSweep.js';
 import { startPriorityMessageRefundCron } from './priorityMessageRefund.js';
 import { publishScheduledPosts } from './publishScheduledPosts.js';
 import { cleanupStaleImports } from './cleanupStaleImports.js';
@@ -105,6 +106,11 @@ export const initializeCronJobs = () => {
 
   // Daily at 1 AM — release held reserves back to organizers after hold window
   cron.schedule('0 1 * * *', runCron('reserveRelease', runReserveRelease));
+
+  // Scheduled sweep — Phase 2 of the payout architecture. 2am on the 1st and
+  // 15th of each month, after the 1am reserve-release pass above has had a
+  // chance to credit the day's Day-14/21 releases into Available first.
+  cron.schedule('0 2 1,15 * *', runCron('payoutSweep', runPayoutSweep));
 
   // Every 30 minutes — refund unanswered priority messages past 48h
   startPriorityMessageRefundCron();

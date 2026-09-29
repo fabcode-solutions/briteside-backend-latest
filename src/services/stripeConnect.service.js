@@ -72,6 +72,18 @@ export class StripeConnectService {
         card_payments: { requested: true },
         transfers: { requested: true },
       },
+      // Without this, Stripe's own default automatic payout schedule pays
+      // out this account's Connect balance on its own timetable the moment
+      // reserveRelease.js transfers money into it — completely bypassing the
+      // Pending/Available/Reserve ledger and its 1st/15th sweep (see
+      // PAYMENTS_ARCHITECTURE.md §1.4). 'manual' is also a hard prerequisite
+      // for Instant Payouts. Existing accounts are migrated separately —
+      // see scripts/migratePayoutScheduleToManual.mjs.
+      settings: {
+        payouts: {
+          schedule: { interval: 'manual' },
+        },
+      },
     });
 
     const [record] = await db

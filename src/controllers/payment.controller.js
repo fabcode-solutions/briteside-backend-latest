@@ -59,6 +59,59 @@ export const createCheckoutSession = catchAsync(async (req, res) => {
   });
 });
 
+/**
+ * Same purchase as createCheckoutSession, but charges a saved card directly
+ * (no redirect) when the buyer already has one on file. Falls back to a
+ * normal hosted Checkout session otherwise.
+ */
+export const createSmartCheckoutSession = catchAsync(async (req, res) => {
+  const {
+    eventId,
+    ticketSelections = [],
+    merchandiseSelections = [],
+    holderName,
+    holderEmail,
+    holderPhone,
+    billingAddress,
+  } = req.body;
+
+  if (!eventId) {
+    throw new ApiError(400, 'eventId is required');
+  }
+
+  if (!ticketSelections || ticketSelections.length === 0) {
+    throw new ApiError(400, 'Ticket selections required');
+  }
+
+  const order = await OrderService.createOrder(
+    req.user.id,
+    eventId,
+    ticketSelections,
+    merchandiseSelections,
+    { holderName, holderPhone, holderEmail, billingAddress }
+  );
+
+  const successUrl = req.body.successUrl;
+  const cancelUrl = req.body.cancelUrl;
+
+  const metadata = {
+    userId: req.user.id,
+    holderName: holderName || null,
+    holderEmail: holderEmail || null,
+    holderPhone: holderPhone || null,
+    eventScheduleId: ticketSelections[0]?.eventScheduleId || null,
+  };
+
+  const result = await PaymentService.createSmartCheckoutSession(
+    order,
+    successUrl,
+    cancelUrl,
+    metadata
+  );
+
+  res.json({ success: true, data: result });
+});
+
 export const getPublishableKey = catchAsync(async (req, res) => {
   const publishableKey = PaymentService.getPublishableKey
     ? PaymentService.getPublishableKey()
