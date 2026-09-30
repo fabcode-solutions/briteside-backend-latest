@@ -447,7 +447,6 @@ export class PriorityMessageService {
           }))
         )
         .returning();
-
       const allAttachRows = [];
       for (const m of msgList) {
         for (const file of m.attachments) {
