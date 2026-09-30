@@ -514,18 +514,18 @@ export class PriorityMessageService {
 
   // ── Hosted Stripe Checkout session — shared tail for both entry points ────
   static async _createHostedSession(prep, platform, stripeCustomerId) {
-    const {
-      payment,
-      profile,
-      sender,
-      talentName,
-      talentProfileId,
-      msgList,
-      chargedCents,
-      platformAndServiceFeeCents,
-      applicationFeeCents,
-      talentNetCents,
-    };
+    // const {
+    //   payment,
+    //   profile,
+    //   sender,
+    //   talentName,
+    //   talentProfileId,
+    //   msgList,
+    //   chargedCents,
+    //   platformAndServiceFeeCents,
+    //   applicationFeeCents,
+    //   talentNetCents,
+    // };
   }
 
   static async createCheckout(
