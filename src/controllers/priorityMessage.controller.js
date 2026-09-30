@@ -5,6 +5,7 @@
 import { catchAsync } from '../utils/catch-async.js';
 import ApiError from '../utils/api-error.js';
 import { PriorityMessageService } from '../services/priorityMessage.service.js';
+import { PriorityMessageIapService } from '../services/priorityMessageIap.service.js';
 import Stripe from 'stripe';
 import config from '../config/config.js';
 
@@ -113,6 +114,58 @@ export const createSmartCheckout = catchAsync(async (req, res) => {
   );
 
   res.status(201).json({ success: true, data: result });
+});
+
+/**
+ * POST /priority-messages/iap/prepare
+ * "Pay in App" (native App Store / Google Play sheet). Same body as
+ * createCheckout; creates the pending payment and picks the consumable price
+ * tier the App should purchase. Returns { paymentId, iapProductId, ... }.
+ */
+export const prepareIapPurchase = catchAsync(async (req, res) => {
+  const { talentProfileId, subject, messageContent, messages, contentExtended, attachmentIds } =
+    req.body;
+  if (!talentProfileId) throw new ApiError(400, '`talentProfileId` is required');
+  const hasArray = Array.isArray(messages) && messages.length > 0;
+  if (!hasArray && !messageContent?.trim()) {
+    throw new ApiError(400, '`messages` array or `messageContent` is required');
+  }
+
+  const result = await PriorityMessageIapService.prepare(req.user.id, {
+    talentProfileId,
+    subject: subject?.trim() || undefined,
+    messageContent: messageContent?.trim() || null,
+    messages,
+    contentExtended,
+    attachmentIds,
+  });
+  res.status(201).json({ success: true, data: result });
+});
+
+/**
+ * POST /priority-messages/:paymentId/iap/finalize
+ * Body: { store: 'apple' | 'google', transactionId?, purchaseToken? }
+ * Verifies the native purchase with Apple/Google, then delivers the message.
+ */
+/**
+ * GET /priority-messages/iap/tiers
+ * Consumable price tiers for "Pay in App" — the App prices its button from
+ * this list (and each product's localized store price).
+ */
+export const getIapTiers = catchAsync(async (req, res) => {
+  res.json({ success: true, data: PriorityMessageIapService.getTierConfig() });
+});
+
+export const finalizeIapPurchase = catchAsync(async (req, res) => {
+  const { store, transactionId, purchaseToken } = req.body || {};
+  const result = await PriorityMessageIapService.finalize(
+    req.user.id,
+    req.params.paymentId,
+    store,
+    { transactionId, purchaseToken },
+    req.app.get('io')
+  );
+  res.json({ success: true, message: 'Priority message sent', data: result });
 });
 
 export const stripeWebhook = catchAsync(async (req, res) => {
