@@ -140,7 +140,12 @@ export const talentSessions = pgTable(
     // If this session replaced an earlier one via reschedule
     rescheduledFromId: uuid('rescheduled_from_id'),
 
+    // Two-stage per PAYMENTS_ARCHITECTURE.md Phase 1: 85% of
+    // reserveAmountCents releases at Day 14 after billingEndedAt
+    // (standardReleasedAt), the remaining 15% at Day 21 (reserveReleasedAt —
+    // same column/meaning as before: "fully released").
     reserveAmountCents: integer('reserve_amount_cents').default(0),
+    standardReleasedAt: timestamp('standard_released_at', { withTimezone: true }),
     reserveReleasedAt: timestamp('reserve_released_at', { withTimezone: true }),
     platformShareCents: integer('platform_share_cents').default(0),
     stripeFeeCents: integer('stripe_fee_cents').default(0),

@@ -766,9 +766,42 @@ export class GroupService {
       }
     }
 
+    // The group's cover (coverImageUrl) and its photo/video gallery
+    // (groupMedia) are independent — a cover is never also supposed to
+    // appear as its own gallery tile (see GroupHeader.tsx's dedup filter,
+    // which hides a gallery item only while its URL still matches the
+    // CURRENT cover). Resolve what the cover will be after this update so
+    // both branches below can keep that invariant true going forward.
+    const resolvedCoverImageUrl =
+      groupFields.coverImageUrl !== undefined ? groupFields.coverImageUrl : oldGroup.coverImageUrl;
+
     if (media !== undefined) {
       await this.deleteAllGroupMedia(groupId, oldGroup.media);
-      if (media.length > 0) await this.createGroupMedia(groupId, userId, media);
+      // Drop any submitted item that duplicates the cover before recreating
+      // the gallery — the settings form round-trips the previous media list
+      // unchanged, so without this a stale duplicate (e.g. an old cover that
+      // was also a gallery row) gets resurrected on every save.
+      const dedupedMedia = resolvedCoverImageUrl
+        ? media.filter(m => m.mediaUrl !== resolvedCoverImageUrl)
+        : media;
+      if (dedupedMedia.length > 0) await this.createGroupMedia(groupId, userId, dedupedMedia);
+    } else if (resolvedCoverImageUrl !== oldGroup.coverImageUrl) {
+      // Cover-only update (no media payload this request). A pre-existing
+      // gallery row for the OLD cover was invisible while it matched
+      // coverImageUrl — now that the cover has moved on, that row would
+      // resurface as a second, stale "cover" in the gallery unless removed.
+      const staleCoverMedia = (oldGroup.media ?? []).find(
+        m => m.mediaUrl === oldGroup.coverImageUrl
+      );
+      if (staleCoverMedia) {
+        try {
+          const file = await FileManagementService.findByUrlOrKey(staleCoverMedia.mediaUrl);
+          if (file) await FileManagementService.decrementReference(file.id);
+        } catch (cleanupError) {
+          console.error('Error cleaning up stale group cover gallery row:', cleanupError);
+        }
+        await db.delete(groupMedia).where(eq(groupMedia.id, staleCoverMedia.id));
+      }
     }
 
     if (aboutGallery !== undefined) {                                // ← new
@@ -1391,35 +1424,14 @@ export class GroupService {
 }
 
 export class GroupCategoryService {
-  static async createGroupCategory(data) {
-    const [category] = await db
-      .insert(groupCategories)
-      .values({ ...data, createdAt: new Date() })
-      .returning();
-    return category;
-  }
-
+  // Create/update/delete moved to AdminGroupCategoryService
+  // (adminCategories.service.js), admin-only — see group.route.js.
   static async getGroupCategories() {
-    return db.select().from(groupCategories).orderBy(desc(groupCategories.createdAt));
-  }
-
-  static async deleteGroupCategory(categoryId) {
-    const [deleted] = await db
-      .delete(groupCategories)
-      .where(eq(groupCategories.id, categoryId))
-      .returning();
-    if (!deleted) throw new ApiError(404, 'Group category not found');
-    return deleted;
-  }
-
-  static async updateGroupCategory(categoryId, data) {
-    const [updated] = await db
-      .update(groupCategories)
-      .set(data)
-      .where(eq(groupCategories.id, categoryId))
-      .returning();
-    if (!updated) throw new ApiError(404, 'Group category not found');
-    return updated;
+    return db
+      .select()
+      .from(groupCategories)
+      .where(eq(groupCategories.isActive, true))
+      .orderBy(desc(groupCategories.createdAt));
   }
 }
 

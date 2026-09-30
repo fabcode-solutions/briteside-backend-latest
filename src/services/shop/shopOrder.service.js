@@ -14,6 +14,8 @@ import * as mailService from '../mail.service.js';
 import { ShopProductService } from './shopProduct.service.js';
 import { ShopDeliverableService } from './shopDeliverable.service.js';
 import { calculatePlatformAndServiceFeeCents } from '../../utils/orderProcessingFee.js';
+import { StripeSmartCheckoutService } from '../stripeSmartCheckout.service.js';
+import { PayoutLedgerService } from '../payoutLedger.service.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://briteside.app';
@@ -78,6 +80,60 @@ export class ShopOrderService {
    * Free products bypass Stripe entirely and are delivered immediately.
    */
   static async createCheckout(buyerId, productId, platform, customerInfo = {}) {
+    const prep = await this._prepareOrder(buyerId, productId, platform, customerInfo);
+    if (prep.free || prep.redirect) return prep.redirect ?? prep;
+
+    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId).catch(
+      err => {
+        logger.error(`[Shop] getOrCreateStripeCustomer failed: ${err.message}`);
+        return null;
+      }
+    );
+
+    return this._createHostedOrderSession(prep, platform, stripeCustomerId);
+  }
+
+  /**
+   * POST /shop/products/:productId/smart-checkout
+   *
+   * Identical validation/persistence to createCheckout(), but if the buyer
+   * already has a saved card on file (attached during an earlier purchase
+   * anywhere on the platform — the Stripe customer is shared, see
+   * StripeSmartCheckoutService), charges it directly and delivers the
+   * product immediately — no redirect, no checkout screen. Falls back to a
+   * normal hosted Checkout session whenever there's no saved card yet, or
+   * Stripe requires additional authentication (SCA).
+   */
+  static async createSmartCheckout(buyerId, productId, platform, customerInfo = {}) {
+    const prep = await this._prepareOrder(buyerId, productId, platform, customerInfo);
+    if (prep.free) return { instant: true, ...prep };
+    if (prep.redirect) return { instant: false, ...prep.redirect };
+
+    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId);
+    const intent = await StripeSmartCheckoutService.tryOffSessionCharge({
+      stripeCustomerId,
+      amountCents: prep.fees.chargedCents,
+      metadata: prep.metadata,
+    });
+
+    if (intent) {
+      // Reuses the exact delivery/notification/reserve logic the webhook
+      // path runs — a synthetic "session" carrying just the fields
+      // handlePaymentWebhook actually reads (metadata + payment_intent).
+      await this.handlePaymentWebhook({
+        id: null,
+        payment_intent: intent.id,
+        metadata: prep.metadata,
+      });
+      return { instant: true, free: false, orderId: prep.order.id };
+    }
+
+    const hosted = await this._createHostedOrderSession(prep, platform, stripeCustomerId);
+    return { instant: false, ...hosted };
+  }
+
+  // ── Shared validation + DB persistence for both checkout paths ────────────
+  static async _prepareOrder(buyerId, productId, platform, customerInfo = {}) {
     const product = await db.query.shopProducts.findFirst({
       where: eq(shopProducts.id, productId),
     });
@@ -98,7 +154,7 @@ export class ShopOrderService {
     // its pre-payment state, so it would strand at 'pending' forever.
     if (product.listingType === 'service' && product.priceCents > 0) {
       const { ShopCustomOfferService } = await import('./shopCustomOffer.service.js');
-      return ShopCustomOfferService.createListingPurchase(buyerId, product, platform);
+      return { redirect: await ShopCustomOfferService.createListingPurchase(buyerId, product, platform) };
     }
 
     const alreadyOwned = await this.findPaidOrder(buyerId, productId);
@@ -200,13 +256,6 @@ export class ShopOrderService {
       })
       .returning();
 
-    const redirectUrls = getRedirectUrls(
-      platform,
-      FRONTEND_URL,
-      '/purchases?checkout_session_id={CHECKOUT_SESSION_ID}&status=success',
-      '/purchases?checkout_session_id={CHECKOUT_SESSION_ID}&status=cancelled'
-    );
-
     // `type: 'shop'` is set on BOTH the session and the payment intent on
     // purpose: the webhook dispatcher reads session.metadata.type, while the
     // wallet buckets transfers by charge.metadata.type.
@@ -218,11 +267,35 @@ export class ShopOrderService {
       sellerId: product.userId,
     };
 
+    return {
+      product,
+      buyer,
+      customerEmail,
+      order,
+      sellerPriceCents,
+      platformAndServiceFeeCents,
+      fees,
+      metadata,
+    };
+  }
+
+  // ── Hosted Stripe Checkout session — shared tail for both entry points ────
+  static async _createHostedOrderSession(prep, platform, stripeCustomerId) {
+    const { product, buyer, customerEmail, order, sellerPriceCents, platformAndServiceFeeCents, metadata } =
+      prep;
+
+    const redirectUrls = getRedirectUrls(
+      platform,
+      FRONTEND_URL,
+      '/purchases?checkout_session_id={CHECKOUT_SESSION_ID}&status=success',
+      '/purchases?checkout_session_id={CHECKOUT_SESSION_ID}&status=cancelled'
+    );
+
     const stripeSession = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
       expires_at: Math.floor(Date.now() / 1000) + CHECKOUT_TTL_SECONDS,
-            line_items: [
+      line_items: [
         {
           price_data: {
             currency: 'usd',
@@ -247,7 +320,7 @@ export class ShopOrderService {
       ],
       success_url: redirectUrls.successUrl,
       cancel_url: redirectUrls.cancelUrl,
-      customer_email: customerEmail || buyer?.email,
+      ...StripeSmartCheckoutService.customerParamsFor(stripeCustomerId, customerEmail || buyer?.email),
       metadata,
       // No transfer_data/application_fee_amount here on purpose — the seller's
       // cut is no longer transferred at charge time. It's held on the
@@ -256,6 +329,10 @@ export class ShopOrderService {
       // scheduled job 7 days after paidAt, per the digital-content payout hold.
       payment_intent_data: {
         metadata,
+        // Saves the card the buyer enters to their Stripe customer for a
+        // future off-session charge (see createSmartCheckout) — requires
+        // `customer` above, which is why this is conditional on it too.
+        ...(stripeCustomerId ? { setup_future_usage: 'off_session' } : {}),
       },
     });
 
@@ -322,6 +399,11 @@ export class ShopOrderService {
       .update(shopProducts)
       .set({ salesCount: sql`${shopProducts.salesCount} + 1` })
       .where(eq(shopProducts.id, updated.productId));
+
+    await PayoutLedgerService.creditHold(updated.sellerId, updated.reserveAmountCents, {
+      sourceType: 'shop_order',
+      sourceId: updated.id,
+    }).catch(err => logger.error(`[Shop] ledger creditHold failed for order ${updated.id}: ${err.message}`));
 
     await UserSpendService.recordSpend({
       userId: updated.buyerId,

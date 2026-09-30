@@ -1,4 +1,4 @@
-import { pgTable, uuid, varchar, text, timestamp } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, varchar, text, timestamp, boolean } from 'drizzle-orm/pg-core';
 import { users } from './users.js';
 
 export const categories = pgTable('categories', {
@@ -9,6 +9,7 @@ export const categories = pgTable('categories', {
 
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   emoji: varchar('emoji', { length: 10 }),
+  isActive: boolean('is_active').default(true).notNull(),
 });
 
 export const userPreferences = pgTable('user_preferences', {

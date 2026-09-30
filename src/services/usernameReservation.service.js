@@ -5,6 +5,42 @@ import { eq, and, or, desc, asc, ilike, sql, ne } from 'drizzle-orm';
 import ApiError from '../utils/api-error.js';
 import httpStatus from 'http-status';
 
+// Every top-level frontend route (src/app/<name>, including everything
+// inside the (main)/(userActivity)/(auth) route groups, which don't add a
+// path segment) — a profile now renders at briteside.app/<username>, so a
+// user registering or renaming to one of these would make that real page
+// unreachable at its own URL (the static route always wins the collision;
+// the profile itself just becomes a dead link for that one user). Keep this
+// in sync with src/app's top-level folders in the frontend repo whenever a
+// new one is added.
+const RESERVED_USERNAMES = new Set([
+  // src/app top level
+  'admin', 'api', 'app', 'auth', 'call', 'contact', 'cookies', 'creat-story',
+  'door-sale', 'embed', 'event-organizer', 'faq', 'group-organizer', 'help',
+  'media-picker-demo', 'member-portal', 'monetize', 'notification',
+  'organizer-profile', 'organizerr', 'payment', 'privacy', 'provider',
+  'session', 'social', 'terms',
+  // (main) group
+  'book-demo', 'demo', 'event-faq', 'event-how-to', 'policies', 'pre-launch',
+  // (userActivity) group
+  'account', 'book-1-on-1', 'booking-confirmation', 'bookings',
+  'briteside-plus', 'create-event', 'create-group', 'create-organizer-profile',
+  'create-post', 'create-story', 'discover', 'discussion', 'edit-about-me',
+  'events', 'feed', 'go-live', 'group-dashboard', 'groups', 'live',
+  'manage-schedule', 'member-events', 'messages', 'notifications',
+  'organizer', 'organizer-portal', 'organizer-presets', 'profile',
+  'purchases', 'settings', 'spend-log', 'subscriptions', 'talent',
+  'talent-dashboard', 'user-profile',
+  // (auth) group
+  'forgot-password', 'login', 'register', 'reset-password',
+  // Common words worth blocking pre-emptively even without a route today
+  'www', 'support', 'billing', 'about', 'pricing', 'status', 'blog',
+]);
+
+export function isReservedUsername(username) {
+  return RESERVED_USERNAMES.has(username.toLowerCase().trim());
+}
+
 /**
  * Check if a username is available for reservation
  * Checks both existing users and pending/approved reservations
@@ -16,6 +52,10 @@ import httpStatus from 'http-status';
  */
 export const checkUsernameAvailability = async (username, { excludeUserId } = {}) => {
   const normalizedUsername = username.toLowerCase().trim();
+
+  if (isReservedUsername(normalizedUsername)) {
+    return { available: false, reason: 'This username is reserved' };
+  }
 
   // Check if username exists in users table
   const existingUser = await db.query.users.findFirst({
@@ -320,6 +360,10 @@ export const getApprovedReservationForUser = async (username, email) => {
 export const checkUsernameForRegistration = async (username, email) => {
   const normalizedUsername = username.toLowerCase().trim();
   const normalizedEmail = email?.toLowerCase().trim();
+
+  if (isReservedUsername(normalizedUsername)) {
+    return { isReserved: false, canUse: false, message: 'This username is reserved' };
+  }
 
   // First, check if username exists in users table
   const existingUser = await db.query.users.findFirst({

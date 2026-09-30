@@ -53,6 +53,8 @@ import timezone from 'dayjs/plugin/timezone.js';
 import { emitSocialChat } from '../socket/emitter.js';
 import { organizerSocialLinks } from '../db/schema/index.js';
 import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
+import { StripeSmartCheckoutService } from './stripeSmartCheckout.service.js';
+import { PayoutLedgerService } from './payoutLedger.service.js';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
@@ -614,36 +616,10 @@ export class TalentProfileService {
       };
     }
 
-    // ── Check paid priority messages ─────────────────────────────────────
-    const paidMessages = await db.query.priorityMessagePayments.findMany({
-      where: and(
-        eq(priorityMessagePayments.talentProfileId, talentProfileId),
-        eq(priorityMessagePayments.senderId, viewerId),
-        eq(priorityMessagePayments.status, 'paid')
-      ),
-      columns: { id: true },
-    });
-
-    for (const msg of paidMessages) {
-      const review = await db.query.talentReviews.findFirst({
-        where: eq(talentReviews.priorityMessageId, msg.id),
-        columns: { id: true },
-      });
-      if (!review) {
-        return {
-          canReview: true,
-          source: 'priority_message',
-          sourceId: msg.id,
-          existingReviewId: null,
-        };
-      }
-      return {
-        canReview: false,
-        source: 'priority_message',
-        sourceId: msg.id,
-        existingReviewId: review.id,
-      };
-    }
+    // Paying for a priority message is not a qualifying interaction for a
+    // review — a review prompt should only ever follow a completed 1:1
+    // Video booking or a completed service/project, never just sending a
+    // message.
 
     // ── Check completed custom offers ──────────────────────────────────────
     const completedOffers = await db.query.shopCustomServiceOffers.findMany({
@@ -1269,6 +1245,135 @@ export class TalentSessionService {
     platform,
     bookerTimezone,
   }) {
+    const prep = await this._prepareSessionBooking({
+      talentProfileId,
+      bookerId,
+      date,
+      time,
+      durationMins,
+      subject,
+      discussion,
+      isGift,
+      giftDetails,
+      giftCode,
+      bookerTimezone,
+    });
+
+    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(bookerId).catch(
+      err => {
+        console.warn(`[TalentSession] getOrCreateStripeCustomer failed: ${err.message}`);
+        return null;
+      }
+    );
+
+    return this._createHostedSessionCheckout(prep, platform, stripeCustomerId);
+  }
+
+  /**
+   * POST /talent/sessions/smart-checkout
+   *
+   * Identical validation/persistence to createCheckout(), but if the
+   * booker already has a saved card on file (attached during an earlier
+   * purchase anywhere on the platform — the Stripe customer is shared, see
+   * StripeSmartCheckoutService), charges it directly and confirms the
+   * booking request immediately — no redirect, no checkout screen. Falls
+   * back to a normal hosted Checkout session whenever there's no saved
+   * card yet, or Stripe requires additional authentication (SCA).
+   */
+  static async createSmartCheckout(
+    {
+      talentProfileId,
+      bookerId,
+      date,
+      time,
+      durationMins,
+      subject,
+      discussion,
+      isGift,
+      giftDetails,
+      giftCode,
+      platform,
+      bookerTimezone,
+    },
+    io = null
+  ) {
+    const prep = await this._prepareSessionBooking({
+      talentProfileId,
+      bookerId,
+      date,
+      time,
+      durationMins,
+      subject,
+      discussion,
+      isGift,
+      giftDetails,
+      giftCode,
+      bookerTimezone,
+    });
+    const { session, applicationFeeCents, estimatedStripeFeeCents, chargedCents } = prep;
+
+    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(bookerId);
+    const intent = await StripeSmartCheckoutService.tryOffSessionCharge({
+      stripeCustomerId,
+      amountCents: chargedCents,
+      metadata: {
+        type: 'talent_session',
+        sessionId: session.id,
+        bookerId,
+        talentUserId: prep.profile.userId,
+      },
+    });
+
+    if (intent) {
+      await db
+        .update(talentSessions)
+        .set({
+          reserveAmountCents: 0,
+          platformShareCents: applicationFeeCents,
+          stripeFeeCents: estimatedStripeFeeCents,
+          updatedAt: new Date(),
+        })
+        .where(eq(talentSessions.id, session.id));
+
+      // Reuses the exact confirmation/notification/reserve logic the
+      // webhook path runs — a synthetic "session" carrying just the
+      // fields handlePaymentWebhook actually reads.
+      await this.handlePaymentWebhook(
+        {
+          id: null,
+          payment_intent: intent.id,
+          amount_total: chargedCents,
+          metadata: {
+            type: 'talent_session',
+            sessionId: session.id,
+            bookerId,
+            talentUserId: prep.profile.userId,
+          },
+        },
+        io
+      );
+
+      return { instant: true, sessionId: session.id };
+    }
+
+    const hosted = await this._createHostedSessionCheckout(prep, platform, stripeCustomerId);
+    return { instant: false, ...hosted };
+  }
+
+  // ── Shared validation + DB persistence for both checkout paths ────────────
+  static async _prepareSessionBooking({
+    talentProfileId,
+    bookerId,
+    date,
+    time,
+    durationMins,
+    subject,
+    discussion,
+    isGift,
+    giftDetails,
+    giftCode,
+    bookerTimezone,
+  }) {
     if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
 
     const slots = await TalentAvailabilityService.getAvailableSlots(
@@ -1375,6 +1480,42 @@ export class TalentSessionService {
     // tracked for reporting only, never charged to the booker or the talent.
     const estimatedStripeFeeCents = Math.round(chargedCents * 0.029) + 30;
 
+    return {
+      session,
+      booker,
+      profile,
+      talentName,
+      bookerId,
+      durationMins,
+      subject,
+      date,
+      time,
+      talentPriceCents,
+      platformAndServiceFeeCents,
+      chargedCents,
+      applicationFeeCents,
+      estimatedStripeFeeCents,
+    };
+  }
+
+  // ── Hosted Stripe Checkout session — shared tail for both entry points ────
+  static async _createHostedSessionCheckout(prep, platform, stripeCustomerId) {
+    const {
+      session,
+      booker,
+      profile,
+      talentName,
+      bookerId,
+      durationMins,
+      subject,
+      date,
+      time,
+      talentPriceCents,
+      platformAndServiceFeeCents,
+      applicationFeeCents,
+      estimatedStripeFeeCents,
+    } = prep;
+
     const redirectUrls = getRedirectUrls(
       platform,
       FRONTEND_URL,
@@ -1411,7 +1552,9 @@ export class TalentSessionService {
       ],
       success_url: redirectUrls.successUrl,
       cancel_url: redirectUrls.cancelUrl,
-      customer_email: booker.email,
+      // Attaching to the booker's Stripe customer (rather than a bare
+      // customer_email) is what lets Checkout save this card for next time.
+      ...StripeSmartCheckoutService.customerParamsFor(stripeCustomerId, booker.email),
       metadata: {
         type: 'talent_session',
         sessionId: session.id,
@@ -1431,6 +1574,10 @@ export class TalentSessionService {
           bookerId,
           talentUserId: profile.userId,
         },
+        // Saves the card the booker enters to their Stripe customer for a
+        // future off-session charge (see createSmartCheckout) — requires
+        // `customer` above, which is why this is conditional on it too.
+        ...(stripeCustomerId ? { setup_future_usage: 'off_session' } : {}),
       },
     };
 
@@ -1526,6 +1673,13 @@ export class TalentSessionService {
         reserveAmountCents: talentNetCents,
       })
       .where(eq(talentSessions.id, sessionId));
+
+    await PayoutLedgerService.creditHold(talentUserId, talentNetCents, {
+      sourceType: 'talent_session',
+      sourceId: sessionId,
+    }).catch(err =>
+      console.error(`[TalentSession] ledger creditHold failed for session ${sessionId}: ${err.message}`)
+    );
 
     if (session.giftCode) {
       await GiftCodeService.redeem(
@@ -2879,15 +3033,31 @@ export class TalentSessionService {
 
     // The talent's cut is the full tip amount (the 7.5% fee was paid on top
     // by the booker, not deducted from it). Accumulates into the session's
-    // own reserve — same 7-day hold as the base session charge — rather than
-    // transferring immediately.
-    await db
+    // own reserve — same hold/release schedule as the base session charge —
+    // rather than transferring immediately.
+    const [session] = await db
       .update(talentSessions)
       .set({
         reserveAmountCents: sql`${talentSessions.reserveAmountCents} + ${tip.amountCents}`,
         updatedAt: paidAt,
       })
-      .where(eq(talentSessions.id, tip.sessionId));
+      .where(eq(talentSessions.id, tip.sessionId))
+      .returning({ talentProfileId: talentSessions.talentProfileId });
+
+    if (session?.talentProfileId) {
+      const profile = await db.query.talentProfiles.findFirst({
+        where: eq(talentProfiles.id, session.talentProfileId),
+        columns: { userId: true },
+      });
+      if (profile?.userId) {
+        await PayoutLedgerService.creditHold(profile.userId, tip.amountCents, {
+          sourceType: 'talent_session_tip',
+          sourceId: tip.id,
+        }).catch(err =>
+          console.error(`[TalentSession] ledger creditHold failed for tip ${tip.id}: ${err.message}`)
+        );
+      }
+    }
   }
 
   // ── Auto-cancel no-show (called by cron) ─────────────────────────────────

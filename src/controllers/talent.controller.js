@@ -21,6 +21,7 @@ import {
 } from '../services/talentSession.service.js';
 import { OrderService } from '../services/order.service.js';
 import { talentProfiles } from '../db/schema/talentProfiles.js';
+import { talentCategories } from '../db/schema/talentCategories.js';
 import { ShopCustomOfferService } from '../services/shop/shopCustomOffer.service.js';
 
 // ─── TALENT PROFILE ───────────────────────────────────────────────────────────
@@ -88,6 +89,15 @@ export const listTalentProfiles = catchAsync(async (req, res) => {
 export const getTalentPriceBounds = catchAsync(async (req, res) => {
   const bounds = await getTalentPriceBoundsService();
   res.json({ success: true, data: bounds });
+});
+
+export const getTalentCategories = catchAsync(async (req, res) => {
+  const categories = await db
+    .select()
+    .from(talentCategories)
+    .where(eq(talentCategories.isActive, true))
+    .orderBy(talentCategories.sortOrder, talentCategories.name);
+  res.json({ success: true, data: { categories } });
 });
 
 export const getTalentProfile = catchAsync(async (req, res) => {
@@ -176,6 +186,55 @@ export const createSessionCheckout = catchAsync(async (req, res) => {
     platform,
     bookerTimezone: timezone,
   });
+
+  res.status(201).json({ success: true, data: result });
+});
+
+/**
+ * Same booking, but charges a saved card directly (no redirect) when the
+ * booker already has one on file. Falls back to a normal hosted Checkout
+ * session otherwise.
+ */
+export const createSmartSessionCheckout = catchAsync(async (req, res) => {
+  const {
+    talentProfileId,
+    date,
+    time,
+    durationMins,
+    subject,
+    discussion,
+    isGift,
+    giftDetails,
+    giftCode,
+    platform,
+    timezone,
+  } = req.body;
+
+  if (!talentProfileId) throw new ApiError(400, '`talentProfileId` is required');
+  if (!date) throw new ApiError(400, '`date` is required (YYYY-MM-DD)');
+  if (!time) throw new ApiError(400, '`time` is required (HH:MM)');
+  if (!durationMins) throw new ApiError(400, '`durationMins` is required');
+  if (!subject && !giftCode) throw new ApiError(400, '`subject` is required');
+
+  const io = req.app.get('io');
+
+  const result = await TalentSessionService.createSmartCheckout(
+    {
+      talentProfileId,
+      bookerId: req.user.id,
+      date,
+      time,
+      durationMins: parseInt(durationMins),
+      subject,
+      discussion,
+      isGift,
+      giftDetails,
+      giftCode,
+      platform,
+      bookerTimezone: timezone,
+    },
+    io
+  );
 
   res.status(201).json({ success: true, data: result });
 });

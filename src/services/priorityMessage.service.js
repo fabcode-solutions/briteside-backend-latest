@@ -35,6 +35,8 @@ import { ShopIapService } from './shop/shopIap.service.js';
 import { getRedirectUrls, isNativePlatform } from '../utils/redirect-urls.js';
 import { socialConversations } from '../db/schema/socialChat.js';
 import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
+import { StripeSmartCheckoutService } from './stripeSmartCheckout.service.js';
+import { PayoutLedgerService } from './payoutLedger.service.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 
@@ -89,6 +91,122 @@ export class PriorityMessageService {
    * store exactly the same thing.
    */
   static async _createPendingPayment(
+    senderId,
+    { talentProfileId, subject, messageContent, messages, contentExtended, attachmentIds }
+  ) {
+    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+
+    const prep = await this._prepareMessagePayment(senderId, {
+      talentProfileId,
+      subject,
+      messageContent,
+      messages,
+      contentExtended,
+      attachmentIds,
+    });
+
+    // Reusing the sender's canonical Stripe customer (shared with
+    // subscriptions) instead of a bare customer_email lets Checkout attach
+    // the card entered here to their account (see setup_future_usage in
+    // _createHostedSession) — that's what createSmartCheckout later finds
+    // to skip the checkout page entirely on a future priority message.
+    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(senderId).catch(
+      err => {
+        console.warn(`[PriorityMessage] getOrCreateStripeCustomer failed: ${err.message}`);
+        return null;
+      }
+    );
+
+    return this._createHostedSession(prep, platform, stripeCustomerId);
+  }
+
+  // ── Same payment, skipping the hosted Checkout page when possible ─────────
+
+  /**
+   * POST /priority-messages/smart-checkout
+   *
+   * Identical validation and DB persistence to createCheckout(), but if the
+   * sender already has a saved card on file (attached during an earlier
+   * priority message paid via the hosted Checkout page), charges it
+   * directly and delivers the message immediately — no redirect, no
+   * checkout screen. Falls back to a normal hosted Checkout session
+   * whenever there's no saved card yet, or Stripe requires additional
+   * authentication (SCA) that only a hosted page can complete.
+   *
+   * @returns {{ instant: true, paymentId, messageCount, chargedCents }
+   *         | { instant: false, checkoutUrl, paymentId, ... }}
+   */
+  static async createSmartCheckout(
+    senderId,
+    { talentProfileId, subject, messageContent, messages, platform, contentExtended, attachmentIds },
+    io = null
+  ) {
+    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+
+    const prep = await this._prepareMessagePayment(senderId, {
+      talentProfileId,
+      subject,
+      messageContent,
+      messages,
+      contentExtended,
+      attachmentIds,
+    });
+    const { payment, profile, chargedCents } = prep;
+
+    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(senderId);
+    const intent = await StripeSmartCheckoutService.tryOffSessionCharge({
+      stripeCustomerId,
+      amountCents: chargedCents,
+      metadata: {
+        type: 'priority_message',
+        feature: 'priority_message',
+        paymentId: payment.id,
+        senderId,
+        talentUserId: profile.userId,
+      },
+    });
+
+    if (intent) {
+      // Reuses the exact delivery/notification/reserve logic the webhook
+      // path runs — a synthetic "session" carrying just the fields
+      // handleWebhook actually reads (metadata + payment_intent).
+      await this.handleWebhook(
+        {
+          id: null,
+          payment_intent: intent.id,
+          metadata: { paymentId: payment.id, senderId, talentUserId: profile.userId },
+        },
+        io
+      );
+
+      // handleWebhook runs synchronously above, so the payment is already
+      // delivered — fetch its resulting state (conversationId, message
+      // ids) so the frontend can go straight there, the same shape it
+      // already gets back from polling the redirect flow.
+      const status = await this.getStatus(payment.id, senderId);
+
+      return {
+        instant: true,
+        paymentId: payment.id,
+        messageCount: prep.msgList.length,
+        chargedCents,
+        status: status.status,
+        conversationId: status.conversationId,
+        messageIds: status.messageIds,
+      };
+    }
+
+    return this._createHostedSession(prep, platform, stripeCustomerId);
+  }
+
+  // ── Shared validation + DB persistence for both checkout paths ────────────
+
+  /**
+   * @returns {{ payment, items, profile, sender, talentName, msgList,
+   *   textMessageCount, totalExtensionUnits, totalUnits, totalAttachments,
+   *   totalAttachmentCents, baseCents, platformAndServiceFeeCents, chargedCents }}
+   */
+  static async _prepareMessagePayment(
     senderId,
     { talentProfileId, subject, messageContent, messages, contentExtended, attachmentIds }
   ) {
@@ -329,7 +447,6 @@ export class PriorityMessageService {
           }))
         )
         .returning();
-
       const allAttachRows = [];
       for (const m of msgList) {
         for (const file of m.attachments) {
@@ -377,6 +494,10 @@ export class PriorityMessageService {
       payment,
       items,
       profile,
+      sender,
+      talentName,
+      talentProfileId,
+      msgList,
       msgList,
       sender,
       talentName,
@@ -386,6 +507,20 @@ export class PriorityMessageService {
       totalAttachments,
       totalAttachmentCents,
       baseCents,
+      platformAndServiceFeeCents,
+      chargedCents,
+    };
+  }
+
+  // ── Hosted Stripe Checkout session — shared tail for both entry points ────
+  static async _createHostedSession(prep, platform, stripeCustomerId) {
+    const {
+      payment,
+      profile,
+      sender,
+      talentName,
+      talentProfileId,
+      msgList,
       chargedCents,
       platformAndServiceFeeCents,
       applicationFeeCents,
@@ -520,12 +655,14 @@ export class PriorityMessageService {
       ],
       success_url: successUrl,
       cancel_url: cancelUrl,
-      ...(sender?.email?.trim() ? { customer_email: sender.email.trim() } : {}),
+      // Attaching to the sender's Stripe customer (rather than a bare
+      // customer_email) is what lets Checkout save this card for next time.
+      ...StripeSmartCheckoutService.customerParamsFor(stripeCustomerId, sender?.email),
       metadata: {
         type: 'priority_message',
         feature: 'priority_message',
         paymentId: payment.id,
-        senderId,
+        senderId: payment.senderId,
         talentProfileId,
         talentUserId: profile.userId,
         talentName,
@@ -543,6 +680,10 @@ export class PriorityMessageService {
           paymentId: payment.id,
           talentUserId: profile.userId,
         },
+        // Saves the card the sender enters to their Stripe customer for a
+        // future off-session charge (see createSmartCheckout) — requires
+        // `customer` above, which is why this is conditional on it too.
+        ...(stripeCustomerId ? { setup_future_usage: 'off_session' } : {}),
       },
     };
 
@@ -554,6 +695,7 @@ export class PriorityMessageService {
       .where(eq(priorityMessagePayments.id, payment.id));
 
     return {
+      instant: false,
       checkoutUrl: session.url,
       paymentId: payment.id,
       messageCount: msgList.length,
@@ -739,6 +881,13 @@ export class PriorityMessageService {
           updatedAt: new Date(),
         })
         .where(eq(priorityMessagePayments.id, payment.id));
+
+      await PayoutLedgerService.creditHold(talentUserId, reserveAmountCents, {
+        sourceType: 'priority_message',
+        sourceId: payment.id,
+      }).catch(err =>
+        console.error(`[PriorityMessage] ledger creditHold failed for payment ${payment.id}: ${err.message}`)
+      );
 
       // Moderation on an attachment's file can resolve (and reject) before
       // checkout is even paid — refundRejectedAttachment defers in that case

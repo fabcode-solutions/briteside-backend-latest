@@ -162,6 +162,26 @@ export const createShopCheckout = catchAsync(async (req, res) => {
   });
 });
 
+/**
+ * Same purchase, but charges a saved card directly (no redirect) when the
+ * buyer already has one on file. Falls back to a normal hosted Checkout
+ * session otherwise.
+ */
+export const createShopSmartCheckout = catchAsync(async (req, res) => {
+  const result = await ShopOrderService.createSmartCheckout(
+    req.user.id,
+    req.params.productId,
+    req.body?.platform,
+    { customerName: req.body?.customerName, customerEmail: req.body?.customerEmail }
+  );
+
+  res.json({
+    success: true,
+    message: result.free ? 'Product added to your purchases' : 'Checkout ready',
+    data: result,
+  });
+});
+
 // ── In-app purchase (App-only — the web checkout above is untouched) ───────
 
 export const getShopIapBuyOptions = catchAsync(async (req, res) => {
@@ -334,6 +354,19 @@ export const acceptCustomOfferCheckout = catchAsync(async (req, res) => {
   res.json({ success: true, message: 'Checkout ready', data: result });
 });
 
+/**
+ * Same accept-and-pay, but charges a saved card directly (no redirect) when
+ * the buyer already has one on file. Falls back to a normal hosted
+ * Checkout session otherwise.
+ */
+export const acceptCustomOfferSmartCheckout = catchAsync(async (req, res) => {
+  const result = await ShopCustomOfferService.createSmartAcceptCheckout(
+    req.user.id,
+    req.params.offerId
+  );
+  res.json({ success: true, message: 'Checkout ready', data: result });
+});
+
 export const cancelCustomOffer = catchAsync(async (req, res) => {
   const io = req.app.get('io');
   const offer = await ShopCustomOfferService.cancelOffer(
@@ -342,7 +375,14 @@ export const cancelCustomOffer = catchAsync(async (req, res) => {
     { reason: req.body?.reason },
     io
   );
-  res.json({ success: true, message: 'Offer cancelled and refunded', data: { offer } });
+  // A buyer cancelling gets no automatic refund — only a seller cancelling
+  // (backing out on an accepted project) does. See cancelOffer's policy comment.
+  const wasRefunded = req.user.id === offer.sellerId;
+  res.json({
+    success: true,
+    message: wasRefunded ? 'Offer cancelled and refunded' : 'Offer cancelled',
+    data: { offer },
+  });
 });
 
 
@@ -364,6 +404,19 @@ export const completeCustomOffer = catchAsync(async (req, res) => {
 
 export const payRemainingCustomOfferCheckout = catchAsync(async (req, res) => {
   const result = await ShopCustomOfferService.createRemainderCheckout(
+    req.user.id,
+    req.params.offerId
+  );
+  res.json({ success: true, message: 'Checkout ready', data: result });
+});
+
+/**
+ * Same "pay remaining balance", but charges a saved card directly (no
+ * redirect) when the buyer already has one on file. Falls back to a
+ * normal hosted Checkout session otherwise.
+ */
+export const payRemainingCustomOfferSmartCheckout = catchAsync(async (req, res) => {
+  const result = await ShopCustomOfferService.createSmartRemainderCheckout(
     req.user.id,
     req.params.offerId
   );

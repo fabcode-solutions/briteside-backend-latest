@@ -11,6 +11,7 @@ import { requireFeature } from '../middlewares/subscription.middleware.js';
 import { FEATURES } from '../constants/features.js';
 import {
   createCheckout,
+  createSmartCheckout,
   prepareIapPurchase,
   getIapTiers,
   finalizeIapPurchase,
@@ -38,6 +39,9 @@ router.use(authMiddleware);
 
 // Customer sends a priority message — no Plus required (paying per message)
 router.post('/', createCheckout);
+// Same payment, but charges a saved card directly (no redirect) when the
+// sender already has one on file from an earlier priority message.
+router.post('/smart-checkout', createSmartCheckout);
 // "Pay in App" — native App Store / Google Play purchase (price tiers).
 // Registered before '/:paymentId/...' so 'iap' is never read as a paymentId.
 router.get('/iap/tiers', getIapTiers);

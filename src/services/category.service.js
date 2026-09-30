@@ -1,18 +1,20 @@
-import { count } from 'drizzle-orm';
+import { count, eq } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { categories } from '../db/schema/index.js';
 
 export class CategoryService {
-  static async getCategories({ page = 1, limit = 20 } = {}) {
+  static async getCategories({ page = 1, limit = 20, includeInactive = false } = {}) {
     const offset = (page - 1) * limit;
+    const where = includeInactive ? undefined : eq(categories.isActive, true);
 
     const [allCategories, [{ total }]] = await Promise.all([
       db.query.categories.findMany({
+        where,
         orderBy: (categories, { asc }) => [asc(categories.name)],
         limit,
         offset,
       }),
-      db.select({ total: count() }).from(categories),
+      db.select({ total: count() }).from(categories).where(where),
     ]);
 
     return {

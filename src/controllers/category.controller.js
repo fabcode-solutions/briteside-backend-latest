@@ -4,8 +4,9 @@ import { catchAsync } from '../utils/catch-async.js';
 export const getCategories = catchAsync(async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+  const includeInactive = req.query.includeInactive === 'true';
 
-  const result = await CategoryService.getCategories({ page, limit });
+  const result = await CategoryService.getCategories({ page, limit, includeInactive });
 
   res.json({
     success: true,

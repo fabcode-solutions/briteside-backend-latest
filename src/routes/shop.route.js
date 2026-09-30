@@ -23,6 +23,7 @@ import {
   getShopSettings,
   setShopRefundPolicy,
   createShopCheckout,
+  createShopSmartCheckout,
   getShopIapBuyOptions,
   finalizeShopIapPurchase,
   listShopPurchases,
@@ -40,9 +41,11 @@ import {
   declineCustomOffer,
   approveListingPurchase,
   acceptCustomOfferCheckout,
+  acceptCustomOfferSmartCheckout,
   cancelCustomOffer,
   completeCustomOffer,
   payRemainingCustomOfferCheckout,
+  payRemainingCustomOfferSmartCheckout,
   fundCustomOfferMilestone,
   completeCustomOfferMilestone,
   submitCustomOfferWork,
@@ -155,10 +158,19 @@ router.post('/custom-offers/:offerId/decline', declineCustomOffer);
 // paid) — no charge, unlike accept-checkout below.
 router.post('/custom-offers/:offerId/approve', approveListingPurchase);
 router.post('/custom-offers/:offerId/accept-checkout', acceptCustomOfferCheckout);
+// Same accept-and-pay, charges a saved card directly (no redirect) when the
+// buyer already has one on file.
+router.post('/custom-offers/:offerId/smart-accept-checkout', acceptCustomOfferSmartCheckout);
 router.post('/custom-offers/:offerId/cancel', cancelCustomOffer);
 router.post('/custom-offers/:offerId/complete', completeCustomOffer);
 router.post('/custom-offers/:offerId/accept-delivery', acceptCustomOfferDelivery);
 router.post('/custom-offers/:offerId/pay-remaining-checkout', payRemainingCustomOfferCheckout);
+// Same "pay remaining balance", charges a saved card directly (no redirect)
+// when the buyer already has one on file.
+router.post(
+  '/custom-offers/:offerId/smart-pay-remaining-checkout',
+  payRemainingCustomOfferSmartCheckout
+);
 
 // ── Per-milestone payment ('milestones' offers only) ─────────────────────────
 // Funds one stage at a time; the previous stage must already be approved.
@@ -219,6 +231,9 @@ router.put(
 router.delete('/products/:productId', deleteShopProduct);
 router.post('/products/:productId/view', recordShopProductView);
 router.post('/products/:productId/checkout', createShopCheckout);
+// Same purchase, charges a saved card directly (no redirect) when the buyer
+// already has one on file.
+router.post('/products/:productId/smart-checkout', createShopSmartCheckout);
 // App-only — the web checkout above is untouched by these two.
 router.get('/products/:productId/iap/buy-options', getShopIapBuyOptions);
 router.post('/products/:productId/iap/purchase', finalizeShopIapPurchase);

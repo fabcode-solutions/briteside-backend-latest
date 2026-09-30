@@ -61,6 +61,61 @@ export const createCheckout = catchAsync(async (req, res) => {
   res.status(201).json({ success: true, data: result });
 });
 
+// ─── POST /priority-messages/smart-checkout ───────────────────────────────────
+
+/**
+ * Same as createCheckout, but charges a saved card directly (no redirect,
+ * no checkout screen) when the sender already has one on file. Falls back
+ * to the hosted Checkout flow otherwise.
+ *
+ * Returns either { instant: true, paymentId, ... } (message already
+ * delivered) or { instant: false, checkoutUrl, paymentId, ... } (frontend
+ * should redirect as usual).
+ */
+export const createSmartCheckout = catchAsync(async (req, res) => {
+  const {
+    talentProfileId,
+    subject,
+    messageContent,
+    messages,
+    platform,
+    contentExtended,
+    attachmentIds,
+  } = req.body;
+
+  if (!talentProfileId) throw new ApiError(400, '`talentProfileId` is required');
+
+  const hasArray = Array.isArray(messages) && messages.length > 0;
+  const hasSingle = messageContent?.trim();
+  if (!hasArray && !hasSingle) {
+    throw new ApiError(400, '`messages` array or `messageContent` is required');
+  }
+  const firstMessageText = hasSingle
+    ? messageContent.trim()
+    : (messages?.[0]?.content?.trim() || messages?.[0]?.messageContent?.trim() || '');
+  const derivedSubject = firstMessageText
+    ? firstMessageText.slice(0, 60) + (firstMessageText.length > 60 ? '…' : '')
+    : null;
+
+  const io = req.app.get('io');
+
+  const result = await PriorityMessageService.createSmartCheckout(
+    req.user.id,
+    {
+      talentProfileId,
+      subject: subject?.trim() || derivedSubject,
+      messageContent: messageContent?.trim() || null,
+      messages,
+      platform,
+      contentExtended,
+      attachmentIds,
+    },
+    io
+  );
+
+  res.status(201).json({ success: true, data: result });
+});
+
 /**
  * POST /priority-messages/iap/prepare
  * "Pay in App" (native App Store / Google Play sheet). Same body as
