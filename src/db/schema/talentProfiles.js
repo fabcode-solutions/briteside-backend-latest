@@ -13,6 +13,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { users } from './users.js';
+import { talentCategories } from './talentCategories.js';
 
 // Drizzle has no built-in tsvector type; customType maps it to the raw PG type.
 const tsvector = customType({
@@ -32,6 +33,11 @@ export const talentProfiles = pgTable(
 
     // Display info
     category: varchar('category', { length: 100 }).notNull(),
+    // Nullable FK, added alongside the legacy free-text `category` column
+    // above rather than replacing it — `talentSearch` below still reads
+    // `category` directly, and existing profiles are backfilled into this
+    // separately (scripts/backfill-talent-categories.js), not migrated here.
+    categoryId: uuid('category_id').references(() => talentCategories.id, { onDelete: 'set null' }),
     title: varchar('title', { length: 255 }).notNull(),
     bio: text('bio'),
     location: varchar('location', { length: 255 }),

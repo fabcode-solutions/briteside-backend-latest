@@ -160,7 +160,11 @@ export class FeedService {
     }
 
     if (mediaType) {
-      whereConditions.push(sql`${posts.mediaTypes} @> ${JSON.stringify([mediaType])}`);
+      // media_types is a plain `json` column — @> only works on jsonb, hence
+      // the inline casts (both sides) rather than a column migration.
+      whereConditions.push(
+        sql`${posts.mediaTypes}::jsonb @> ${JSON.stringify([mediaType])}::jsonb`
+      );
     }
 
     if (categoryId !== undefined) {
@@ -430,8 +434,23 @@ export class FeedService {
       );
     }
 
-    if (mediaType) {
-      whereConditions.push(sql`${posts.mediaTypes} @> ${JSON.stringify([mediaType])}`);
+    if (sortBy === 'spotlight') {
+      // Spotlight requires EVERY slide to be video — not just "contains a
+      // video somewhere" (that looser check let mixed posts in, whose image
+      // slides then played inside the supposedly video-only carousel).
+      // Enforced here server-side regardless of what any client passes as
+      // mediaType, so this holds for the mobile app too.
+      whereConditions.push(
+        sql`jsonb_array_length(${posts.mediaTypes}::jsonb) > 0
+          AND NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(${posts.mediaTypes}::jsonb) AS mt(val)
+            WHERE mt.val <> 'video'
+          )`
+      );
+    } else if (mediaType) {
+      // media_types is a plain `json` column — @> only works on jsonb, hence
+      // the inline casts (both sides) rather than a column migration.
+      whereConditions.push(sql`${posts.mediaTypes}::jsonb @> ${JSON.stringify([mediaType])}::jsonb`);
     }
 
     let orderBy;
@@ -442,6 +461,7 @@ export class FeedService {
       case 'popular':
         orderBy = desc(posts.likesCount);
         break;
+      case 'spotlight':
       case 'trending':
       default:
         orderBy = [

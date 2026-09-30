@@ -462,10 +462,17 @@ export class PostService {
  * single SQL UNION — this file already does the equivalent for pinned posts
  * above, so it's consistent with the existing scale assumptions here.
  */
-  static async _orderedTabItems(userId, matchingPosts) {
+  static async _orderedTabItems(userId, matchingPosts, pinnedLinkIds = []) {
     const [linkRows, orderRows] = await Promise.all([
       db.query.postTabLinks.findMany({
-        where: eq(postTabLinks.userId, userId),
+        // Mirrors the notInArray(posts.id, pinnedPostIds) exclusion already
+        // applied to matchingPosts before it reaches here — without it, a
+        // pinned link appeared twice: once in the Pinned section, once again
+        // here in the main grid.
+        where:
+          pinnedLinkIds.length > 0
+            ? and(eq(postTabLinks.userId, userId), notInArray(postTabLinks.id, pinnedLinkIds))
+            : eq(postTabLinks.userId, userId),
         columns: { id: true, createdAt: true, updatedAt: true },
       }),
       db.query.userPostOrder.findMany({
@@ -686,7 +693,7 @@ export class PostService {
         .from(posts)
         .where(and(...whereConditions));
 
-      const ordered = await PostService._orderedTabItems(userId, matchingPosts);
+      const ordered = await PostService._orderedTabItems(userId, matchingPosts, pinnedLinkIds);
       mergedTotal = ordered.length;
       hasMore = ordered.length > offset + limit;
       const pageItems = ordered.slice(offset, offset + limit);

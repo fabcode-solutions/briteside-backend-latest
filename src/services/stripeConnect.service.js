@@ -4,6 +4,8 @@ import { db } from '../db/index.js';
 import { stripeConnectAccounts, userPayoutMethods } from '../db/schema/index.js';
 import { orders } from '../db/schema/payments.js';
 import { talentSessions } from '../db/schema/talentSessions.js';
+import { shopOrders, shopCustomServiceOffers, shopOfferMilestones } from '../db/schema/shop.js';
+import { priorityMessagePayments } from '../db/schema/priorityMessagePayments.js';
 import { systemSettings } from '../db/schema/admin.js';
 import { groupSubscriptions } from '../db/schema/subscriptions.js';
 import { stripeCustomers } from '../db/schema/britesidePlus.js';
@@ -264,8 +266,20 @@ export class StripeConnectService {
     const record = await StripeConnectService.getForUser(userId);
     if (!record?.payoutsEnabled) return { data: [], hasMore: false };
 
-    const result = await stripe.payouts.list({ limit }, { stripeAccount: record.stripeAccountId });
-    return { data: result.data, hasMore: result.has_more };
+    // Expanding the balance transaction is the only way to see the Instant
+    // Payout fee — the Payout object itself has no fee field, only its
+    // associated balance transaction does (fee_details[].type ===
+    // 'stripe_fee'), same figure shown on the connected account's own
+    // Express Dashboard payout detail view.
+    const result = await stripe.payouts.list(
+      { limit, expand: ['data.balance_transaction'] },
+      { stripeAccount: record.stripeAccountId }
+    );
+    const data = result.data.map(payout => {
+      const feeCents = payout.balance_transaction?.fee ?? 0;
+      return { ...payout, feeCents, netCents: payout.amount - feeCents };
+    });
+    return { data, hasMore: result.has_more };
   }
 
   // ─── DETAILED TRANSACTION LIST ───────────────────────────────────────────────
@@ -373,7 +387,21 @@ export class StripeConnectService {
       const chargeCustomer = charge?.customer ?? null;
       const isSubDesc =
         typeof charge?.description === 'string' && charge.description.startsWith('Subscription');
-      let txnType = charge?.metadata?.type ?? subMeta.type ?? null;
+      // transfer.metadata.source is set by every transferReserve() caller
+      // (claimRow, admin early release, every cron release function) — it's
+      // the only classification signal available when there's no linked
+      // charge. Note: transfer.metadata.type means something else entirely
+      // ('reserve_release', the release mechanism) — never use it here.
+      const SOURCE_TO_TYPE = {
+        talent_session: 'talent_session',
+        priority_message: 'priority_message',
+        shop_order: 'shop',
+        shop_custom_offer: 'shop',
+        shop_custom_offer_milestone: 'shop',
+        shop_offer_milestone: 'shop',
+      };
+      let txnType =
+        charge?.metadata?.type ?? subMeta.type ?? SOURCE_TO_TYPE[transfer.metadata?.source] ?? null;
       if (!txnType && (charge?.invoice || isSubDesc)) txnType = 'group_subscription';
       if (!txnType) txnType = 'other';
       const txnFeature = charge?.metadata?.feature ?? subMeta.feature ?? txnType;
@@ -422,9 +450,85 @@ export class StripeConnectService {
           name: charge?.billing_details?.name ?? null,
           phone: charge?.billing_details?.phone ?? null,
         },
-        metadata: { ...subMeta, ...charge?.metadata },
+        // transfer.metadata as the base layer — it's the only metadata that
+        // exists when there's no linked charge (see the grossCents fallback
+        // below); charge metadata (when present) takes precedence.
+        metadata: { ...transfer.metadata, ...subMeta, ...charge?.metadata },
       };
     });
+
+    // Transfers created by transferReserve() (claimRow, admin early release,
+    // and every cron reserve-release function) never set source_transaction,
+    // so Stripe can't link them back to their originating charge and
+    // grossCents falls back to 0 above. Recover it here using the transfer's
+    // own metadata (source + a source-row id) — every one of those call
+    // sites already sets that — by looking up that row's stored
+    // PaymentIntent and asking Stripe for its real amount.
+    const SOURCE_TABLE_MAP = {
+      talent_session: { table: talentSessions, piColumn: 'stripePaymentIntentId' },
+      shop_order: { table: shopOrders, piColumn: 'stripePaymentIntentId' },
+      priority_message: { table: priorityMessagePayments, piColumn: 'stripePaymentIntent' },
+      shop_custom_offer: { table: shopCustomServiceOffers, piColumn: 'stripePaymentIntentId' },
+      shop_custom_offer_milestone: { table: shopOfferMilestones, piColumn: 'stripePaymentIntentId' },
+      shop_offer_milestone: { table: shopOfferMilestones, piColumn: 'stripePaymentIntentId' },
+    };
+
+    const needsGrossFallback = items.filter(t => t.grossCents === 0 && t.metadata?.source);
+    if (needsGrossFallback.length) {
+      // Group by source type so each table is queried once with all its ids.
+      const bySource = new Map();
+      for (const t of needsGrossFallback) {
+        const source = t.metadata.source;
+        const sourceId =
+          t.metadata.sourceId ??
+          t.metadata.sessionId ??
+          t.metadata.shopOrderId ??
+          t.metadata.paymentId ??
+          t.metadata.offerId ??
+          t.metadata.milestoneId;
+        if (!sourceId || !SOURCE_TABLE_MAP[source]) continue;
+        if (!bySource.has(source)) bySource.set(source, new Map());
+        bySource.get(source).set(sourceId, t);
+      }
+
+      const paymentIntentByTransferId = new Map();
+      await Promise.all(
+        Array.from(bySource.entries()).map(async ([source, idToItem]) => {
+          const { table, piColumn } = SOURCE_TABLE_MAP[source];
+          const ids = Array.from(idToItem.keys());
+          const rows = await db
+            .select({ id: table.id, paymentIntentId: table[piColumn] })
+            .from(table)
+            .where(inArray(table.id, ids));
+          for (const row of rows) {
+            const t = idToItem.get(row.id);
+            if (t && row.paymentIntentId) paymentIntentByTransferId.set(t.id, row.paymentIntentId);
+          }
+        })
+      );
+
+      const uniquePiIds = Array.from(new Set(paymentIntentByTransferId.values()));
+      const piAmounts = new Map();
+      await Promise.all(
+        uniquePiIds.map(async piId => {
+          try {
+            const pi = await stripe.paymentIntents.retrieve(piId);
+            piAmounts.set(piId, pi.amount);
+          } catch {
+            // Leave unresolved — grossCents stays 0 for this one, same as before.
+          }
+        })
+      );
+
+      for (const t of needsGrossFallback) {
+        const piId = paymentIntentByTransferId.get(t.id);
+        const amount = piId ? piAmounts.get(piId) : undefined;
+        if (amount != null) {
+          t.grossCents = amount;
+          t.gross = +(amount / 100).toFixed(2);
+        }
+      }
+    }
 
     // Server-side filters — Stripe transfers API has no metadata filter support.
     // type, feature, and groupId are derived from charge.metadata and filtered locally.

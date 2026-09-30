@@ -187,40 +187,11 @@ export const updateJoinRequestStatus = catchAsync(async (req, res) => {
   });
 });
 
-export const createGroupCategory = catchAsync(async (req, res) => {
-  const category = await GroupCategoryService.createGroupCategory(req.body);
-
-  res.status(201).json({
-    success: true,
-    message: 'Group category created successfully',
-    data: { category },
-  });
-});
-
 export const getGroupCategories = catchAsync(async (req, res) => {
   const categories = await GroupCategoryService.getGroupCategories();
   res.json({
     success: true,
     data: { categories },
-  });
-});
-
-export const deleteGroupCategory = catchAsync(async (req, res) => {
-  await GroupCategoryService.deleteGroupCategory(req.params.category_id);
-
-  res.json({
-    success: true,
-    message: 'Group category deleted successfully',
-  });
-});
-
-export const updateGroupCategory = catchAsync(async (req, res) => {
-  const category = await GroupCategoryService.updateGroupCategory(req.params.category_id, req.body);
-
-  res.json({
-    success: true,
-    message: 'Group category updated successfully',
-    data: { category },
   });
 });
 

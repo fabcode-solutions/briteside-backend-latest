@@ -196,6 +196,37 @@ export class PayoutLedgerService {
   }
 
   /**
+   * Reverses a debitAvailable — call this when money that was already
+   * debited turns out not to have actually left the platform (e.g. an
+   * Instant Payout that Stripe accepted at creation time but then failed
+   * asynchronously; see handlePayoutFailed in earlyPayout.service.js).
+   */
+  static async creditAvailable(userId, amountCents, { sourceType, sourceId, reason, metadata = {} } = {}) {
+    if (!amountCents || amountCents <= 0) return null;
+    const ledger = await this.getOrCreateLedger(userId);
+
+    await db
+      .update(creatorPayoutLedgers)
+      .set({
+        availableCents: sql`${creatorPayoutLedgers.availableCents} + ${amountCents}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(creatorPayoutLedgers.id, ledger.id));
+
+    await db.insert(payoutLedgerEntries).values({
+      ledgerId: ledger.id,
+      sourceType,
+      sourceId,
+      bucket: 'available',
+      amountCents,
+      reason,
+      metadata,
+    });
+
+    return ledger.id;
+  }
+
+  /**
    * Flips a creator's sweep toggle — 'auto' (default; swept on the 1st/15th
    * automatically) or 'manual' (accumulates in Available until the creator
    * withdraws it themselves). Never touches balances, only the switch.

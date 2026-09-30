@@ -146,6 +146,7 @@ export const groupCategories = pgTable('group_categories', {
   emoji: varchar('emoji', { length: 10 }),
   iconUrl: text('icon_url'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  isActive: boolean('is_active').default(true).notNull(),
 });
 
 export const discussions = pgTable('discussions', {

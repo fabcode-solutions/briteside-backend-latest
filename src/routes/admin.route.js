@@ -45,6 +45,11 @@ import {
   adminReleaseEventReserveEarly,
   adminReleaseOrganizerReservesEarly,
 } from '../controllers/reserves.controller.js';
+import {
+  releaseRow,
+  releaseAllForCreatorHandler,
+  getHeldForCreator,
+} from '../controllers/adminPayout.controller.js';
 
 const router = express.Router();
 
@@ -99,6 +104,41 @@ const updateCategorySchema = z.object({
   description: z.string().optional(),
   iconUrl: z.string().url('Icon URL must be a valid URL').optional(),
   emoji: z.string().max(10).optional(),
+  isActive: z.boolean().optional(),
+});
+
+const createInterestCategorySchema = z.object({
+  name: z.string().min(1).max(100),
+  slug: z.string().min(1).max(100),
+  description: z.string().optional(),
+  icon: z.string().max(50).optional(),
+  color: z.string().max(7).optional(),
+  isDefault: z.boolean().optional(),
+  sortOrder: z.number().int().optional(),
+});
+const updateInterestCategorySchema = createInterestCategorySchema.partial().extend({
+  isActive: z.boolean().optional(),
+});
+
+const createGroupCategorySchema = z.object({
+  name: z.string().min(1).max(100),
+  description: z.string().optional(),
+  emoji: z.string().max(10).optional(),
+  iconUrl: z.string().url().optional(),
+});
+const updateGroupCategorySchema = createGroupCategorySchema.partial().extend({
+  isActive: z.boolean().optional(),
+});
+
+const createTalentCategorySchema = z.object({
+  name: z.string().min(1).max(100),
+  slug: z.string().min(1).max(100),
+  description: z.string().optional(),
+  icon: z.string().max(10).optional(),
+  sortOrder: z.number().int().optional(),
+});
+const updateTalentCategorySchema = createTalentCategorySchema.partial().extend({
+  isActive: z.boolean().optional(),
 });
 
 const createLogoSchema = z.object({
@@ -171,6 +211,48 @@ router.patch(
   adminController.updateCategory
 );
 router.delete('/categories/:categoryId', adminController.deleteCategory);
+
+// Interest category management routes (Feed)
+router.get('/interest-categories', adminController.interestCategoryHandlers.list);
+router.post(
+  '/interest-categories',
+  validate(createInterestCategorySchema),
+  adminController.interestCategoryHandlers.create
+);
+router.patch(
+  '/interest-categories/:categoryId',
+  validate(updateInterestCategorySchema),
+  adminController.interestCategoryHandlers.update
+);
+router.delete('/interest-categories/:categoryId', adminController.interestCategoryHandlers.remove);
+
+// Group category management routes
+router.get('/group-categories', adminController.groupCategoryHandlers.list);
+router.post(
+  '/group-categories',
+  validate(createGroupCategorySchema),
+  adminController.groupCategoryHandlers.create
+);
+router.patch(
+  '/group-categories/:categoryId',
+  validate(updateGroupCategorySchema),
+  adminController.groupCategoryHandlers.update
+);
+router.delete('/group-categories/:categoryId', adminController.groupCategoryHandlers.remove);
+
+// Talent category management routes
+router.get('/talent-categories', adminController.talentCategoryHandlers.list);
+router.post(
+  '/talent-categories',
+  validate(createTalentCategorySchema),
+  adminController.talentCategoryHandlers.create
+);
+router.patch(
+  '/talent-categories/:categoryId',
+  validate(updateTalentCategorySchema),
+  adminController.talentCategoryHandlers.update
+);
+router.delete('/talent-categories/:categoryId', adminController.talentCategoryHandlers.remove);
 
 // Username Reservation management routes
 router.get('/reservations/statistics', usernameReservationController.getReservationStatistics);
@@ -718,6 +800,27 @@ const releaseReasonSchema = z.object({
   reason: z.string().max(1000).optional(),
 });
 
+// Reason is REQUIRED here (unlike releaseReasonSchema above) — this bypasses
+// the normal Day-14/21 schedule entirely across all 5 non-event flows, so
+// every use needs an explicit, recorded justification.
+const adminEarlyReleaseRowSchema = z.object({
+  sourceType: z.enum([
+    'talent_session',
+    'shop_order',
+    'priority_message',
+    'shop_custom_offer',
+    'shop_offer_milestone',
+  ]),
+  sourceId: z.string().uuid(),
+  reason: z.string().min(1).max(1000),
+  chargeFeeForInstant: z.boolean().optional(),
+});
+const adminEarlyReleaseCreatorSchema = z.object({
+  userId: z.string().uuid(),
+  reason: z.string().min(1).max(1000),
+  chargeFeeForInstant: z.boolean().optional(),
+});
+
 
 router.get('/team-roles', adminController.listTeamRoles);
 router.post('/team-roles', validate(createTeamRoleSchema), adminController.createTeamRole);
@@ -754,6 +857,16 @@ router.post(
   '/reserves/organizers/:organizerId/release',
   validate(releaseReasonSchema),
   adminReleaseOrganizerReservesEarly
+);
+
+// Early release for the OTHER 5 flows (sessions, shop orders, priority
+// messages, custom offers, milestones) — see adminPayout.service.js.
+router.get('/payout-ledger/creators/:userId/held', getHeldForCreator);
+router.post('/payout-ledger/release-row', validate(adminEarlyReleaseRowSchema), releaseRow);
+router.post(
+  '/payout-ledger/release-creator',
+  validate(adminEarlyReleaseCreatorSchema),
+  releaseAllForCreatorHandler
 );
 
 // ─── ACTIVITY LOGS ───────────────────────────────────────────────────────────

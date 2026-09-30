@@ -7,6 +7,8 @@ export * from './contactMessages.js';
 
 // Event categorization
 export * from './categories.js';
+// Talent profile categorization
+export * from './talentCategories.js';
 
 // Event organizers
 export * from './organizers.js';

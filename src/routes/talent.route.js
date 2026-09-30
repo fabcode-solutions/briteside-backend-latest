@@ -11,6 +11,7 @@ import {
   updateTalentProfile,
   listTalentProfiles,
   getTalentPriceBounds,
+  getTalentCategories,
   getTalentProfile,
   getMyTalentProfile,
   upsertAvailability,
@@ -75,6 +76,7 @@ const router = express.Router();
 
 router.get('/', optionalAuthMiddleware, listTalentProfiles);
 router.get('/price-bounds', getTalentPriceBounds);
+router.get('/categories', getTalentCategories);
 
 router.post(
   '/me/profile',

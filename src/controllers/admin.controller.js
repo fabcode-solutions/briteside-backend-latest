@@ -17,6 +17,50 @@ import { MediaModerationService } from '../services/moderation/mediaModeration.s
 import { TalentSessionService } from '../services/talentSession.service.js';
 import { CallFrameArchiveService } from '../services/moderation/callFrameArchive.service.js';
 import { PopularCoverService } from '../services/social/popularCover.service.js';
+import {
+  AdminInterestCategoryService,
+  AdminGroupCategoryService,
+  AdminTalentCategoryService,
+} from '../services/adminCategories.service.js';
+
+/**
+ * Generic list/create/update/delete handlers shared by the three
+ * registry-backed category types (interest/group/talent) — see
+ * adminCategoryRegistry.service.js for why these aren't hand-copied per type.
+ */
+function makeCategoryHandlers(service) {
+  return {
+    list: catchAsync(async (req, res) => {
+      const includeInactive = req.query.includeInactive !== 'false';
+      const categories = await service.list({ includeInactive });
+      res.status(httpStatus.OK).json({ success: true, data: categories });
+    }),
+    create: catchAsync(async (req, res) => {
+      const category = await service.create(req.body);
+      res.status(httpStatus.CREATED).json({
+        success: true,
+        message: 'Category created successfully',
+        data: category,
+      });
+    }),
+    update: catchAsync(async (req, res) => {
+      const category = await service.update(req.params.categoryId, req.body);
+      res.status(httpStatus.OK).json({
+        success: true,
+        message: 'Category updated successfully',
+        data: category,
+      });
+    }),
+    remove: catchAsync(async (req, res) => {
+      await service.remove(req.params.categoryId);
+      res.status(httpStatus.OK).json({ success: true, message: 'Category deleted successfully' });
+    }),
+  };
+}
+
+const interestCategoryHandlers = makeCategoryHandlers(AdminInterestCategoryService);
+const groupCategoryHandlers = makeCategoryHandlers(AdminGroupCategoryService);
+const talentCategoryHandlers = makeCategoryHandlers(AdminTalentCategoryService);
 
 /**
  * Update report status
@@ -137,13 +181,14 @@ const createCategory = catchAsync(async (req, res) => {
  */
 const updateCategory = catchAsync(async (req, res) => {
   const { categoryId } = req.params;
-  const { name, description, iconUrl, emoji } = req.body;
+  const { name, description, iconUrl, emoji, isActive } = req.body;
 
   const category = await adminService.updateCategory(categoryId, {
     name,
     description,
     iconUrl,
     emoji,
+    isActive,
   });
 
   res.status(httpStatus.OK).json({
@@ -1047,6 +1092,9 @@ export const adminController = {
   createCategory,
   updateCategory,
   deleteCategory,
+  interestCategoryHandlers,
+  groupCategoryHandlers,
+  talentCategoryHandlers,
   getPlatformFeePercentage,
   updatePlatformFeePercentage,
   listTalentForVerification,

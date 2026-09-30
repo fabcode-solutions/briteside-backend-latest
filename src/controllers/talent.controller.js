@@ -21,6 +21,7 @@ import {
 } from '../services/talentSession.service.js';
 import { OrderService } from '../services/order.service.js';
 import { talentProfiles } from '../db/schema/talentProfiles.js';
+import { talentCategories } from '../db/schema/talentCategories.js';
 import { ShopCustomOfferService } from '../services/shop/shopCustomOffer.service.js';
 
 // ─── TALENT PROFILE ───────────────────────────────────────────────────────────
@@ -88,6 +89,15 @@ export const listTalentProfiles = catchAsync(async (req, res) => {
 export const getTalentPriceBounds = catchAsync(async (req, res) => {
   const bounds = await getTalentPriceBoundsService();
   res.json({ success: true, data: bounds });
+});
+
+export const getTalentCategories = catchAsync(async (req, res) => {
+  const categories = await db
+    .select()
+    .from(talentCategories)
+    .where(eq(talentCategories.isActive, true))
+    .orderBy(talentCategories.sortOrder, talentCategories.name);
+  res.json({ success: true, data: { categories } });
 });
 
 export const getTalentProfile = catchAsync(async (req, res) => {

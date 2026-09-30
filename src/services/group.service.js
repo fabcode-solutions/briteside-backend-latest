@@ -1424,35 +1424,14 @@ export class GroupService {
 }
 
 export class GroupCategoryService {
-  static async createGroupCategory(data) {
-    const [category] = await db
-      .insert(groupCategories)
-      .values({ ...data, createdAt: new Date() })
-      .returning();
-    return category;
-  }
-
+  // Create/update/delete moved to AdminGroupCategoryService
+  // (adminCategories.service.js), admin-only — see group.route.js.
   static async getGroupCategories() {
-    return db.select().from(groupCategories).orderBy(desc(groupCategories.createdAt));
-  }
-
-  static async deleteGroupCategory(categoryId) {
-    const [deleted] = await db
-      .delete(groupCategories)
-      .where(eq(groupCategories.id, categoryId))
-      .returning();
-    if (!deleted) throw new ApiError(404, 'Group category not found');
-    return deleted;
-  }
-
-  static async updateGroupCategory(categoryId, data) {
-    const [updated] = await db
-      .update(groupCategories)
-      .set(data)
-      .where(eq(groupCategories.id, categoryId))
-      .returning();
-    if (!updated) throw new ApiError(404, 'Group category not found');
-    return updated;
+    return db
+      .select()
+      .from(groupCategories)
+      .where(eq(groupCategories.isActive, true))
+      .orderBy(desc(groupCategories.createdAt));
   }
 }
 

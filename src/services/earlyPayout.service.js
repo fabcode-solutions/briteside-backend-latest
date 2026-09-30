@@ -32,7 +32,7 @@
  */
 
 import crypto from 'crypto';
-import { eq, and, isNull, gt, lte, inArray } from 'drizzle-orm';
+import { eq, and, isNull, gt, lte, inArray, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import {
   talentSessions,
@@ -41,7 +41,7 @@ import {
   shopCustomServiceOffers,
   shopOfferMilestones,
 } from '../db/schema/index.js';
-import { stripeConnectAccounts } from '../db/schema/stripeConnect.js';
+import { stripeConnectAccounts, payoutLedgerEntries, creatorPayoutLedgers } from '../db/schema/stripeConnect.js';
 import config from '../config/config.js';
 import Stripe from 'stripe';
 import ApiError from '../utils/api-error.js';
@@ -438,40 +438,75 @@ export async function claimEarlyPayout(userId) {
   // From here on, the claim itself has already succeeded and been recorded
   // (ledger + DB rows above) — a failure below only means the instant
   // payout leg didn't happen THIS call, not that the claim is rolled back.
+  const instantPayout = await dispatchInstantPayout(userId, connectAccount.stripeAccountId, claimedGrossCents, {
+    idempotencyKeySeed: claimedRows.map(r => `${r.sourceType}:${r.sourceId}`).sort().join(','),
+    debitReason: 'instant_payout_day7',
+    debitMetadata: { claimedRows },
+  });
+
+  return { claimedGrossCents, claimedRows, ...instantPayout };
+}
+
+/**
+ * Shared instant-payout dispatch — pushes `grossCents` (money already
+ * released into the Connect balance by the caller) out to the creator's
+ * debit card right now, for whatever fee Stripe's own Platform Pricing Tool
+ * computes (this codebase never hardcodes or re-derives the 5%; see the
+ * file header). Used by claimEarlyPayout (creator-initiated, always applies)
+ * and by adminPayout.service.js's optional "charge the instant fee" release
+ * mode — both cases are "get this money to their bank right now instead of
+ * waiting," so they share the exact same Stripe mechanics.
+ *
+ * Never throws — every failure mode returns { instantPayout: null,
+ * skippedReason }, since by the time this runs the caller's own release has
+ * already succeeded and must not be treated as failed just because the
+ * optional instant leg didn't complete.
+ */
+export async function dispatchInstantPayout(userId, stripeAccountId, grossCents, { idempotencyKeySeed, debitReason, debitMetadata = {} }) {
   const instantEligibility = await checkInstantPayoutEligibility(userId);
   if (!instantEligibility.eligible) {
-    return { claimedGrossCents, claimedRows, instantPayout: null, skippedReason: instantEligibility.reason };
+    return { instantPayout: null, skippedReason: instantEligibility.reason };
   }
 
   let balance;
   try {
-    balance = await stripe.balance.retrieve({ stripeAccount: connectAccount.stripeAccountId });
+    // net_available is only computed and returned when explicitly expanded —
+    // without this, Stripe omits the field entirely and every call below
+    // silently treats the account as having $0 instantly available.
+    // Also note the SDK's (params, options) signature: stripeAccount is an
+    // option, not a param, so it must be the second argument, not merged in.
+    balance = await stripe.balance.retrieve(
+      { expand: ['instant_available.net_available'] },
+      { stripeAccount: stripeAccountId }
+    );
   } catch (err) {
     logger.error('[EarlyPayout] balance retrieve failed', { userId, error: err.message });
-    return { claimedGrossCents, claimedRows, instantPayout: null, skippedReason: 'stripe_error' };
+    return { instantPayout: null, skippedReason: 'stripe_error' };
   }
 
   const instantUsd = (balance.instant_available ?? []).find(b => b.currency === 'usd');
-  const netAvailableCents = instantUsd?.net_available ?? 0;
+  // net_available is an array of { amount, destination } — one entry per
+  // eligible external account, since different cards can carry different
+  // fee rates. Match the specific destination this payout will target.
+  const netAvailableEntry = (instantUsd?.net_available ?? []).find(
+    n => n.destination === instantEligibility.externalAccountId
+  );
+  const netAvailableCents = netAvailableEntry?.amount ?? 0;
 
-  // Capped at what THIS call actually claimed — a creator's Connect balance
-  // may already hold other, unrelated available money (e.g. a Day-14/21
+  // Capped at what THIS call released — a creator's Connect balance may
+  // already hold other, unrelated available money (e.g. a Day-14/21
   // release that hasn't been swept out yet, since Phase 2's scheduled sweep
-  // doesn't exist yet). Without this cap, an early claim of a small row
-  // could inadvertently sweep out that unrelated balance too.
-  const instantPayoutAmountCents = Math.min(netAvailableCents, claimedGrossCents);
+  // runs separately). Without this cap, this could inadvertently sweep out
+  // that unrelated balance too.
+  const instantPayoutAmountCents = Math.min(netAvailableCents, grossCents);
   if (instantPayoutAmountCents <= 0) {
-    return { claimedGrossCents, claimedRows, instantPayout: null, skippedReason: 'balance_not_yet_available' };
+    return { instantPayout: null, skippedReason: 'balance_not_yet_available' };
   }
 
-  // Deterministic per claimed-batch key: a retry of this exact HTTP request
-  // (same rows claimed) reuses the same key, so it can't create a second
-  // Instant Payout even if the response to the first attempt was lost.
-  const batchKey = claimedRows
-    .map(r => `${r.sourceType}:${r.sourceId}`)
-    .sort()
-    .join(',');
-  const idempotencyKey = `early-instant-payout-${userId}-${crypto.createHash('sha256').update(batchKey).digest('hex').slice(0, 24)}`;
+  // Deterministic per-batch key: a retry of the exact same release reuses
+  // the same key, so it can't create a second Instant Payout even if the
+  // response to the first attempt was lost.
+  const idempotencyKey = `instant-payout-${userId}-${crypto.createHash('sha256').update(idempotencyKeySeed).digest('hex').slice(0, 24)}`;
 
   let payout;
   try {
@@ -482,36 +517,75 @@ export async function claimEarlyPayout(userId) {
         method: 'instant',
         destination: instantEligibility.externalAccountId,
       },
-      { stripeAccount: connectAccount.stripeAccountId, idempotencyKey }
+      { stripeAccount: stripeAccountId, idempotencyKey }
     );
   } catch (err) {
     logger.error('[EarlyPayout] instant payout create failed', { userId, error: err.message });
-    return { claimedGrossCents, claimedRows, instantPayout: null, skippedReason: 'instant_payout_failed' };
+    return { instantPayout: null, skippedReason: 'instant_payout_failed' };
   }
 
-  // The whole claimed gross amount leaves the ledger's available bucket —
+  // The whole released gross amount leaves the ledger's available bucket —
   // whatever the creator didn't receive in hand was retained by Stripe as
-  // the Instant Payout fee, per the architecture's "85% for a 5% fee" terms
-  // (see the file header; this codebase never re-derives that percentage
-  // itself, only observes what Stripe actually paid out vs. what was claimed).
-  await PayoutLedgerService.debitAvailable(userId, claimedGrossCents, {
+  // the Instant Payout fee, per the architecture's "85% for a 5% fee" terms.
+  await PayoutLedgerService.debitAvailable(userId, grossCents, {
     sourceType: 'instant_payout',
     // Not a DB row's UUID — payoutLedgerEntries.sourceId is a uuid column,
     // so a Stripe payout id (e.g. "po_...") goes in metadata instead.
     sourceId: null,
-    reason: 'instant_payout_day7',
-    metadata: { claimedRows, payoutId: payout.id, payoutAmountCents: instantPayoutAmountCents },
+    reason: debitReason,
+    metadata: { ...debitMetadata, payoutId: payout.id, payoutAmountCents: instantPayoutAmountCents },
   }).catch(err =>
     logger.error('[EarlyPayout] ledger debit failed', { userId, payoutId: payout.id, error: err.message })
   );
 
   return {
-    claimedGrossCents,
-    claimedRows,
     instantPayout: {
       id: payout.id,
       amountCents: instantPayoutAmountCents,
-      feeCents: claimedGrossCents - instantPayoutAmountCents,
+      feeCents: grossCents - instantPayoutAmountCents,
     },
   };
+}
+
+/**
+ * dispatchInstantPayout's debitAvailable happens right after Stripe's
+ * payouts.create() call returns — but that call succeeding only means
+ * Stripe ACCEPTED the payout, not that it actually completed. Stripe can
+ * still fail it asynchronously (e.g. "insufficient funds to cover the
+ * transfer" on the connected account, seen live in testing). Call this from
+ * the payout.failed webhook to reverse that debit so the ledger doesn't
+ * claim money was paid out that Stripe actually returned to the balance.
+ *
+ * Idempotent: a re-delivered webhook for the same payout finds its own
+ * reversal already recorded and does nothing.
+ */
+export async function handlePayoutFailed(payout) {
+  const entry = await db.query.payoutLedgerEntries.findFirst({
+    where: sql`${payoutLedgerEntries.metadata}->>'payoutId' = ${payout.id}`,
+  });
+  if (!entry) return; // Not one of ours (e.g. a standard/scheduled payout) — nothing to reverse.
+
+  const alreadyReversed = await db.query.payoutLedgerEntries.findFirst({
+    where: sql`${payoutLedgerEntries.metadata}->>'reversalOfPayoutId' = ${payout.id}`,
+  });
+  if (alreadyReversed) return;
+
+  const ledger = await db.query.creatorPayoutLedgers.findFirst({
+    where: eq(creatorPayoutLedgers.id, entry.ledgerId),
+  });
+  if (!ledger) return;
+
+  await PayoutLedgerService.creditAvailable(ledger.userId, Math.abs(entry.amountCents), {
+    sourceType: entry.sourceType,
+    sourceId: entry.sourceId,
+    reason: 'instant_payout_failed',
+    metadata: { reversalOfPayoutId: payout.id, failureCode: payout.failure_code, failureMessage: payout.failure_message },
+  });
+
+  logger.warn('[EarlyPayout] instant payout failed, reversed ledger debit', {
+    userId: ledger.userId,
+    payoutId: payout.id,
+    amountCents: entry.amountCents,
+    failureMessage: payout.failure_message,
+  });
 }

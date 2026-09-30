@@ -13,10 +13,7 @@ import {
   getMyGroups,
   joinGroups,
   leaveGroups,
-  createGroupCategory,
   getGroupCategories,
-  deleteGroupCategory,
-  updateGroupCategory,
   addGroupMember,
   getGroupMembers,
   updateGroupMemberRole,
@@ -121,9 +118,9 @@ router.get('/:groupsId', getGroupsById);
 // Protected routes
 
 router.post('/', checkBlockedUrl('description', { optional: true, scanText: true }), createGroups);
-router.post('/category', createGroupCategory);
-router.delete('/categories/:category_id', deleteGroupCategory);
-router.put('/categories/:category_id', updateGroupCategory);
+// Group category create/update/delete moved to /admin/group-categories
+// (admin.route.js) — these three were only behind generic authMiddleware
+// here, letting any logged-in user mutate categories, not just admins.
 router.put(
   '/:groupsId',
   checkBlockedUrl('description', { optional: true, scanText: true }),
