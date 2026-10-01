@@ -59,6 +59,123 @@ export const createCheckoutSession = catchAsync(async (req, res) => {
   });
 });
 
+/**
+ * Same purchase as createCheckoutSession, but charges a saved card directly
+ * (no redirect) when the buyer already has one on file. Falls back to a
+ * normal hosted Checkout session otherwise.
+ */
+export const createSmartCheckoutSession = catchAsync(async (req, res) => {
+  const {
+    eventId,
+    ticketSelections = [],
+    merchandiseSelections = [],
+    holderName,
+    holderEmail,
+    holderPhone,
+    billingAddress,
+  } = req.body;
+
+  if (!eventId) {
+    throw new ApiError(400, 'eventId is required');
+  }
+
+  if (!ticketSelections || ticketSelections.length === 0) {
+    throw new ApiError(400, 'Ticket selections required');
+  }
+
+  const order = await OrderService.createOrder(
+    req.user.id,
+    eventId,
+    ticketSelections,
+    merchandiseSelections,
+    { holderName, holderPhone, holderEmail, billingAddress }
+  );
+
+  const successUrl = req.body.successUrl;
+  const cancelUrl = req.body.cancelUrl;
+
+  const metadata = {
+    userId: req.user.id,
+    holderName: holderName || null,
+    holderEmail: holderEmail || null,
+    holderPhone: holderPhone || null,
+    eventScheduleId: ticketSelections[0]?.eventScheduleId || null,
+  };
+
+  const result = await PaymentService.createSmartCheckoutSession(
+    order,
+    successUrl,
+    cancelUrl,
+    metadata
+  );
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Native in-app checkout for ticket orders (mobile PaymentSheet). Creates the
+ * order exactly like the hosted/smart checkout endpoints, then returns what
+ * Stripe's PaymentSheet needs instead of a redirect URL.
+ */
+export const createTicketPaymentSheet = catchAsync(async (req, res) => {
+  const {
+    eventId,
+    ticketSelections = [],
+    merchandiseSelections = [],
+    holderName,
+    holderEmail,
+    holderPhone,
+    billingAddress,
+  } = req.body;
+
+  if (!eventId) {
+    throw new ApiError(400, 'eventId is required');
+  }
+  if (!ticketSelections || ticketSelections.length === 0) {
+    throw new ApiError(400, 'Ticket selections required');
+  }
+
+  const order = await OrderService.createOrder(
+    req.user.id,
+    eventId,
+    ticketSelections,
+    merchandiseSelections,
+    { holderName, holderPhone, holderEmail, billingAddress }
+  );
+
+  const result = await PaymentService.createTicketPaymentSheet(order, {
+    holderName: holderName || null,
+    holderEmail: holderEmail || null,
+    holderPhone: holderPhone || null,
+    eventScheduleId: ticketSelections[0]?.eventScheduleId || null,
+  });
+
+  res.json({ success: true, data: result });
+});
+
+/**
+ * Called by the app right after the PaymentSheet reports success, so tickets
+ * are issued without waiting on the webhook. Idempotent with the
+ * payment_intent.succeeded webhook (see PaymentService.processPaymentSheetIntent).
+ * If the webhook won the race and is still issuing, waits briefly for it.
+ */
+export const completeTicketPaymentSheet = catchAsync(async (req, res) => {
+  const { paymentIntentId } = req.body;
+  if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
+
+  const opts = { userId: req.user.id };
+  let result = await PaymentService.processPaymentSheetIntent(paymentIntentId, opts);
+
+  // Lost the claim to the webhook (or Stripe is still settling) — give it a
+  // few seconds to finish issuing before answering.
+  for (let i = 0; i < 10 && result.status !== 'paid'; i++) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    result = await PaymentService.processPaymentSheetIntent(paymentIntentId, opts);
+  }
+
+  res.json({ success: true, data: result });
+});
+
 export const getPublishableKey = catchAsync(async (req, res) => {
   const publishableKey = PaymentService.getPublishableKey
     ? PaymentService.getPublishableKey()
