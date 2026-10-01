@@ -18,9 +18,11 @@ const EnvVariables = z.object({
   GMAIL_EMAIL: z.string(),
   GMAIL_APP_PASSWORD: z.string(),
   STRIPE_SECRET_KEY: z.string().optional(),
+  STRIPE_SECRET_KEY_LOCAL: z.string().optional(),
   STRIPE_PUBLISHABLE_KEY: z.string().optional(),
   STRIPE_PUBLISHABLE_KEY_LOCAL: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  STRIPE_WEBHOOK_SECRET_LOCAL: z.string().optional(),
 
   // Google OAuth
   GOOGLE_CLIENT_ID: z.string(),
@@ -64,6 +66,8 @@ try {
   process.exit(1);
 }
 
+const isProduction = process.env.NODE_ENV === 'production';
+
 const env = {
   nodeEnv: process.env.NODE_ENV,
   apiHost: process.env.API_HOST,
@@ -86,10 +90,15 @@ const env = {
     email: envVars.GMAIL_EMAIL,
     appPassword: envVars.GMAIL_APP_PASSWORD,
   },
+  // production -> live keys (STRIPE_*), everything else -> test keys (STRIPE_*_LOCAL only)
   stripe: {
-    secretKey: envVars.STRIPE_SECRET_KEY,
-    publishableKey: envVars.STRIPE_PUBLISHABLE_KEY_LOCAL || envVars.STRIPE_PUBLISHABLE_KEY,
-    webhookSecret: envVars.STRIPE_WEBHOOK_SECRET,
+    secretKey: isProduction ? envVars.STRIPE_SECRET_KEY : envVars.STRIPE_SECRET_KEY_LOCAL,
+    publishableKey: isProduction
+      ? envVars.STRIPE_PUBLISHABLE_KEY
+      : envVars.STRIPE_PUBLISHABLE_KEY_LOCAL,
+    webhookSecret: isProduction
+      ? envVars.STRIPE_WEBHOOK_SECRET
+      : envVars.STRIPE_WEBHOOK_SECRET_LOCAL,
   },
   google: {
     clientId: envVars.GOOGLE_CLIENT_ID,

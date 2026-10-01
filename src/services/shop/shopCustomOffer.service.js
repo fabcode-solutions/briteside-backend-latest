@@ -2717,10 +2717,16 @@ export class ShopCustomOfferService {
     if (offer.sellerId !== userId && offer.buyerId !== userId) {
       throw new ApiError(403, 'This offer is not yours');
     }
-    return db.query.shopCustomOfferRevisionRequests.findMany({
+    const rows = await db.query.shopCustomOfferRevisionRequests.findMany({
       where: eq(shopCustomOfferRevisionRequests.offerId, offerId),
       orderBy: (r, { desc }) => [desc(r.createdAt)],
     });
+    return Promise.all(
+      rows.map(async row => ({
+        ...row,
+        attachments: await this._resolveAttachmentUrls(row.attachments),
+      }))
+    );
   }
 
   static async listDateExtensionRequests(userId, offerId) {
