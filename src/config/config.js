@@ -18,10 +18,9 @@ const EnvVariables = z.object({
   GMAIL_EMAIL: z.string(),
   GMAIL_APP_PASSWORD: z.string(),
   STRIPE_SECRET_KEY: z.string().optional(),
-  STRIPE_SECRET_KEY_LOCAL: z.string().optional(),
   STRIPE_PUBLISHABLE_KEY: z.string().optional(),
+  STRIPE_PUBLISHABLE_KEY_LOCAL: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
-  STRIPE_WEBHOOK_SECRET_LOCAL: z.string().optional(),
 
   // Google OAuth
   GOOGLE_CLIENT_ID: z.string(),
@@ -31,6 +30,7 @@ const EnvVariables = z.object({
   FACEBOOK_APP_ID: z.string().optional(),
   FACEBOOK_APP_SECRET: z.string().optional(),
   FACEBOOK_CALLBACK_URL: z.string().optional(),
+  FACEBOOK_CLIENT_TOKEN: z.string().optional(),
   // Apple Sign In
   APPLE_TEAM_ID: z.string().optional(),
   APPLE_KEY_ID: z.string().optional(),
@@ -42,6 +42,7 @@ const EnvVariables = z.object({
   APPLE_IAP_ISSUER_ID: z.string().optional(),
   APPLE_IAP_KEY_ID: z.string().optional(),
   APPLE_IAP_BUNDLE_ID: z.string().optional(),
+  APPLE_IAP_ENVIRONMENT: z.enum(['Sandbox', 'Production']).optional().default('Sandbox'),
   APPLE_IAP_PRIVATE_KEY: z.string().optional(),
   // App Store Connect API (automatic in-app-purchase product registration) —
   // a separate key pair/scope from the App Store Server API above.
@@ -52,9 +53,6 @@ const EnvVariables = z.object({
   // Google Play In-App Purchase — Play Developer API (service account)
   GOOGLE_PLAY_PACKAGE_NAME: z.string().optional(),
   GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: z.string().optional(),
-  // Pub/Sub push subscription auth for Play real-time developer notifications
-  GOOGLE_RTDN_PUSH_AUDIENCE: z.string().optional(),
-  GOOGLE_RTDN_PUSH_SERVICE_ACCOUNT: z.string().optional(),
 });
 
 let envVars;
@@ -89,10 +87,9 @@ const env = {
     appPassword: envVars.GMAIL_APP_PASSWORD,
   },
   stripe: {
-    secretKey: envVars.STRIPE_SECRET_KEY_LOCAL || envVars.STRIPE_SECRET_KEY,
-    publishableKey: envVars.STRIPE_PUBLISHABLE_KEY,
-    // STRIPE_WEBHOOK_SECRET_LOCAL takes precedence in dev to override the prod secret from AWS
-    webhookSecret: envVars.STRIPE_WEBHOOK_SECRET_LOCAL || envVars.STRIPE_WEBHOOK_SECRET,
+    secretKey: envVars.STRIPE_SECRET_KEY,
+    publishableKey: envVars.STRIPE_PUBLISHABLE_KEY_LOCAL || envVars.STRIPE_PUBLISHABLE_KEY,
+    webhookSecret: envVars.STRIPE_WEBHOOK_SECRET,
   },
   google: {
     clientId: envVars.GOOGLE_CLIENT_ID,
@@ -116,28 +113,23 @@ const env = {
     issuerId: envVars.APPLE_IAP_ISSUER_ID,
     keyId: envVars.APPLE_IAP_KEY_ID,
     bundleId: envVars.APPLE_IAP_BUNDLE_ID,
+    environment: envVars.APPLE_IAP_ENVIRONMENT,
     // .env stores this with literal \n escapes (real newlines inside a .env
     // value are unreliable across parsers) — unescape back to a real PEM.
     privateKey: envVars.APPLE_IAP_PRIVATE_KEY?.replace(/\\n/g, '\n'),
     ascKeyId: envVars.APPLE_ASC_KEY_ID,
     ascPrivateKey: envVars.APPLE_ASC_PRIVATE_KEY?.replace(/\\n/g, '\n'),
     ascAppId: envVars.APPLE_ASC_APP_ID,
-    // Bundle id + app Apple ID are required to verify Production-signed
-    // transactions/notifications, so they're part of "configured" too.
     configured: !!(
       envVars.APPLE_IAP_ISSUER_ID &&
       envVars.APPLE_IAP_KEY_ID &&
-      envVars.APPLE_IAP_PRIVATE_KEY &&
-      envVars.APPLE_IAP_BUNDLE_ID &&
-      envVars.APPLE_ASC_APP_ID
+      envVars.APPLE_IAP_PRIVATE_KEY
     ),
   },
   googleIap: {
     packageName: envVars.GOOGLE_PLAY_PACKAGE_NAME,
     serviceAccountJson: envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON,
     configured: !!(envVars.GOOGLE_PLAY_PACKAGE_NAME && envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON),
-    rtdnPushAudience: envVars.GOOGLE_RTDN_PUSH_AUDIENCE,
-    rtdnPushServiceAccount: envVars.GOOGLE_RTDN_PUSH_SERVICE_ACCOUNT,
   },
 };
 
