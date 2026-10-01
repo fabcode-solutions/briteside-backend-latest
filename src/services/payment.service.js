@@ -8,6 +8,7 @@ import {
   eventMerchandise,
   events,
   organizers,
+  stripeConnectAccounts,
 } from '../db/schema/index.js';
 import { and, eq, isNull } from 'drizzle-orm';
 import ApiError from '../utils/api-error.js';
@@ -315,13 +316,13 @@ export class PaymentService {
         // Stripe's hosted Checkout only shows its native line-item quantity
         // when it's greater than 1, so a single-ticket purchase would show no
         // count at all. Spell it out in the description ourselves so the
-        // buyer always sees how many they're buying, 1 included.
-        const qtyLabel = groupDealSize
+        // buyer always sees how many they're buying, 1 included. The
+        // ticket/tier's own description is deliberately left out here — it's
+        // organizer-authored copy meant for the listing page, not the
+        // checkout receipt.
+        const description = groupDealSize
           ? `Qty: ${item.quantity} (${billedQuantity} × group of ${groupDealSize})`
           : `Qty: ${billedQuantity}`;
-        const description = productInfo.description
-          ? `${qtyLabel} • ${productInfo.description}`
-          : qtyLabel;
 
         line_items.push({
           price_data: {
@@ -469,7 +470,33 @@ export class PaymentService {
         };
       }
 
-      const session = await stripe.checkout.sessions.create(checkoutParams);
+      let session;
+      try {
+        session = await stripe.checkout.sessions.create(checkoutParams);
+      } catch (err) {
+        // The organizer's Connect account reference is stale (e.g. deleted,
+        // or left over from a Stripe environment/key switch) — Stripe
+        // rejects the payout destination outright. Self-heal so the NEXT
+        // attempt short-circuits via the chargesEnabled self-heal above
+        // instead of failing the exact same way indefinitely, and surface
+        // a clear reason instead of a bare 500.
+        if (
+          err?.raw?.code === 'resource_missing' &&
+          err?.raw?.param?.includes('transfer_data][destination') &&
+          connectAccount
+        ) {
+          await db
+            .update(stripeConnectAccounts)
+            .set({ chargesEnabled: false, updatedAt: new Date() })
+            .where(eq(stripeConnectAccounts.stripeAccountId, connectAccount.stripeAccountId))
+            .catch(() => {});
+          throw new ApiError(
+            503,
+            "This event's payment setup needs attention — please try again shortly or contact the organizer."
+          );
+        }
+        throw err;
+      }
 
       // Save session id, payment intent, reserve amount, and gross total to order.
       // stripeFeeCents is saved as an estimate (2.9% + $0.30) now; the webhook
