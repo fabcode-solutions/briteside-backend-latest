@@ -9,7 +9,7 @@ import {
   events,
   organizers,
 } from '../db/schema/index.js';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import ApiError from '../utils/api-error.js';
 import { StripeConnectService, getReserveRate } from './stripeConnect.service.js';
 import { StripeSmartCheckoutService } from './stripeSmartCheckout.service.js';
@@ -28,6 +28,149 @@ export class PaymentService {
 
   static getPublishableKey() {
     return config.stripe?.publishableKey || null;
+  }
+
+  // ── Native PaymentSheet (mobile app) ──────────────────────────────────────
+  //
+  // The app pays for ticket orders inside the app with Stripe's native
+  // PaymentSheet instead of opening hosted Checkout in a browser. Same order,
+  // same charge maths (_computeOrderCharge), same Connect split and the same
+  // ticket-issuance path (handleCheckoutSession) as hosted/smart checkout —
+  // only how the card is collected differs.
+  //
+  // Ephemeral keys must be minted for the API version the client SDK
+  // speaks; @stripe/stripe-react-native accepts this version.
+  static PAYMENT_SHEET_EPHEMERAL_KEY_API_VERSION = '2024-06-20';
+
+  /**
+   * Creates the PaymentIntent (+ customer/ephemeral key so the sheet can show
+   * and save cards) for an already-created ticket order.
+   * `order.paymentIntentId` is deliberately left NULL here — it's set
+   * atomically when the payment is processed (see processPaymentSheetIntent),
+   * which is what guarantees tickets are issued exactly once even though the
+   * app's completion call and the webhook race each other.
+   */
+  static async createTicketPaymentSheet(order, metadata = {}) {
+    this.ensureStripe();
+    if (!order || !order.orderItems || order.orderItems.length === 0) {
+      throw new ApiError(400, 'Order has no items');
+    }
+    if (!order.userId) throw new ApiError(401, 'Sign in to pay in the app');
+
+    const charge = await this._computeOrderCharge(order);
+    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(order.userId);
+    const publishableKey = this.getPublishableKey();
+    if (!publishableKey) throw new ApiError(503, 'Payment provider not configured');
+
+    const intent = await stripe.paymentIntents.create({
+      amount: charge.totalCents,
+      currency: 'usd',
+      customer: stripeCustomerId,
+      // Saves the card for one-tap smart checkout next time.
+      setup_future_usage: 'off_session',
+      automatic_payment_methods: { enabled: true },
+      metadata: {
+        source: 'payment_sheet',
+        type: 'ticket',
+        feature: 'ticket',
+        orderId: order.id,
+        userId: order.userId,
+        eventId: order.eventId,
+        organizerId: charge.eventInfo?.organizerId ?? null,
+        eventTitle: charge.eventInfo?.title ?? null,
+        holderName: metadata.holderName ?? null,
+        holderEmail: metadata.holderEmail ?? null,
+        holderPhone: metadata.holderPhone ?? null,
+        eventScheduleId: metadata.eventScheduleId ?? null,
+      },
+      ...(charge.connectAccount?.chargesEnabled
+        ? {
+            transfer_data: { destination: charge.connectAccount.stripeAccountId },
+            application_fee_amount: charge.platformShareCents + charge.reserveAmountCents,
+          }
+        : {}),
+    });
+
+    const ephemeralKey = await stripe.ephemeralKeys.create(
+      { customer: stripeCustomerId },
+      { apiVersion: this.PAYMENT_SHEET_EPHEMERAL_KEY_API_VERSION }
+    );
+
+    await db
+      .update(orders)
+      .set({
+        totalAmount: (charge.totalCents / 100).toFixed(2),
+        reserveAmountCents: charge.reserveAmountCents,
+        platformShareCents: charge.platformShareCents,
+        stripeFeeCents: charge.estimatedStripeFeeCents,
+        updatedAt: new Date(),
+      })
+      .where(eq(orders.id, order.id));
+
+    return {
+      orderId: order.id,
+      paymentIntentId: intent.id,
+      paymentIntentClientSecret: intent.client_secret,
+      customerId: stripeCustomerId,
+      ephemeralKey: ephemeralKey.secret,
+      // The app must initialise Stripe with THIS key — it has to belong to
+      // the same Stripe account as the secret key that created the intent.
+      publishableKey,
+      amountCents: charge.totalCents,
+    };
+  }
+
+  /**
+   * Issues the tickets for a succeeded PaymentSheet intent. Safe to call from
+   * both the app's completion request and the payment_intent.succeeded
+   * webhook: the order is claimed with a single conditional UPDATE, so only
+   * one caller ever runs ticket issuance.
+   * @returns {Promise<{ status: string, orderId: string }>}
+   */
+  static async processPaymentSheetIntent(paymentIntentOrId, { userId = null } = {}) {
+    this.ensureStripe();
+    const intent =
+      typeof paymentIntentOrId === 'string'
+        ? await stripe.paymentIntents.retrieve(paymentIntentOrId)
+        : paymentIntentOrId;
+    const meta = intent?.metadata ?? {};
+    if (meta.source !== 'payment_sheet' || !meta.orderId) {
+      throw new ApiError(400, 'Not an in-app ticket payment');
+    }
+    // App-initiated completion: only the buyer may complete their payment.
+    if (userId && meta.userId !== userId) {
+      throw new ApiError(403, 'Not authorized for this payment');
+    }
+    if (intent.status !== 'succeeded') {
+      return { status: intent.status, orderId: meta.orderId };
+    }
+
+    const claimed = await db
+      .update(orders)
+      .set({ paymentIntentId: intent.id, updatedAt: new Date() })
+      .where(and(eq(orders.id, meta.orderId), isNull(orders.paymentIntentId)))
+      .returning({ id: orders.id });
+
+    if (claimed.length > 0) {
+      const { handleCheckoutSession } = await import('../controllers/webhook.controller.js');
+      await handleCheckoutSession({
+        id: null,
+        payment_intent: intent.id,
+        amount_total: intent.amount_received || intent.amount,
+        customer_details: null,
+        metadata: {
+          orderId: meta.orderId,
+          userId: meta.userId ?? null,
+          holderName: meta.holderName ?? null,
+          holderEmail: meta.holderEmail ?? null,
+          holderPhone: meta.holderPhone ?? null,
+          eventScheduleId: meta.eventScheduleId ?? null,
+        },
+      });
+    }
+
+    const order = await db.query.orders.findFirst({ where: eq(orders.id, meta.orderId) });
+    return { status: order?.status ?? 'pending', orderId: meta.orderId };
   }
 
   /**

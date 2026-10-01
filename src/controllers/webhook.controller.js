@@ -249,6 +249,20 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
       } else {
         await SubscriptionService.handleInvoicePaymentFailed(invoice);
       }
+    } else if (
+      event.type === 'payment_intent.succeeded' &&
+      event.data.object?.metadata?.source === 'payment_sheet'
+    ) {
+      // Mobile in-app (PaymentSheet) ticket payment. Normally the app's own
+      // /payment/ticket-payment-sheet/complete call issues the tickets first;
+      // this is the safety net if the app was closed right after paying.
+      // Exactly-once is guaranteed by the atomic claim inside
+      // processPaymentSheetIntent. Requires payment_intent.succeeded to be
+      // enabled for this endpoint in the Stripe Dashboard. Other
+      // payment_intent.succeeded events (hosted/smart checkout) are left to
+      // their existing checkout.session.* handling, untouched.
+      const { PaymentService } = await import('../services/payment.service.js');
+      await PaymentService.processPaymentSheetIntent(event.data.object);
     } else if (event.type === 'charge.dispute.created') {
       // Phase 4 of the payout architecture — see PAYMENTS_ARCHITECTURE.md §5.
       // Requires this webhook endpoint to be subscribed to
