@@ -35,7 +35,6 @@ import { ShopIapService } from './shop/shopIap.service.js';
 import { getRedirectUrls, isNativePlatform } from '../utils/redirect-urls.js';
 import { socialConversations } from '../db/schema/socialChat.js';
 import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
-import { StripeSmartCheckoutService } from './stripeSmartCheckout.service.js';
 import { PayoutLedgerService } from './payoutLedger.service.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
@@ -96,7 +95,7 @@ export class PriorityMessageService {
   ) {
     if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
 
-    const prep = await this._prepareMessagePayment(senderId, {
+    return this._prepareMessagePayment(senderId, {
       talentProfileId,
       subject,
       messageContent,
@@ -104,99 +103,6 @@ export class PriorityMessageService {
       contentExtended,
       attachmentIds,
     });
-
-    // Reusing the sender's canonical Stripe customer (shared with
-    // subscriptions) instead of a bare customer_email lets Checkout attach
-    // the card entered here to their account (see setup_future_usage in
-    // _createHostedSession) — that's what createSmartCheckout later finds
-    // to skip the checkout page entirely on a future priority message.
-    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(senderId).catch(
-      err => {
-        console.warn(`[PriorityMessage] getOrCreateStripeCustomer failed: ${err.message}`);
-        return null;
-      }
-    );
-
-    return this._createHostedSession(prep, platform, stripeCustomerId);
-  }
-
-  // ── Same payment, skipping the hosted Checkout page when possible ─────────
-
-  /**
-   * POST /priority-messages/smart-checkout
-   *
-   * Identical validation and DB persistence to createCheckout(), but if the
-   * sender already has a saved card on file (attached during an earlier
-   * priority message paid via the hosted Checkout page), charges it
-   * directly and delivers the message immediately — no redirect, no
-   * checkout screen. Falls back to a normal hosted Checkout session
-   * whenever there's no saved card yet, or Stripe requires additional
-   * authentication (SCA) that only a hosted page can complete.
-   *
-   * @returns {{ instant: true, paymentId, messageCount, chargedCents }
-   *         | { instant: false, checkoutUrl, paymentId, ... }}
-   */
-  static async createSmartCheckout(
-    senderId,
-    { talentProfileId, subject, messageContent, messages, platform, contentExtended, attachmentIds },
-    io = null
-  ) {
-    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
-
-    const prep = await this._prepareMessagePayment(senderId, {
-      talentProfileId,
-      subject,
-      messageContent,
-      messages,
-      contentExtended,
-      attachmentIds,
-    });
-    const { payment, profile, chargedCents } = prep;
-
-    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(senderId);
-    const intent = await StripeSmartCheckoutService.tryOffSessionCharge({
-      stripeCustomerId,
-      amountCents: chargedCents,
-      metadata: {
-        type: 'priority_message',
-        feature: 'priority_message',
-        paymentId: payment.id,
-        senderId,
-        talentUserId: profile.userId,
-      },
-    });
-
-    if (intent) {
-      // Reuses the exact delivery/notification/reserve logic the webhook
-      // path runs — a synthetic "session" carrying just the fields
-      // handleWebhook actually reads (metadata + payment_intent).
-      await this.handleWebhook(
-        {
-          id: null,
-          payment_intent: intent.id,
-          metadata: { paymentId: payment.id, senderId, talentUserId: profile.userId },
-        },
-        io
-      );
-
-      // handleWebhook runs synchronously above, so the payment is already
-      // delivered — fetch its resulting state (conversationId, message
-      // ids) so the frontend can go straight there, the same shape it
-      // already gets back from polling the redirect flow.
-      const status = await this.getStatus(payment.id, senderId);
-
-      return {
-        instant: true,
-        paymentId: payment.id,
-        messageCount: prep.msgList.length,
-        chargedCents,
-        status: status.status,
-        conversationId: status.conversationId,
-        messageIds: status.messageIds,
-      };
-    }
-
-    return this._createHostedSession(prep, platform, stripeCustomerId);
   }
 
   // ── Shared validation + DB persistence for both checkout paths ────────────
@@ -512,22 +418,6 @@ export class PriorityMessageService {
     };
   }
 
-  // ── Hosted Stripe Checkout session — shared tail for both entry points ────
-  static async _createHostedSession(prep, platform, stripeCustomerId) {
-    // const {
-    //   payment,
-    //   profile,
-    //   sender,
-    //   talentName,
-    //   talentProfileId,
-    //   msgList,
-    //   chargedCents,
-    //   platformAndServiceFeeCents,
-    //   applicationFeeCents,
-    //   talentNetCents,
-    // };
-  }
-
   static async createCheckout(
     senderId,
     { talentProfileId, subject, messageContent, messages, platform, contentExtended, attachmentIds }
@@ -559,6 +449,18 @@ export class PriorityMessageService {
       attachmentIds,
     });
 
+    // Reusing the sender's canonical Stripe customer (shared with
+    // subscriptions) instead of a bare customer_email is what lets Stripe's
+    // own Checkout UI offer a saved card from an earlier priority message —
+    // "Pay with •••• 4242" alongside "+ Add new card" — instead of asking
+    // for card details every single time.
+    const stripeCustomerId = await SubscriptionService.getOrCreateStripeCustomer(senderId).catch(
+      err => {
+        console.warn(`[PriorityMessage] getOrCreateStripeCustomer failed: ${err.message}`);
+        return null;
+      }
+    );
+
     // Native: land on the app's /message tab with a status flag — the app's
     // in-app checkout session (openAuthSessionAsync) waits for exactly this
     // briteside://message URL and reads `status` to know whether payment went
@@ -576,10 +478,23 @@ export class PriorityMessageService {
     );
 
     // ── Stripe Checkout session ─────────────────────────────────────────────
+    // Embedded checkout (web only — it's an iframe, which the native apps'
+    // openAuthSessionAsync flow has no way to host) lets the sender pay in a
+    // modal on this page instead of leaving to Stripe's hosted page. Native
+    // keeps the existing hosted redirect unchanged.
     const checkoutParams = {
       payment_method_types: ['card'],
       mode: 'payment',
       expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+      ...(nativeRedirect
+        ? { success_url: successUrl, cancel_url: cancelUrl }
+        : {
+            ui_mode: 'embedded',
+            // Messages.tsx already polls on exactly this query shape once it
+            // lands back here (see its priority_message/payment_id effect) —
+            // payment.id is already known here, no {CHECKOUT_SESSION_ID} needed.
+            return_url: `${FRONTEND_URL}/messages?priority_message=success&payment_id=${payment.id}`,
+          }),
       line_items: [
         // Base message (only if there's actual text content)
         ...(textMessageCount > 0
@@ -653,11 +568,23 @@ export class PriorityMessageService {
             ]
           : []),
       ],
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      // Attaching to the sender's Stripe customer (rather than a bare
-      // customer_email) is what lets Checkout save this card for next time.
-      ...StripeSmartCheckoutService.customerParamsFor(stripeCustomerId, sender?.email),
+      // Stripe rejects a session that sets both `customer` and
+      // `customer_email` — stay mutually exclusive, same as every other
+      // checkout flow in this codebase that attaches a canonical customer.
+      ...(stripeCustomerId
+        ? {
+            customer: stripeCustomerId,
+            // Checkout only ever offers a saved card back to a returning
+            // customer when that card's allow_redisplay is 'always' — the
+            // default for a freshly-saved one is 'limited' (not reusable
+            // like this) unless the customer explicitly opted in via this
+            // checkbox. Without it, setup_future_usage below still saves
+            // the card, but it can never be picked from next time.
+            saved_payment_method_options: { payment_method_save: 'enabled' },
+          }
+        : sender?.email?.trim()
+          ? { customer_email: sender.email.trim() }
+          : {}),
       metadata: {
         type: 'priority_message',
         feature: 'priority_message',
@@ -674,16 +601,16 @@ export class PriorityMessageService {
       // scheduled job 48h after the talent replies, per the SLA escrow
       // payout rule.
       payment_intent_data: {
+        // Saves whichever card the sender pays with (new or already-saved)
+        // to their Stripe customer, so next time Checkout can offer it —
+        // requires `customer` above, hence conditional on it too.
+        ...(stripeCustomerId ? { setup_future_usage: 'off_session' } : {}),
         metadata: {
           type: 'priority_message',
           feature: 'priority_message',
           paymentId: payment.id,
           talentUserId: profile.userId,
         },
-        // Saves the card the sender enters to their Stripe customer for a
-        // future off-session charge (see createSmartCheckout) — requires
-        // `customer` above, which is why this is conditional on it too.
-        ...(stripeCustomerId ? { setup_future_usage: 'off_session' } : {}),
       },
     };
 
@@ -695,8 +622,9 @@ export class PriorityMessageService {
       .where(eq(priorityMessagePayments.id, payment.id));
 
     return {
-      instant: false,
-      checkoutUrl: session.url,
+      // Native gets a normal hosted-checkout URL to redirect to; web gets a
+      // client secret to mount Stripe's embedded checkout in a modal instead.
+      ...(nativeRedirect ? { checkoutUrl: session.url } : { clientSecret: session.client_secret }),
       paymentId: payment.id,
       messageCount: msgList.length,
       totalUnits,

@@ -14,7 +14,6 @@ import * as mailService from '../mail.service.js';
 import { ShopProductService } from './shopProduct.service.js';
 import { ShopDeliverableService } from './shopDeliverable.service.js';
 import { calculatePlatformAndServiceFeeCents } from '../../utils/orderProcessingFee.js';
-import { StripeSmartCheckoutService } from '../stripeSmartCheckout.service.js';
 import { PayoutLedgerService } from '../payoutLedger.service.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
@@ -83,53 +82,7 @@ export class ShopOrderService {
     const prep = await this._prepareOrder(buyerId, productId, platform, customerInfo);
     if (prep.free || prep.redirect) return prep.redirect ?? prep;
 
-    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId).catch(
-      err => {
-        logger.error(`[Shop] getOrCreateStripeCustomer failed: ${err.message}`);
-        return null;
-      }
-    );
-
-    return this._createHostedOrderSession(prep, platform, stripeCustomerId);
-  }
-
-  /**
-   * POST /shop/products/:productId/smart-checkout
-   *
-   * Identical validation/persistence to createCheckout(), but if the buyer
-   * already has a saved card on file (attached during an earlier purchase
-   * anywhere on the platform — the Stripe customer is shared, see
-   * StripeSmartCheckoutService), charges it directly and delivers the
-   * product immediately — no redirect, no checkout screen. Falls back to a
-   * normal hosted Checkout session whenever there's no saved card yet, or
-   * Stripe requires additional authentication (SCA).
-   */
-  static async createSmartCheckout(buyerId, productId, platform, customerInfo = {}) {
-    const prep = await this._prepareOrder(buyerId, productId, platform, customerInfo);
-    if (prep.free) return { instant: true, ...prep };
-    if (prep.redirect) return { instant: false, ...prep.redirect };
-
-    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId);
-    const intent = await StripeSmartCheckoutService.tryOffSessionCharge({
-      stripeCustomerId,
-      amountCents: prep.fees.chargedCents,
-      metadata: prep.metadata,
-    });
-
-    if (intent) {
-      // Reuses the exact delivery/notification/reserve logic the webhook
-      // path runs — a synthetic "session" carrying just the fields
-      // handlePaymentWebhook actually reads (metadata + payment_intent).
-      await this.handlePaymentWebhook({
-        id: null,
-        payment_intent: intent.id,
-        metadata: prep.metadata,
-      });
-      return { instant: true, free: false, orderId: prep.order.id };
-    }
-
-    const hosted = await this._createHostedOrderSession(prep, platform, stripeCustomerId);
-    return { instant: false, ...hosted };
+    return this._createHostedOrderSession(prep, platform);
   }
 
   // ── Shared validation + DB persistence for both checkout paths ────────────
@@ -280,7 +233,7 @@ export class ShopOrderService {
   }
 
   // ── Hosted Stripe Checkout session — shared tail for both entry points ────
-  static async _createHostedOrderSession(prep, platform, stripeCustomerId) {
+  static async _createHostedOrderSession(prep, platform) {
     const { product, buyer, customerEmail, order, sellerPriceCents, platformAndServiceFeeCents, metadata } =
       prep;
 
@@ -320,7 +273,9 @@ export class ShopOrderService {
       ],
       success_url: redirectUrls.successUrl,
       cancel_url: redirectUrls.cancelUrl,
-      ...StripeSmartCheckoutService.customerParamsFor(stripeCustomerId, customerEmail || buyer?.email),
+      ...((customerEmail || buyer?.email)?.trim()
+        ? { customer_email: (customerEmail || buyer.email).trim() }
+        : {}),
       metadata,
       // No transfer_data/application_fee_amount here on purpose — the seller's
       // cut is no longer transferred at charge time. It's held on the
@@ -329,10 +284,6 @@ export class ShopOrderService {
       // scheduled job 7 days after paidAt, per the digital-content payout hold.
       payment_intent_data: {
         metadata,
-        // Saves the card the buyer enters to their Stripe customer for a
-        // future off-session charge (see createSmartCheckout) — requires
-        // `customer` above, which is why this is conditional on it too.
-        ...(stripeCustomerId ? { setup_future_usage: 'off_session' } : {}),
       },
     });
 

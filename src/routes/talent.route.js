@@ -19,7 +19,6 @@ import {
   getAvailability,
   getAvailableSlots,
   createSessionCheckout,
-  createSmartSessionCheckout,
   bookSession,
   confirmSession,
   declineSession,
@@ -150,9 +149,6 @@ router.get('/me/payout-ledger/early-payout', authMiddleware, getEarlyPayoutEligi
 router.post('/me/payout-ledger/early-payout/claim', authMiddleware, claimEarlyPayoutHandler);
 
 router.post('/sessions/checkout', authMiddleware, createSessionCheckout);
-// Same booking, charges a saved card directly (no redirect) when the booker
-// already has one on file.
-router.post('/sessions/smart-checkout', authMiddleware, createSmartSessionCheckout);
 router.post('/sessions/book', authMiddleware, bookSession);
 router.post('/sessions/:sessionId/tip/checkout', authMiddleware, createSessionTipCheckout);
 

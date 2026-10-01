@@ -53,7 +53,6 @@ import timezone from 'dayjs/plugin/timezone.js';
 import { emitSocialChat } from '../socket/emitter.js';
 import { organizerSocialLinks } from '../db/schema/index.js';
 import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
-import { StripeSmartCheckoutService } from './stripeSmartCheckout.service.js';
 import { PayoutLedgerService } from './payoutLedger.service.js';
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -1259,105 +1258,7 @@ export class TalentSessionService {
       bookerTimezone,
     });
 
-    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(bookerId).catch(
-      err => {
-        console.warn(`[TalentSession] getOrCreateStripeCustomer failed: ${err.message}`);
-        return null;
-      }
-    );
-
-    return this._createHostedSessionCheckout(prep, platform, stripeCustomerId);
-  }
-
-  /**
-   * POST /talent/sessions/smart-checkout
-   *
-   * Identical validation/persistence to createCheckout(), but if the
-   * booker already has a saved card on file (attached during an earlier
-   * purchase anywhere on the platform — the Stripe customer is shared, see
-   * StripeSmartCheckoutService), charges it directly and confirms the
-   * booking request immediately — no redirect, no checkout screen. Falls
-   * back to a normal hosted Checkout session whenever there's no saved
-   * card yet, or Stripe requires additional authentication (SCA).
-   */
-  static async createSmartCheckout(
-    {
-      talentProfileId,
-      bookerId,
-      date,
-      time,
-      durationMins,
-      subject,
-      discussion,
-      isGift,
-      giftDetails,
-      giftCode,
-      platform,
-      bookerTimezone,
-    },
-    io = null
-  ) {
-    const prep = await this._prepareSessionBooking({
-      talentProfileId,
-      bookerId,
-      date,
-      time,
-      durationMins,
-      subject,
-      discussion,
-      isGift,
-      giftDetails,
-      giftCode,
-      bookerTimezone,
-    });
-    const { session, applicationFeeCents, estimatedStripeFeeCents, chargedCents } = prep;
-
-    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(bookerId);
-    const intent = await StripeSmartCheckoutService.tryOffSessionCharge({
-      stripeCustomerId,
-      amountCents: chargedCents,
-      metadata: {
-        type: 'talent_session',
-        sessionId: session.id,
-        bookerId,
-        talentUserId: prep.profile.userId,
-      },
-    });
-
-    if (intent) {
-      await db
-        .update(talentSessions)
-        .set({
-          reserveAmountCents: 0,
-          platformShareCents: applicationFeeCents,
-          stripeFeeCents: estimatedStripeFeeCents,
-          updatedAt: new Date(),
-        })
-        .where(eq(talentSessions.id, session.id));
-
-      // Reuses the exact confirmation/notification/reserve logic the
-      // webhook path runs — a synthetic "session" carrying just the
-      // fields handlePaymentWebhook actually reads.
-      await this.handlePaymentWebhook(
-        {
-          id: null,
-          payment_intent: intent.id,
-          amount_total: chargedCents,
-          metadata: {
-            type: 'talent_session',
-            sessionId: session.id,
-            bookerId,
-            talentUserId: prep.profile.userId,
-          },
-        },
-        io
-      );
-
-      return { instant: true, sessionId: session.id };
-    }
-
-    const hosted = await this._createHostedSessionCheckout(prep, platform, stripeCustomerId);
-    return { instant: false, ...hosted };
+    return this._createHostedSessionCheckout(prep, platform);
   }
 
   // ── Shared validation + DB persistence for both checkout paths ────────────
@@ -1499,7 +1400,7 @@ export class TalentSessionService {
   }
 
   // ── Hosted Stripe Checkout session — shared tail for both entry points ────
-  static async _createHostedSessionCheckout(prep, platform, stripeCustomerId) {
+  static async _createHostedSessionCheckout(prep, platform) {
     const {
       session,
       booker,
@@ -1552,9 +1453,7 @@ export class TalentSessionService {
       ],
       success_url: redirectUrls.successUrl,
       cancel_url: redirectUrls.cancelUrl,
-      // Attaching to the booker's Stripe customer (rather than a bare
-      // customer_email) is what lets Checkout save this card for next time.
-      ...StripeSmartCheckoutService.customerParamsFor(stripeCustomerId, booker.email),
+      ...(booker?.email?.trim() ? { customer_email: booker.email.trim() } : {}),
       metadata: {
         type: 'talent_session',
         sessionId: session.id,
@@ -1574,10 +1473,6 @@ export class TalentSessionService {
           bookerId,
           talentUserId: profile.userId,
         },
-        // Saves the card the booker enters to their Stripe customer for a
-        // future off-session charge (see createSmartCheckout) — requires
-        // `customer` above, which is why this is conditional on it too.
-        ...(stripeCustomerId ? { setup_future_usage: 'off_session' } : {}),
       },
     };
 

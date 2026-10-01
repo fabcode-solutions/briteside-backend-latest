@@ -17,7 +17,6 @@ import { UserSpendService } from '../userSpend.service.js';
 import { createNotification } from '../notification.service.js';
 import { ShopOrderService } from './shopOrder.service.js';
 import { calculatePlatformAndServiceFeeCents } from '../../utils/orderProcessingFee.js';
-import { StripeSmartCheckoutService } from '../stripeSmartCheckout.service.js';
 import { PayoutLedgerService } from '../payoutLedger.service.js';
 import { emitSocialChat } from '../../socket/emitter.js';
 import { ShopDeliverableService } from './shopDeliverable.service.js';
@@ -1095,83 +1094,7 @@ export class ShopCustomOfferService {
    */
   static async createAcceptCheckout(buyerId, offerId, platform) {
     const prep = await this._prepareAcceptCheckout(buyerId, offerId);
-
-    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId).catch(
-      err => {
-        logger.error(`[ShopCustomOffer] getOrCreateStripeCustomer failed: ${err.message}`);
-        return null;
-      }
-    );
-
-    return this._createHostedAcceptSession(prep, stripeCustomerId);
-  }
-
-  /**
-   * POST /shop/custom-offers/:offerId/smart-accept-checkout
-   *
-   * Identical validation/persistence to createAcceptCheckout(), but if the
-   * buyer already has a saved card on file (attached during an earlier
-   * purchase anywhere on the platform — the Stripe customer is shared, see
-   * StripeSmartCheckoutService), charges it directly and accepts the offer
-   * immediately — no redirect, no checkout screen. Falls back to a normal
-   * hosted Checkout session whenever there's no saved card yet, or Stripe
-   * requires additional authentication (SCA).
-   */
-  static async createSmartAcceptCheckout(buyerId, offerId) {
-    const prep = await this._prepareAcceptCheckout(buyerId, offerId);
-    const { offer, installmentBase, fees, milestoneRows } = prep;
-
-    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId);
-    const intent = await StripeSmartCheckoutService.tryOffSessionCharge({
-      stripeCustomerId,
-      amountCents: fees.chargedCents,
-      metadata: {
-        type: 'shop_custom_offer',
-        offerId: offer.id,
-        buyerId,
-        sellerId: offer.sellerId,
-      },
-    });
-
-    if (intent) {
-      await db
-        .update(shopCustomServiceOffers)
-        .set({
-          chargedCents: fees.chargedCents,
-          basePriceCoveredCents: installmentBase,
-          sellerReceiveCents: fees.sellerReceiveCents,
-          platformShareCents: fees.platformShareCents,
-          updatedAt: new Date(),
-        })
-        .where(eq(shopCustomServiceOffers.id, offer.id));
-
-      // No _stampMilestoneSession park-step here (unlike the hosted path) —
-      // handlePaymentWebhook below runs synchronously and immediately calls
-      // _markMilestoneFunded, so there's no window where a stripeSessionId
-      // stamp would matter, and there's no real Checkout Session id to give it.
-
-      // Reuses the exact accept/reserve/delivery bookkeeping the webhook
-      // path runs — a synthetic "session" carrying just the fields
-      // handlePaymentWebhook actually reads. customer is included since
-      // handlePaymentWebhook persists it as the offer's own stripeCustomerId
-      // (used later for the remainder/completion off-session charge).
-      await this.handlePaymentWebhook({
-        id: null,
-        payment_intent: intent.id,
-        customer: stripeCustomerId,
-        metadata: {
-          type: 'shop_custom_offer',
-          offerId: offer.id,
-          buyerId,
-          sellerId: offer.sellerId,
-        },
-      });
-
-      return { instant: true, offerId: offer.id };
-    }
-
-    const hosted = await this._createHostedAcceptSession(prep, stripeCustomerId);
-    return { instant: false, ...hosted };
+    return this._createHostedAcceptSession(prep);
   }
 
   // ── Shared validation + fee computation for both accept-checkout paths ────
@@ -1215,7 +1138,7 @@ export class ShopCustomOfferService {
   }
 
   // ── Hosted Stripe Checkout session — shared tail for both accept paths ────
-  static async _createHostedAcceptSession(prep, stripeCustomerId) {
+  static async _createHostedAcceptSession(prep) {
     const { offer, buyer, milestoneRows, installmentBase, fees } = prep;
 
     const metadata = {
@@ -1253,12 +1176,13 @@ export class ShopCustomOfferService {
       ],
       success_url: `${process.env.FRONTEND_URL}/bookings`,
       cancel_url: `${process.env.FRONTEND_URL}/bookings`,
-      // Attaching to the buyer's canonical Stripe customer (shared across
-      // every feature, see StripeSmartCheckoutService) replaces the old
-      // per-offer customer_creation: 'always' — Checkout still saves the
-      // card, but now against the one customer smart-checkout looks up
-      // everywhere else, not a throwaway customer scoped to this offer.
-      ...StripeSmartCheckoutService.customerParamsFor(stripeCustomerId, buyer?.email),
+      customer_email: buyer?.email,
+      // Only worth saving the card when there's a remainder left to collect
+      // later. A 'full' payment offer has nothing left to charge, so skip
+      // the Customer object and setup_future_usage entirely for it.
+      ...(offer.paymentMode !== 'full' && {
+        customer_creation: 'always',
+      }),
       metadata,
       // No transfer_data/application_fee_amount here on purpose — the
       // seller's cut is no longer transferred at charge time. It accumulates
@@ -1267,12 +1191,11 @@ export class ShopCustomOfferService {
       // 15% at 21 days.
       payment_intent_data: {
         metadata,
-        // Only worth saving the card when there's a remainder left to
-        // collect later. A 'full' payment offer has nothing left to charge,
-        // so skip setup_future_usage entirely for it.
-        ...(offer.paymentMode !== 'full' && stripeCustomerId
-          ? { setup_future_usage: 'off_session' }
-          : {}),
+        // Tells Stripe to keep this payment method attached to the Customer
+        // for a later off-session charge (the remainder/completion charge).
+        ...(offer.paymentMode !== 'full' && {
+          setup_future_usage: 'off_session',
+        }),
       },
     });
 
@@ -1993,64 +1916,7 @@ export class ShopCustomOfferService {
 
   static async createRemainderCheckout(buyerId, offerId) {
     const prep = await this._prepareRemainderCheckout(buyerId, offerId);
-
-    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId).catch(
-      err => {
-        logger.error(`[ShopCustomOffer] getOrCreateStripeCustomer failed: ${err.message}`);
-        return null;
-      }
-    );
-
-    return this._createHostedRemainderSession(prep, stripeCustomerId);
-  }
-
-  /**
-   * POST /shop/custom-offers/:offerId/smart-remainder-checkout
-   *
-   * Identical validation/persistence to createRemainderCheckout(), but if
-   * the buyer already has a saved card on file (attached during an earlier
-   * purchase anywhere on the platform — the Stripe customer is shared, see
-   * StripeSmartCheckoutService), charges it directly and records the
-   * payment immediately — no redirect, no checkout screen. Falls back to a
-   * normal hosted Checkout session whenever there's no saved card yet, or
-   * Stripe requires additional authentication (SCA).
-   */
-  static async createSmartRemainderCheckout(buyerId, offerId) {
-    const prep = await this._prepareRemainderCheckout(buyerId, offerId);
-    const { offer, remainingCents, fees } = prep;
-
-    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(buyerId);
-    const intent = await StripeSmartCheckoutService.tryOffSessionCharge({
-      stripeCustomerId,
-      amountCents: fees.chargedCents,
-      metadata: {
-        type: 'shop_custom_offer_remainder',
-        offerId: offer.id,
-        buyerId,
-        sellerId: offer.sellerId,
-      },
-    });
-
-    if (intent) {
-      // Reuses the exact bookkeeping/notification logic the webhook path
-      // runs — a synthetic "session" carrying just the fields
-      // handleRemainderPaymentWebhook actually reads.
-      await this.handleRemainderPaymentWebhook({
-        id: null,
-        payment_intent: intent.id,
-        metadata: {
-          type: 'shop_custom_offer_remainder',
-          offerId: offer.id,
-          buyerId,
-          sellerId: offer.sellerId,
-        },
-      });
-
-      return { instant: true, offerId: offer.id };
-    }
-
-    const hosted = await this._createHostedRemainderSession(prep, stripeCustomerId);
-    return { instant: false, ...hosted };
+    return this._createHostedRemainderSession(prep);
   }
 
   // ── Shared validation + fee computation for both remainder-checkout paths ─
@@ -2100,7 +1966,7 @@ export class ShopCustomOfferService {
   }
 
   // ── Hosted Stripe Checkout session — shared tail for both remainder paths ─
-  static async _createHostedRemainderSession(prep, stripeCustomerId) {
+  static async _createHostedRemainderSession(prep) {
     const { offer, buyer, remainingCents, fees } = prep;
 
     const metadata = {
@@ -2134,15 +2000,12 @@ export class ShopCustomOfferService {
       ],
       success_url: `${process.env.FRONTEND_URL}/bookings`,
       cancel_url: `${process.env.FRONTEND_URL}/bookings?tab=requests&status=cancelled`,
-      // Prefer the buyer's canonical Stripe customer (shared across every
-      // feature, see StripeSmartCheckoutService) over the offer's own
-      // stripeCustomerId — the canonical one is what smart-checkout looks
-      // up everywhere else, so paying here keeps them in sync rather than
-      // diverging onto a second, offer-scoped customer.
-      ...StripeSmartCheckoutService.customerParamsFor(
-        stripeCustomerId || offer.stripeCustomerId,
-        buyer?.email
-      ),
+      // Stripe rejects a session that sets both `customer` and
+      // `customer_email`, so these stay mutually exclusive: reuse the saved
+      // Customer when the offer has one, otherwise prefill the buyer's email.
+      ...(offer.stripeCustomerId
+        ? { customer: offer.stripeCustomerId }
+        : { customer_email: buyer?.email }),
       metadata,
       // No transfer_data/application_fee_amount here on purpose — see
       // createAcceptCheckout.

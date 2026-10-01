@@ -190,55 +190,6 @@ export const createSessionCheckout = catchAsync(async (req, res) => {
   res.status(201).json({ success: true, data: result });
 });
 
-/**
- * Same booking, but charges a saved card directly (no redirect) when the
- * booker already has one on file. Falls back to a normal hosted Checkout
- * session otherwise.
- */
-export const createSmartSessionCheckout = catchAsync(async (req, res) => {
-  const {
-    talentProfileId,
-    date,
-    time,
-    durationMins,
-    subject,
-    discussion,
-    isGift,
-    giftDetails,
-    giftCode,
-    platform,
-    timezone,
-  } = req.body;
-
-  if (!talentProfileId) throw new ApiError(400, '`talentProfileId` is required');
-  if (!date) throw new ApiError(400, '`date` is required (YYYY-MM-DD)');
-  if (!time) throw new ApiError(400, '`time` is required (HH:MM)');
-  if (!durationMins) throw new ApiError(400, '`durationMins` is required');
-  if (!subject && !giftCode) throw new ApiError(400, '`subject` is required');
-
-  const io = req.app.get('io');
-
-  const result = await TalentSessionService.createSmartCheckout(
-    {
-      talentProfileId,
-      bookerId: req.user.id,
-      date,
-      time,
-      durationMins: parseInt(durationMins),
-      subject,
-      discussion,
-      isGift,
-      giftDetails,
-      giftCode,
-      platform,
-      bookerTimezone: timezone,
-    },
-    io
-  );
-
-  res.status(201).json({ success: true, data: result });
-});
-
 export const bookSession = catchAsync(async (req, res) => {
   const {
     talentProfileId,
