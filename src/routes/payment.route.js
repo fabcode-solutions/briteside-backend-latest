@@ -22,6 +22,7 @@ import { PERMISSIONS } from '../config/event-team-permissions.js';
 
 const router = express.Router();
 
+// Public route for publishable key
 router.get('/config', getPublishableKey);
 
 // Protected route: create a Stripe Checkout Session for an order
