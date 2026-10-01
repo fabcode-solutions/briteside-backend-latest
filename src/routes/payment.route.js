@@ -8,6 +8,8 @@ import {
 import {
   createCheckoutSession,
   createSmartCheckoutSession,
+  createTicketPaymentSheet,
+  completeTicketPaymentSheet,
   getPublishableKey,
   checkRefundEligibility,
   applyRefund,
@@ -28,6 +30,11 @@ router.post('/create-checkout-session', authMiddleware, createCheckoutSession);
 // Same purchase, charges a saved card directly (no redirect) when the buyer
 // already has one on file.
 router.post('/smart-checkout-session', authMiddleware, createSmartCheckoutSession);
+// Native in-app checkout (mobile PaymentSheet): create the intent, then
+// complete it (issues tickets; idempotent with the payment_intent.succeeded
+// webhook).
+router.post('/ticket-payment-sheet', authMiddleware, createTicketPaymentSheet);
+router.post('/ticket-payment-sheet/complete', authMiddleware, completeTicketPaymentSheet);
 // Refund endpoints
 router.get('/orders/:orderId/refund-eligibility', authMiddleware, checkRefundEligibility);
 router.post('/orders/:orderId/refund', authMiddleware, teamMemberAuthMiddleware, applyRefund);
