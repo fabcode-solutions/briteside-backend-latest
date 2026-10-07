@@ -263,8 +263,8 @@ export class GroupSubscriptionService {
       mode: 'subscription',
       customer: stripeCustomerId,
       line_items: [{ price: tier.stripePriceId, quantity: 1 }],
-      success_url: successUrl,
-      cancel_url: cancelUrl,
+      ui_mode: 'embedded',
+      return_url: successUrl,
       metadata: {
         type: 'group_subscription',
         userId,
@@ -276,7 +276,7 @@ export class GroupSubscriptionService {
       subscription_data: subscriptionData,
     });
 
-    return { sessionId: session.id, url: session.url };
+    return { sessionId: session.id, clientSecret: session.client_secret };
   }
 
   /**

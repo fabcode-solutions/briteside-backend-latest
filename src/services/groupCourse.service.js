@@ -584,8 +584,8 @@ export class GroupCourseService {
       mode: 'payment',
       customer: customerRow?.stripeCustomerId ?? undefined,
       line_items: [{ price: course.stripePriceId, quantity: 1 }],
-      success_url: successUrl,
-      cancel_url: cancelUrl,
+      ui_mode: 'embedded',
+      return_url: successUrl,
       metadata: {
         type: 'group_course_enrollment',
         courseId,
@@ -595,7 +595,7 @@ export class GroupCourseService {
       },
     });
 
-    return { url: session.url, sessionId: session.id };
+    return { clientSecret: session.client_secret, sessionId: session.id };
   }
 
   static async handleCourseCheckoutCompleted(session) {

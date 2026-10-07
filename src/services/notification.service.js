@@ -13,6 +13,7 @@ import { eq, desc, and } from 'drizzle-orm';
 import { getIO } from '../utils/io.js';
 import { emitNotification } from '../socket/emitter.js';
 import { getActorProfiles } from '../utils/helper.js';
+import { sendPushToUser } from './push.service.js';
 
 const typeToSetting = {
   event_update: 'eventUpdates',
@@ -208,6 +209,28 @@ export const createNotification = async data => {
   const ioInstance = getIO && getIO();
   if (ioInstance && notificationData.userId) {
     emitNotification(ioInstance, notificationData.userId, 'notification:new', enrichedNotification);
+  }
+
+  // Device push for chat notifications — reaches the app when it's
+  // backgrounded or closed, where the socket above can't. Only fires when
+  // the in-app notification itself was created, so the user's chatMessages
+  // setting and the "already viewing this chat" skip both apply. Not
+  // awaited: a slow/failed push must never delay or break the caller.
+  if (notificationData.type === 'chat_message' && notificationData.userId) {
+    const meta = notificationData.metadata ?? {};
+    sendPushToUser(notificationData.userId, {
+      title: notificationData.title,
+      // The in-app copy is phrased for the notifications list; drop that
+      // prefix so the push reads as the message itself.
+      body: String(notificationData.message ?? '').replace(/^replied in your conversation : /, ''),
+      data: {
+        type: notificationData.type,
+        conversationId: meta.conversationId,
+        messageId: meta.messageId,
+        isPriority: meta.isPriority ? 'true' : undefined,
+        redirectTo: notificationData.redirectTo,
+      },
+    });
   }
 
   return enrichedNotification;

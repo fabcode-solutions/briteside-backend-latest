@@ -53,9 +53,17 @@ export const createCheckoutSession = catchAsync(async (req, res) => {
     metadata
   );
 
+  // Tickets have no native-app consumer of this endpoint — it's always an
+  // embedded session (clientSecret), never a hosted redirect (url). This
+  // forwards whichever one the service actually returned instead of only
+  // ever reading `url`, which embedded sessions never set.
   res.json({
     success: true,
-    data: { url: sessionData.url, sessionId: sessionData.sessionId },
+    data: {
+      clientSecret: sessionData.clientSecret,
+      url: sessionData.url,
+      sessionId: sessionData.sessionId,
+    },
   });
 });
 

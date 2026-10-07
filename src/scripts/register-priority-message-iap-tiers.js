@@ -21,16 +21,15 @@ import 'dotenv/config';
  * per item, and a first-time in-app purchase must pass App Review before it
  * can be bought — finish those in App Store Connect after running this.
  */
-import { loadSecrets } from '../src/config/secrets.js';
+import { loadSecrets } from '../config/secrets.js';
 
 // config.js reads process.env at import time — load secrets first.
 await loadSecrets();
 
 const { default: config } = await import('../config/config.js');
-const { ShopIapService } = await import('../src/services/shop/shopIap.service.js');
-const { PriorityMessageIapService, PRIORITY_IAP_TIERS_CENTS } = await import(
-  '../services/priorityMessageIap.service.js'
-);
+const { ShopIapService } = await import('../services/shop/shopIap.service.js');
+const { PriorityMessageIapService, PRIORITY_IAP_TIERS_CENTS } =
+  await import('../services/priorityMessageIap.service.js');
 
 const tierTitle = cents => `Priority Message $${(cents / 100).toFixed(2)}`;
 

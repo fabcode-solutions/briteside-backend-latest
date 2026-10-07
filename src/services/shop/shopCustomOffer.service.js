@@ -12,7 +12,7 @@ import ApiError from '../../utils/api-error.js';
 import config from '../../config/config.js';
 import logger from '../../config/logger.js';
 import { StripeConnectService } from '../stripeConnect.service.js';
-import { getRedirectUrls } from '../../utils/redirect-urls.js';
+import { getRedirectUrls, isNativePlatform } from '../../utils/redirect-urls.js';
 import { UserSpendService } from '../userSpend.service.js';
 import { createNotification } from '../notification.service.js';
 import { ShopOrderService } from './shopOrder.service.js';
@@ -963,11 +963,15 @@ export class ShopCustomOfferService {
       '/bookings?tab=requests&status=success',
       '/bookings?tab=requests&status=cancelled'
     );
+    const nativeRedirect = isNativePlatform(platform);
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
       expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+      ...(nativeRedirect
+        ? { success_url: redirectUrls.successUrl, cancel_url: redirectUrls.cancelUrl }
+        : { ui_mode: 'embedded', return_url: redirectUrls.successUrl }),
       line_items: [
         {
           price_data: {
@@ -995,8 +999,6 @@ export class ShopCustomOfferService {
           quantity: 1,
         },
       ],
-      success_url: redirectUrls.successUrl,
-      cancel_url: redirectUrls.cancelUrl,
       customer_email: buyer?.email,
       // Only worth saving the card when there's a remainder left to collect
       // later — mirrors createAcceptCheckout.
@@ -1029,7 +1031,9 @@ export class ShopCustomOfferService {
 
     // Exactly the shape ShopOrderService.createCheckout returns, so
     // ProductDetailModal's runCheckout needs no change at all.
-    return { free: false, checkoutUrl: session.url, orderId: offer.id };
+    return nativeRedirect
+      ? { free: false, checkoutUrl: session.url, orderId: offer.id }
+      : { free: false, clientSecret: session.client_secret, orderId: offer.id };
   }
 
   /**
@@ -1174,8 +1178,8 @@ export class ShopCustomOfferService {
           quantity: 1,
         },
       ],
-      success_url: `${process.env.FRONTEND_URL}/bookings`,
-      cancel_url: `${process.env.FRONTEND_URL}/bookings`,
+      ui_mode: 'embedded',
+      return_url: `${process.env.FRONTEND_URL}/bookings`,
       customer_email: buyer?.email,
       // Only worth saving the card when there's a remainder left to collect
       // later. A 'full' payment offer has nothing left to charge, so skip
@@ -1215,7 +1219,7 @@ export class ShopCustomOfferService {
       await this._stampMilestoneSession(milestoneRows[0].id, session.id);
     }
 
-    return { checkoutUrl: session.url, offerId: offer.id };
+    return { clientSecret: session.client_secret, offerId: offer.id };
   }
 
   /** Webhook target — mirrors ShopOrderService.handlePaymentWebhook's idempotency shape. */
@@ -1998,8 +2002,8 @@ export class ShopCustomOfferService {
           quantity: 1,
         },
       ],
-      success_url: `${process.env.FRONTEND_URL}/bookings`,
-      cancel_url: `${process.env.FRONTEND_URL}/bookings?tab=requests&status=cancelled`,
+      ui_mode: 'embedded',
+      return_url: `${process.env.FRONTEND_URL}/bookings`,
       // Stripe rejects a session that sets both `customer` and
       // `customer_email`, so these stay mutually exclusive: reuse the saved
       // Customer when the offer has one, otherwise prefill the buyer's email.
@@ -2014,7 +2018,7 @@ export class ShopCustomOfferService {
       },
     });
 
-    return { checkoutUrl: session.url, offerId: offer.id };
+    return { clientSecret: session.client_secret, offerId: offer.id };
   }
 
   /**
@@ -2203,11 +2207,15 @@ export class ShopCustomOfferService {
       `/bookings?offerId=${offer.id}&status=success`,
       `/bookings?offerId=${offer.id}&status=cancelled`
     );
+    const nativeRedirect = isNativePlatform(platform);
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
       expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+      ...(nativeRedirect
+        ? { success_url: redirectUrls.successUrl, cancel_url: redirectUrls.cancelUrl }
+        : { ui_mode: 'embedded', return_url: redirectUrls.successUrl }),
       line_items: [
         {
           price_data: {
@@ -2228,8 +2236,6 @@ export class ShopCustomOfferService {
           quantity: 1,
         },
       ],
-      success_url: redirectUrls.successUrl,
-      cancel_url: redirectUrls.cancelUrl,
       // Stripe rejects a session that sets both `customer` and
       // `customer_email` — same mutually-exclusive handling as
       // createRemainderCheckout.
@@ -2246,7 +2252,9 @@ export class ShopCustomOfferService {
 
     await this._stampMilestoneSession(milestone.id, session.id);
 
-    return { checkoutUrl: session.url, offerId: offer.id, milestoneId: milestone.id };
+    return nativeRedirect
+      ? { checkoutUrl: session.url, offerId: offer.id, milestoneId: milestone.id }
+      : { clientSecret: session.client_secret, offerId: offer.id, milestoneId: milestone.id };
   }
 
   /**
@@ -2947,8 +2955,8 @@ export class ShopCustomOfferService {
           quantity: 1,
         },
       ],
-      success_url: `${process.env.FRONTEND_URL}/bookings`,
-      cancel_url: `${process.env.FRONTEND_URL}/bookings`,
+      ui_mode: 'embedded',
+      return_url: `${process.env.FRONTEND_URL}/bookings`,
       customer_email: buyer?.email,
       metadata,
       // No transfer_data/application_fee_amount here on purpose — see
@@ -2964,7 +2972,7 @@ export class ShopCustomOfferService {
       .set({ stripeSessionId: session.id })
       .where(eq(shopCustomOfferTips.id, tip.id));
 
-    return { checkoutUrl: session.url, tipId: tip.id };
+    return { clientSecret: session.client_secret, tipId: tip.id };
   }
 
   static async handleTipPaymentWebhook(stripeSession) {

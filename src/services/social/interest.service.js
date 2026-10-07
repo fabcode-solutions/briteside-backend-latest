@@ -25,7 +25,7 @@ export class InterestService {
    * plus any categories the user has personally added. Custom categories
    * created by other users are never included.
    */
-  static async getInterestCategories(userId, { page = 1, limit = 20 } = {}) {
+  static async getInterestCategories(userId, { page = 1, limit = 20, forDiscussions = false } = {}) {
     const offset = (page - 1) * limit;
 
     const ownedRows = await db
@@ -39,7 +39,12 @@ export class InterestService {
         ? or(eq(interestCategories.isDefault, true), inArray(interestCategories.id, ownedCategoryIds))
         : eq(interestCategories.isDefault, true);
 
-    const whereClause = and(eq(interestCategories.isActive, true), visibleToUser);
+    // Lets a category be shown as a Social feed filter without also
+    // cluttering the group-discussion category picker — only applied when
+    // the caller is specifically asking for the Discussions list.
+    const whereClause = forDiscussions
+      ? and(eq(interestCategories.isActive, true), eq(interestCategories.showInDiscussions, true), visibleToUser)
+      : and(eq(interestCategories.isActive, true), visibleToUser);
 
     const [results, [{ total }]] = await Promise.all([
       db.query.interestCategories.findMany({

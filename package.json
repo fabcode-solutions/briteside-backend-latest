@@ -32,7 +32,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "seed:popular-covers": "node scripts/seed-popular-covers.js ./logos ",
-    "seed:popular-covers:prod": "cross-env NODE_ENV=production USE_AWS_SECRETS=true node scripts/seed-popular-covers.js ./logos"
+    "seed:popular-covers:prod": "cross-env NODE_ENV=production USE_AWS_SECRETS=true node scripts/seed-popular-covers.js ./logos",
+    "iap:register-priority-tiers": "node src/scripts/register-priority-message-iap-tiers.js"
   },
   "dependencies": {
     "@apple/app-store-server-library": "^3.1.0",
@@ -58,6 +59,7 @@
     "drizzle-zod": "^0.8.3",
     "express": "^5.1.0",
     "express-rate-limit": "^8.5.2",
+    "firebase-admin": "^13.10.0",
     "google-auth-library": "^10.5.0",
     "helmet": "^8.1.0",
     "http-status": "^2.1.0",

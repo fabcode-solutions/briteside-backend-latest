@@ -409,6 +409,10 @@ export class PaymentService {
       estimatedStripeFeeCents,
     } = charge;
 
+      // Ticket checkout has no native-app consumer of this endpoint at all —
+      // the app pays via a wholly separate PaymentSheet flow
+      // (createTicketPaymentSheet) — so this can always use embedded
+      // checkout rather than branching on platform like the other flows.
       const checkoutParams = {
         // No payment_method_types on purpose. Pinning the list opts out of dynamic
         // payment methods, which is what surfaces wallets (Google Pay / Apple Pay)
@@ -418,12 +422,10 @@ export class PaymentService {
         expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
         mode: 'payment',
         line_items,
-        success_url:
+        ui_mode: 'embedded',
+        return_url:
           successUrl ||
           `${config.apiHost}/payments/success?session_id={CHECKOUT_SESSION_ID}&eventId=${order.eventId}`,
-        cancel_url:
-          cancelUrl ||
-          `${config.apiHost}/payments/failure?error=payment_cancelled&eventId=${order.eventId}`,
         metadata: {
           type: 'ticket',
           feature: 'ticket',
@@ -513,6 +515,6 @@ export class PaymentService {
         })
         .where(eq(orders.id, order.id));
 
-      return { url: session.url, sessionId: session.id };
+      return { clientSecret: session.client_secret, sessionId: session.id };
   }
 }

@@ -15,23 +15,10 @@ const WEBHOOK_SECRET =
 
 // ─── POST /priority-messages ──────────────────────────────────────────────────
 
-/**
- * Initiate a priority message checkout session.
- * Auth required — must be the sender.
- *
- * Body: { talentProfileId, subject?, messageContent }
- * Returns: { checkoutUrl, paymentId }
- */
-export const createCheckout = catchAsync(async (req, res) => {
-  const {
-    talentProfileId,
-    subject,
-    messageContent,
-    messages,
-    platform,
-    contentExtended,
-    attachmentIds,
-  } = req.body;
+/** Shared by createCheckout and prepareCheckout — both take the same body. */
+const parseMessagePayload = body => {
+  const { talentProfileId, subject, messageContent, messages, platform, contentExtended, attachmentIds } =
+    body;
 
   if (!talentProfileId) throw new ApiError(400, '`talentProfileId` is required');
 
@@ -48,7 +35,7 @@ export const createCheckout = catchAsync(async (req, res) => {
     ? firstMessageText.slice(0, 60) + (firstMessageText.length > 60 ? '…' : '')
     : null;
 
-  const result = await PriorityMessageService.createCheckout(req.user.id, {
+  return {
     talentProfileId,
     subject: subject?.trim() || derivedSubject,
     messageContent: messageContent?.trim() || null,
@@ -56,8 +43,37 @@ export const createCheckout = catchAsync(async (req, res) => {
     platform,
     contentExtended,
     attachmentIds,
-  });
+  };
+};
 
+/**
+ * Initiate a priority message checkout session.
+ * Auth required — must be the sender.
+ *
+ * Body: { talentProfileId, subject?, messageContent }
+ * Returns: { checkoutUrl, paymentId }
+ */
+export const createCheckout = catchAsync(async (req, res) => {
+  const result = await PriorityMessageService.createCheckout(
+    req.user.id,
+    parseMessagePayload(req.body)
+  );
+
+  res.status(201).json({ success: true, data: result });
+});
+
+/**
+ * POST /priority-messages/prepare
+ * Same body as createCheckout, but only validates and persists the pending
+ * payment — no Stripe Checkout Session is created. Used by the "quick pay
+ * with saved card" flow to get a `paymentId` (sourceId) to charge via
+ * POST /payments/quick-pay, without wasting a Checkout Session on an
+ * attempt that's never going to render it.
+ * Returns: { paymentId, amountCents, ... }
+ */
+export const prepareCheckout = catchAsync(async (req, res) => {
+  const { platform, ...input } = parseMessagePayload(req.body);
+  const result = await PriorityMessageService.prepare(req.user.id, input);
   res.status(201).json({ success: true, data: result });
 });
 

@@ -720,6 +720,10 @@ export const interestCategories = pgTable(
     color: varchar('color', { length: 7 }).default('#3B82F6'),
     isActive: boolean('is_active').default(true).notNull(),
     isDefault: boolean('is_default').default(false).notNull(),
+    // Lets a category be shown as a Social feed filter without also
+    // cluttering the group-discussion category picker (or vice versa) —
+    // independent of isActive, which governs both surfaces at once.
+    showInDiscussions: boolean('show_in_discussions').default(true).notNull(),
     sortOrder: integer('sort_order').default(0).notNull(),
     usageCount: integer('usage_count').default(0).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

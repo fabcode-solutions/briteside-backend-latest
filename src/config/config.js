@@ -55,6 +55,10 @@ const EnvVariables = z.object({
   // Google Play In-App Purchase — Play Developer API (service account)
   GOOGLE_PLAY_PACKAGE_NAME: z.string().optional(),
   GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: z.string().optional(),
+  // Google Play Real-time Developer Notifications (Pub/Sub push → /api/webhooks/google-play).
+  // The push subscription's OIDC audience and the service account it signs as.
+  GOOGLE_PLAY_RTDN_PUSH_AUDIENCE: z.string().optional(),
+  GOOGLE_PLAY_RTDN_PUSH_SERVICE_ACCOUNT: z.string().optional(),
 });
 
 let envVars;
@@ -139,6 +143,8 @@ const env = {
     packageName: envVars.GOOGLE_PLAY_PACKAGE_NAME,
     serviceAccountJson: envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON,
     configured: !!(envVars.GOOGLE_PLAY_PACKAGE_NAME && envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON),
+    rtdnPushAudience: envVars.GOOGLE_PLAY_RTDN_PUSH_AUDIENCE,
+    rtdnPushServiceAccount: envVars.GOOGLE_PLAY_RTDN_PUSH_SERVICE_ACCOUNT,
   },
 };
 

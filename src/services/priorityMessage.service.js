@@ -36,6 +36,7 @@ import { getRedirectUrls, isNativePlatform } from '../utils/redirect-urls.js';
 import { socialConversations } from '../db/schema/socialChat.js';
 import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
 import { PayoutLedgerService } from './payoutLedger.service.js';
+import { stripeCustomers } from '../db/schema/britesidePlus.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 
@@ -418,6 +419,96 @@ export class PriorityMessageService {
     };
   }
 
+  /** Builds the Stripe Checkout Session `line_items` for a priced priority
+   *  message payment — shared by createCheckout() and the quick-pay 3DS
+   *  fallback so both ever charge for exactly the same thing. `msgList` only
+   *  needs a `.length` (a reconstructed `items` row set works just as well
+   *  as the original in-memory msgList). */
+  static _buildLineItems({
+    textMessageCount,
+    totalExtensionUnits,
+    totalAttachments,
+    totalAttachmentCents,
+    platformAndServiceFeeCents,
+    profile,
+    talentName,
+    msgList,
+  }) {
+    return [
+      // Base message (only if there's actual text content)
+      ...(textMessageCount > 0
+        ? [
+            {
+              price_data: {
+                currency: 'usd',
+                unit_amount: profile.priorityMessageFee * textMessageCount,
+                product_data: {
+                  name:
+                    msgList.length > 1
+                      ? `${msgList.length} Priority Messages to ${talentName}`
+                      : `Priority Message to ${talentName}`,
+                  description: 'Guaranteed response within 72 hours',
+                },
+              },
+              quantity: 1,
+            },
+          ]
+        : []),
+
+      // Extended content
+      ...(totalExtensionUnits > 0
+        ? [
+            {
+              price_data: {
+                currency: 'usd',
+                unit_amount: profile.priorityMessageFee * totalExtensionUnits,
+                product_data: {
+                  name:
+                    totalExtensionUnits > 1
+                      ? `Extended message content (${totalExtensionUnits} blocks)`
+                      : 'Extended message content',
+                  description: `Adds ${totalExtensionUnits * 280} extra characters to your message`,
+                },
+              },
+              quantity: 1,
+            },
+          ]
+        : []),
+
+      // Attachments
+      ...(totalAttachments > 0
+        ? [
+            {
+              price_data: {
+                currency: 'usd',
+                unit_amount: totalAttachmentCents,
+                product_data: {
+                  name: totalAttachments > 1 ? `${totalAttachments} Attachments` : '1 Attachment',
+                  description: `${totalAttachments} file${totalAttachments > 1 ? 's' : ''} attached — 99¢ each, refunded if not opened within 48h`,
+                },
+              },
+              quantity: 1,
+            },
+          ]
+        : []),
+
+      // Merged Platform & Service Fee (7.5% of base) — shows even for
+      // attachment-only sends, whenever there's any charge.
+      ...(platformAndServiceFeeCents > 0
+        ? [
+            {
+              price_data: {
+                currency: 'usd',
+                unit_amount: platformAndServiceFeeCents,
+                product_data: { name: 'Platform & Service Fee' },
+              },
+              quantity: 1,
+            },
+          ]
+        : []),
+    ];
+  }
+
   static async createCheckout(
     senderId,
     { talentProfileId, subject, messageContent, messages, platform, contentExtended, attachmentIds }
@@ -490,84 +581,23 @@ export class PriorityMessageService {
         ? { success_url: successUrl, cancel_url: cancelUrl }
         : {
             ui_mode: 'embedded',
-            // Messages.tsx already polls on exactly this query shape once it
-            // lands back here (see its priority_message/payment_id effect) —
-            // payment.id is already known here, no {CHECKOUT_SESSION_ID} needed.
-            return_url: `${FRONTEND_URL}/messages?priority_message=success&payment_id=${payment.id}`,
+            // Lands on the shared /payment/success page first; its "View
+            // Conversation" button forwards to /messages with this exact
+            // query shape, which Messages.tsx still polls on (see its
+            // priority_message/payment_id effect) — payment.id is already
+            // known here, no {CHECKOUT_SESSION_ID} needed.
+            return_url: `${FRONTEND_URL}/payment/success?payment_id=${payment.id}&type=priority_message`,
           }),
-      line_items: [
-        // Base message (only if there's actual text content)
-        ...(textMessageCount > 0
-          ? [
-              {
-                price_data: {
-                  currency: 'usd',
-                  unit_amount: profile.priorityMessageFee * textMessageCount,
-                  product_data: {
-                    name:
-                      msgList.length > 1
-                        ? `${msgList.length} Priority Messages to ${talentName}`
-                        : `Priority Message to ${talentName}`,
-                    description: 'Guaranteed response within 72 hours',
-                  },
-                },
-                quantity: 1,
-              },
-            ]
-          : []),
-
-        // Extended content
-        ...(totalExtensionUnits > 0
-          ? [
-              {
-                price_data: {
-                  currency: 'usd',
-                  unit_amount: profile.priorityMessageFee * totalExtensionUnits,
-                  product_data: {
-                    name:
-                      totalExtensionUnits > 1
-                        ? `Extended message content (${totalExtensionUnits} blocks)`
-                        : 'Extended message content',
-                    description: `Adds ${totalExtensionUnits * 280} extra characters to your message`,
-                  },
-                },
-                quantity: 1,
-              },
-            ]
-          : []),
-
-        // Attachments
-        ...(totalAttachments > 0
-          ? [
-              {
-                price_data: {
-                  currency: 'usd',
-                  unit_amount: totalAttachmentCents,
-                  product_data: {
-                    name: totalAttachments > 1 ? `${totalAttachments} Attachments` : '1 Attachment',
-                    description: `${totalAttachments} file${totalAttachments > 1 ? 's' : ''} attached — 99¢ each, refunded if not opened within 48h`,
-                  },
-                },
-                quantity: 1,
-              },
-            ]
-          : []),
-
-        // Merged Platform & Service Fee (7.5% of base) — shows even for
-        // attachment-only sends, whenever there's any charge.
-        ...(platformAndServiceFeeCents > 0
-          ? [
-              {
-                price_data: {
-                  currency: 'usd',
-                  unit_amount: platformAndServiceFeeCents,
-                  product_data: { name: 'Platform & Service Fee' },
-                },
-                quantity: 1,
-              },
-            ]
-          : []),
-      ],
+      line_items: this._buildLineItems({
+        textMessageCount,
+        totalExtensionUnits,
+        totalAttachments,
+        totalAttachmentCents,
+        platformAndServiceFeeCents,
+        profile,
+        talentName,
+        msgList,
+      }),
       // Stripe rejects a session that sets both `customer` and
       // `customer_email` — stay mutually exclusive, same as every other
       // checkout flow in this codebase that attaches a canonical customer.
@@ -639,6 +669,243 @@ export class PriorityMessageService {
         attachmentCount: m.attachments.length,
       })),
     };
+  }
+
+  // ── Quick pay (saved-card, no checkout screen) ────────────────────────────
+
+  /**
+   * POST /priority-messages/prepare
+   * Validates and persists the pending payment — exactly what createCheckout
+   * does, minus the Stripe Checkout Session — so the generic
+   * /payments/quick-pay endpoint has a `sourceId` to charge against before
+   * any Stripe call is made. Never creates a Stripe session itself; if the
+   * sender ends up using a different card, this pending row is simply
+   * abandoned (same as any uncompleted checkout today — it only ever blocks
+   * a new attempt once it's 'paid'/'partial', never while 'pending').
+   */
+  static async prepare(senderId, input) {
+    const { payment, msgList, totalUnits, totalExtensionUnits, totalAttachments, baseCents, chargedCents } =
+      await this._createPendingPayment(senderId, input);
+
+    return {
+      paymentId: payment.id,
+      amountCents: chargedCents,
+      messageCount: msgList.length,
+      totalUnits,
+      totalExtensionUnits,
+      totalAttachments,
+      baseCents,
+    };
+  }
+
+  /** Reloads everything _createEmbeddedCheckoutSessionForPayment needs for an
+   *  already-persisted pending payment, purely from the DB — used by the
+   *  quick-pay 3DS fallback, which runs in a request that never had the
+   *  original in-memory _createPendingPayment() context to begin with. The
+   *  fee breakdown was already computed once and stashed in payment.metadata
+   *  at prepare()/createCheckout() time, so this never recomputes pricing. */
+  static async _loadPendingPaymentContext(paymentId) {
+    const payment = await db.query.priorityMessagePayments.findFirst({
+      where: eq(priorityMessagePayments.id, paymentId),
+    });
+    if (!payment) throw new ApiError(404, 'Payment not found');
+
+    const profile = await db.query.talentProfiles.findFirst({
+      where: eq(talentProfiles.id, payment.talentProfileId),
+      with: {
+        user: { columns: { id: true, firstName: true, lastName: true, email: true, username: true } },
+      },
+    });
+    if (!profile) throw new ApiError(404, 'Talent not found');
+
+    const items = await db.query.priorityMessageItems.findMany({
+      where: eq(priorityMessageItems.paymentId, payment.id),
+      orderBy: (i, { asc }) => [asc(i.position)],
+    });
+
+    const sender = await db.query.users.findFirst({
+      where: eq(users.id, payment.senderId),
+      columns: { firstName: true, lastName: true, email: true },
+    });
+
+    const meta = payment.metadata ?? {};
+    const textMessageCount = items.filter(i => i.messageContent && i.messageContent.length > 0).length;
+
+    return {
+      payment,
+      profile,
+      msgList: items,
+      sender,
+      talentName: `${profile.user.firstName} ${profile.user.lastName}`,
+      textMessageCount,
+      totalExtensionUnits: meta.totalExtensionUnits ?? 0,
+      totalUnits: meta.totalUnits ?? textMessageCount,
+      totalAttachments: meta.totalAttachments ?? 0,
+      totalAttachmentCents: meta.totalAttachmentCents ?? 0,
+      baseCents: payment.baseCents,
+      chargedCents: payment.amountCents,
+      platformAndServiceFeeCents: meta.platformAndServiceFeeCents ?? 0,
+    };
+  }
+
+  /**
+   * Full-checkout fallback for the quick-pay 3DS case — creates a (web-only)
+   * embedded Checkout Session for an already-persisted pending payment, so a
+   * saved card that turns out to need extra authentication still gets to
+   * pay instead of the quick-pay attempt just dead-ending. Mirrors
+   * createCheckout()'s web branch exactly, minus re-running
+   * _createPendingPayment (the caller already has one).
+   */
+  static async _createEmbeddedCheckoutSessionForPayment({
+    payment,
+    profile,
+    msgList,
+    sender,
+    talentName,
+    totalUnits,
+    totalExtensionUnits,
+    totalAttachments,
+    totalAttachmentCents,
+    baseCents,
+    chargedCents,
+    platformAndServiceFeeCents,
+    textMessageCount,
+    stripeCustomerId,
+  }) {
+    const checkoutParams = {
+      payment_method_types: ['card'],
+      mode: 'payment',
+      expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+      ui_mode: 'embedded',
+      return_url: `${FRONTEND_URL}/payment/success?payment_id=${payment.id}&type=priority_message`,
+      line_items: this._buildLineItems({
+        textMessageCount,
+        totalExtensionUnits,
+        totalAttachments,
+        totalAttachmentCents,
+        platformAndServiceFeeCents,
+        profile,
+        talentName,
+        msgList,
+      }),
+      ...(stripeCustomerId
+        ? {
+            customer: stripeCustomerId,
+            saved_payment_method_options: { payment_method_save: 'enabled' },
+          }
+        : sender?.email?.trim()
+          ? { customer_email: sender.email.trim() }
+          : {}),
+      metadata: {
+        type: 'priority_message',
+        feature: 'priority_message',
+        paymentId: payment.id,
+        senderId: payment.senderId,
+        talentProfileId: payment.talentProfileId,
+        talentUserId: profile.userId,
+        talentName,
+      },
+      payment_intent_data: {
+        ...(stripeCustomerId ? { setup_future_usage: 'off_session' } : {}),
+        metadata: {
+          type: 'priority_message',
+          feature: 'priority_message',
+          paymentId: payment.id,
+          talentUserId: profile.userId,
+        },
+      },
+    };
+
+    const session = await stripe.checkout.sessions.create(checkoutParams);
+
+    await db
+      .update(priorityMessagePayments)
+      .set({ stripeSessionId: session.id, updatedAt: new Date() })
+      .where(eq(priorityMessagePayments.id, payment.id));
+
+    return { clientSecret: session.client_secret };
+  }
+
+  /**
+   * Charges a saved card directly for an already-persisted pending payment
+   * (created via prepare()) — the priority-message half of the generic
+   * /payments/quick-pay endpoint. Falls back to a normal embedded Checkout
+   * Session for this same payment if the card needs extra authentication
+   * (3DS); any other failure (decline, etc.) is surfaced directly rather
+   * than silently degrading to a checkout the sender didn't ask for.
+   */
+  static async chargeExistingPendingPayment(
+    paymentId,
+    requesterId,
+    { paymentMethodId, idempotencyKey, io = null } = {}
+  ) {
+    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+    if (!paymentMethodId) throw new ApiError(400, '`paymentMethodId` is required');
+
+    const ctx = await this._loadPendingPaymentContext(paymentId);
+    const { payment, profile, chargedCents } = ctx;
+
+    if (payment.senderId !== requesterId) throw new ApiError(403, 'Forbidden');
+    if (payment.status !== 'pending') {
+      throw new ApiError(409, 'This payment is no longer pending');
+    }
+
+    const customerRow = await db.query.stripeCustomers.findFirst({
+      where: eq(stripeCustomers.userId, requesterId),
+    });
+    if (!customerRow) throw new ApiError(400, 'No saved payment method on file');
+    const stripeCustomerId = customerRow.stripeCustomerId;
+
+    const fallbackToCheckout = () =>
+      this._createEmbeddedCheckoutSessionForPayment({ ...ctx, stripeCustomerId });
+
+    try {
+      const intent = await stripe.paymentIntents.create(
+        {
+          amount: chargedCents,
+          currency: 'usd',
+          customer: stripeCustomerId,
+          payment_method: paymentMethodId,
+          off_session: true,
+          confirm: true,
+          metadata: {
+            type: 'priority_message',
+            feature: 'priority_message',
+            paymentId: payment.id,
+            senderId: requesterId,
+            talentProfileId: payment.talentProfileId,
+            talentUserId: profile.userId,
+          },
+        },
+        idempotencyKey ? { idempotencyKey } : undefined
+      );
+
+      await this._deliverPaidPayment(payment.id, {
+        senderId: requesterId,
+        talentUserId: profile.userId,
+        io,
+        paidFields: { stripePaymentIntent: intent.id },
+        spendFields: { stripePaymentIntentId: intent.id },
+      });
+
+      return { success: true, paymentIntentId: intent.id, requiresAction: false, paymentId: payment.id };
+    } catch (err) {
+      if (err?.code === 'authentication_required' || err?.raw?.code === 'authentication_required') {
+        const session = await fallbackToCheckout();
+        return {
+          success: false,
+          requiresAction: true,
+          clientSecret: session.clientSecret,
+          paymentId: payment.id,
+        };
+      }
+      // Anything else (card declined, expired, etc.) — surface it directly.
+      await db
+        .update(priorityMessagePayments)
+        .set({ status: 'failed', updatedAt: new Date() })
+        .where(eq(priorityMessagePayments.id, payment.id));
+      throw new ApiError(402, err?.message || 'Your saved card was declined');
+    }
   }
 
   // ── Handle Stripe webhook after payment confirmed ─────────────────────────

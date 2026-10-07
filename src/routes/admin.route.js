@@ -114,6 +114,7 @@ const createInterestCategorySchema = z.object({
   icon: z.string().max(50).optional(),
   color: z.string().max(7).optional(),
   isDefault: z.boolean().optional(),
+  showInDiscussions: z.boolean().optional(),
   sortOrder: z.number().int().optional(),
 });
 const updateInterestCategorySchema = createInterestCategorySchema.partial().extend({

@@ -6,7 +6,7 @@ import { eq, and, desc, sql, count, isNull, gte ,inArray} from 'drizzle-orm';
 import ApiError from '../../utils/api-error.js';
 import config from '../../config/config.js';
 import logger from '../../config/logger.js';
-import { getRedirectUrls } from '../../utils/redirect-urls.js';
+import { getRedirectUrls, isNativePlatform } from '../../utils/redirect-urls.js';
 import { StripeConnectService } from '../stripeConnect.service.js';
 import { UserSpendService } from '../userSpend.service.js';
 import { createNotification } from '../notification.service.js';
@@ -243,11 +243,15 @@ export class ShopOrderService {
       '/purchases?checkout_session_id={CHECKOUT_SESSION_ID}&status=success',
       '/purchases?checkout_session_id={CHECKOUT_SESSION_ID}&status=cancelled'
     );
+    const nativeRedirect = isNativePlatform(platform);
 
     const stripeSession = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
       expires_at: Math.floor(Date.now() / 1000) + CHECKOUT_TTL_SECONDS,
+      ...(nativeRedirect
+        ? { success_url: redirectUrls.successUrl, cancel_url: redirectUrls.cancelUrl }
+        : { ui_mode: 'embedded', return_url: redirectUrls.successUrl }),
       line_items: [
         {
           price_data: {
@@ -271,8 +275,6 @@ export class ShopOrderService {
           quantity: 1,
         },
       ],
-      success_url: redirectUrls.successUrl,
-      cancel_url: redirectUrls.cancelUrl,
       ...((customerEmail || buyer?.email)?.trim()
         ? { customer_email: (customerEmail || buyer.email).trim() }
         : {}),
@@ -292,7 +294,9 @@ export class ShopOrderService {
       .set({ stripeSessionId: stripeSession.id, updatedAt: new Date() })
       .where(eq(shopOrders.id, order.id));
 
-    return { free: false, checkoutUrl: stripeSession.url, orderId: order.id };
+    return nativeRedirect
+      ? { free: false, checkoutUrl: stripeSession.url, orderId: order.id }
+      : { free: false, clientSecret: stripeSession.client_secret, orderId: order.id };
   }
 
   /**

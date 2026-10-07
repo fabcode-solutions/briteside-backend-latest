@@ -37,7 +37,15 @@ import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
 import { GoogleAuth } from 'google-auth-library';
-import { AppStoreServerAPIClient, SignedDataVerifier, Environment } from '@apple/app-store-server-library';
+import {
+  AppStoreServerAPIClient,
+  SignedDataVerifier,
+  Environment,
+  APIException,
+  APIError,
+  VerificationException,
+  VerificationStatus,
+} from '@apple/app-store-server-library';
 import { eq, sql } from 'drizzle-orm';
 import { db } from '../../db/index.js';
 import { shopProducts, shopOrders } from '../../db/schema/index.js';
@@ -46,6 +54,7 @@ import config from '../../config/config.js';
 import logger from '../../config/logger.js';
 import { ShopOrderService } from './shopOrder.service.js';
 import { ShopProductService } from './shopProduct.service.js';
+import { UserSpendService } from '../userSpend.service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -97,18 +106,32 @@ export class ShopIapService {
     return [fs.readFileSync(certPath)];
   }
 
-  static _appleEnvironment() {
-    return config.appleIap.environment === 'Production' ? Environment.PRODUCTION : Environment.SANDBOX;
-  }
-
-  static _appStoreServerClient() {
+  /**
+   * App Store Server API client for one environment. Both are needed: live
+   * App Store purchases are Production, while App Review, TestFlight and
+   * sandbox testers purchase in Sandbox — Apple requires a production server
+   * to accept both (verify against Production first, then Sandbox).
+   */
+  static _appStoreServerClient(environment) {
     if (!config.appleIap.configured) return null;
     return new AppStoreServerAPIClient(
       config.appleIap.privateKey,
       config.appleIap.keyId,
       config.appleIap.issuerId,
       config.appleIap.bundleId,
-      this._appleEnvironment()
+      environment
+    );
+  }
+
+  static _signedDataVerifier(environment) {
+    return new SignedDataVerifier(
+      this._appleRootCerts(),
+      true, // enableOnlineChecks — revocation + expiry checked live
+      environment,
+      config.appleIap.bundleId,
+      // Required by Apple for Production; it's the app's Apple ID (the same
+      // numeric id App Store Connect shows — APPLE_ASC_APP_ID).
+      environment === Environment.PRODUCTION ? Number(config.appleIap.ascAppId) : undefined
     );
   }
 
@@ -116,23 +139,70 @@ export class ShopIapService {
    * Fetches a transaction from Apple and cryptographically verifies its
    * signature against Apple's certificate chain before trusting anything in
    * it — never trust a bare transactionId from the client without this.
+   *
+   * Production first; a TRANSACTION_ID_NOT_FOUND there means the purchase
+   * was made in Sandbox (App Review / TestFlight / sandbox testers), which is
+   * Apple's documented way to route it — not a guess.
    */
   static async verifyAppleTransaction(transactionId) {
-    const client = this._appStoreServerClient();
-    if (!client) throw new ApiError(503, 'Apple in-app purchases are not configured');
-
-    const response = await client.getTransactionInfo(transactionId);
-    if (!response?.signedTransactionInfo) {
-      throw new ApiError(400, 'Apple returned no transaction data for this id');
+    if (!config.appleIap.configured) {
+      throw new ApiError(503, 'Apple in-app purchases are not configured');
     }
 
-    const verifier = new SignedDataVerifier(
-      this._appleRootCerts(),
-      true, // enableOnlineChecks — revocation + expiry checked live
-      this._appleEnvironment(),
-      config.appleIap.bundleId
-    );
-    return verifier.verifyAndDecodeTransaction(response.signedTransactionInfo);
+    for (const environment of [Environment.PRODUCTION, Environment.SANDBOX]) {
+      let response;
+      try {
+        response = await this._appStoreServerClient(environment).getTransactionInfo(transactionId);
+      } catch (err) {
+        const notFoundInProduction =
+          environment === Environment.PRODUCTION &&
+          err instanceof APIException &&
+          err.apiError === APIError.TRANSACTION_ID_NOT_FOUND;
+        if (notFoundInProduction) continue;
+        throw err;
+      }
+      if (!response?.signedTransactionInfo) {
+        throw new ApiError(400, 'Apple returned no transaction data for this id');
+      }
+      return this._signedDataVerifier(environment).verifyAndDecodeTransaction(
+        response.signedTransactionInfo
+      );
+    }
+    throw new ApiError(400, 'Apple could not find this transaction');
+  }
+
+  /**
+   * Verifies an App Store Server Notification (V2) signedPayload. The payload
+   * is signed for the environment it came from, so Production is tried
+   * first and Sandbox only when Apple's verifier reports INVALID_ENVIRONMENT.
+   * Returns { notification, environment }.
+   */
+  static async verifyAppleNotification(signedPayload) {
+    if (!config.appleIap.configured) {
+      throw new ApiError(503, 'Apple in-app purchases are not configured');
+    }
+    try {
+      const notification = await this._signedDataVerifier(
+        Environment.PRODUCTION
+      ).verifyAndDecodeNotification(signedPayload);
+      return { notification, environment: Environment.PRODUCTION };
+    } catch (err) {
+      if (
+        !(err instanceof VerificationException) ||
+        err.status !== VerificationStatus.INVALID_ENVIRONMENT
+      ) {
+        throw err;
+      }
+      const notification = await this._signedDataVerifier(
+        Environment.SANDBOX
+      ).verifyAndDecodeNotification(signedPayload);
+      return { notification, environment: Environment.SANDBOX };
+    }
+  }
+
+  /** Verifies a signedTransactionInfo JWS from a notification, in its environment. */
+  static async verifyAppleSignedTransaction(signedTransactionInfo, environment) {
+    return this._signedDataVerifier(environment).verifyAndDecodeTransaction(signedTransactionInfo);
   }
 
   // ── Apple: App Store Connect API (product registration) ────────────────
@@ -199,7 +269,11 @@ export class ShopIapService {
 
       await db
         .update(shopProducts)
-        .set({ appleIapStatus: 'registered', appleIapRegisteredAt: new Date(), appleIapError: null })
+        .set({
+          appleIapStatus: 'registered',
+          appleIapRegisteredAt: new Date(),
+          appleIapError: null,
+        })
         .where(eq(shopProducts.id, product.id));
     } catch (err) {
       logger.error(`[ShopIap] Apple registration failed for product ${product.id}: ${err.message}`);
@@ -267,10 +341,16 @@ export class ShopIapService {
 
       await db
         .update(shopProducts)
-        .set({ googleIapStatus: 'registered', googleIapRegisteredAt: new Date(), googleIapError: null })
+        .set({
+          googleIapStatus: 'registered',
+          googleIapRegisteredAt: new Date(),
+          googleIapError: null,
+        })
         .where(eq(shopProducts.id, product.id));
     } catch (err) {
-      logger.error(`[ShopIap] Google registration failed for product ${product.id}: ${err.message}`);
+      logger.error(
+        `[ShopIap] Google registration failed for product ${product.id}: ${err.message}`
+      );
       await db
         .update(shopProducts)
         .set({ googleIapStatus: 'failed', googleIapError: String(err.message).slice(0, 1000) })
@@ -292,6 +372,26 @@ export class ShopIapService {
     const data = await res.json();
     if (data.purchaseState !== 0) throw new ApiError(400, 'This purchase was not completed');
     return data;
+  }
+
+  /**
+   * Full refund of a Google Play order (Play doesn't support partial refunds
+   * through the API). `revoke=true` also removes the purchase from the
+   * buyer. Needs the service account's "Manage orders" permission.
+   */
+  static async refundGoogleOrder(orderId) {
+    if (!config.googleIap.configured) {
+      throw new ApiError(503, 'Google Play in-app purchases are not configured');
+    }
+    const token = await this._googleAccessToken();
+    const res = await fetch(
+      `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${config.googleIap.packageName}/orders/${encodeURIComponent(orderId)}:refund?revoke=true`,
+      { method: 'POST', headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Google refund failed (${res.status}): ${body.slice(0, 300)}`);
+    }
   }
 
   /** Google auto-refunds an unacknowledged purchase after 3 days — must be
@@ -363,7 +463,9 @@ export class ShopIapService {
    * want to pay?" dialog. Doesn't create anything — pure pricing lookup.
    */
   static async getBuyOptions(productId) {
-    const product = await db.query.shopProducts.findFirst({ where: eq(shopProducts.id, productId) });
+    const product = await db.query.shopProducts.findFirst({
+      where: eq(shopProducts.id, productId),
+    });
     if (!product || product.deletedAt) throw new ApiError(404, 'Product not found');
     if (!this.isIapEligible(product)) return { iapEligible: false };
 
@@ -384,8 +486,15 @@ export class ShopIapService {
    * on iapTransactionId — a retried call for the same transaction throws a
    * clean 409 instead of double-counting a sale.
    */
-  static async finalizePurchase(buyerId, productId, store, { transactionId, purchaseToken } = {}) {
-    const product = await db.query.shopProducts.findFirst({ where: eq(shopProducts.id, productId) });
+  static async finalizePurchase(
+    buyerId,
+    productId,
+    store,
+    { transactionId, purchaseToken, customerName, customerEmail } = {}
+  ) {
+    const product = await db.query.shopProducts.findFirst({
+      where: eq(shopProducts.id, productId),
+    });
     if (!product || product.deletedAt) throw new ApiError(404, 'Product not found');
     if (!this.isIapEligible(product)) {
       throw new ApiError(400, 'This product does not support in-app purchase');
@@ -438,6 +547,13 @@ export class ShopIapService {
           refundWindowDaysSnapshot: settings.refundWindowDays,
           refundAfterDownloadSnapshot: settings.refundAfterDownload,
           paidAt: new Date(),
+          // Same contact details the web checkout collects for 'product' /
+          // 'course' listings (ShopOrderService.REQUIRES_CUSTOMER_INFO), so
+          // the seller can reach the buyer either way. Not hard-required here:
+          // the buyer has already paid the store by the time this runs, and
+          // the App collects them before opening the purchase sheet.
+          customerName: customerName?.trim() || null,
+          customerEmail: customerEmail?.trim() || null,
           purchaseChannel: store === 'apple' ? 'apple_iap' : 'google_iap',
           iapProductId: product.iapProductId,
           iapTransactionId: verifiedTransactionId,
@@ -477,6 +593,23 @@ export class ShopIapService {
         logger.error(`[ShopIap] Google acknowledge failed for order ${order.id}: ${err.message}`);
       }
     }
+
+    // Same spend record the web webhook writes (ShopOrderService
+    // .handlePaymentWebhook), so IAP purchases show in the buyer's spend log.
+    await UserSpendService.recordSpend({
+      userId: buyerId,
+      spendType: 'shop',
+      amountCents: order.chargedCents,
+      referenceId: order.id,
+      referenceType: 'shop_order',
+      talentUserId: order.sellerId,
+      metadata: {
+        productId: order.productId,
+        productTitle: order.productTitleSnapshot,
+        purchaseChannel: order.purchaseChannel,
+      },
+      paidAt: order.paidAt,
+    }).catch(err => logger.error(`[ShopIap] spend record failed: ${err.message}`));
 
     await ShopOrderService.notifyPurchase(order).catch(err =>
       logger.error(`[ShopIap] purchase notify failed: ${err.message}`)

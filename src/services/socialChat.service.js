@@ -225,13 +225,13 @@ export class SocialChatService {
         )
       )
       .orderBy(
-  desc(sql`COALESCE(${socialConversations.lastMessageAt}, ${socialConversations.createdAt})`)
-)
-.limit(limit)
-.offset(offset);
+        desc(sql`COALESCE(${socialConversations.lastMessageAt}, ${socialConversations.createdAt})`)
+      )
+      .limit(limit)
+      .offset(offset);
 
     const conversationIds = rows.map(r => r.conversation.id).filter(Boolean);
-    const rawRowCount = rows.length; 
+    const rawRowCount = rows.length;
     const { latestMap, unreadCountMap } =
       type === 'inquiry'
         ? await this.getLatestInboundInquiries(currentUserId, conversationIds)
@@ -315,15 +315,15 @@ export class SocialChatService {
       const toPreview = m =>
         m
           ? {
-              id: m.id,
-              senderId: m.senderId,
-              messageType: m.messageType,
-              content: m.content,
-              metadata: m.metadata,
-              isSeen: m.isSeen,
-              isPriority: m.isPriority,
-              createdAt: m.createdAt,
-            }
+            id: m.id,
+            senderId: m.senderId,
+            messageType: m.messageType,
+            content: m.content,
+            metadata: m.metadata,
+            isSeen: m.isSeen,
+            isPriority: m.isPriority,
+            createdAt: m.createdAt,
+          }
           : null;
 
       return {
@@ -346,7 +346,7 @@ export class SocialChatService {
       items = items.filter(item => item.lastMessageSent?.messageType !== 'inquiry');
     }
 
-   const conversationsFilterEnabled = await TextModerationService.getFilterEnabled(currentUserId);
+    const conversationsFilterEnabled = await TextModerationService.getFilterEnabled(currentUserId);
     const allPreviews = items
       .flatMap(item => [
         item.lastMessageSent,
@@ -379,7 +379,7 @@ export class SocialChatService {
       conversations: combined,
       page,
       limit,
-       hasMore: items.length === limit,
+      hasMore: items.length === limit,
     };
   }
 
@@ -515,12 +515,12 @@ export class SocialChatService {
         createdAt: new Date(),
       })
       .returning();
-      if (messageType !== 'inquiry') {
-  await db
-    .update(socialConversations)
-    .set({ lastMessageAt: msg.createdAt })
-    .where(eq(socialConversations.id, convo.id));
-}
+    if (messageType !== 'inquiry') {
+      await db
+        .update(socialConversations)
+        .set({ lastMessageAt: msg.createdAt })
+        .where(eq(socialConversations.id, convo.id));
+    }
 
     await TextModerationService.recordIfFlagged(messageModeration, {
       entityType: TEXT_ENTITY.MESSAGE,
@@ -759,48 +759,48 @@ export class SocialChatService {
     };
   }
 
-static async markAllSeenInConversation(
-  currentUserId,
-  conversationId,
-  { isPriority, inquiryOnly = false } = {}
-) {
-  const convo = await this.getConversation(currentUserId, conversationId);
+  static async markAllSeenInConversation(
+    currentUserId,
+    conversationId,
+    { isPriority, inquiryOnly = false } = {}
+  ) {
+    const convo = await this.getConversation(currentUserId, conversationId);
 
-  const conditions = [
-    eq(socialMessages.conversationId, convo.id),
-    eq(socialMessages.isSeen, false),
-    ne(socialMessages.senderId, currentUserId),
-  ];
+    const conditions = [
+      eq(socialMessages.conversationId, convo.id),
+      eq(socialMessages.isSeen, false),
+      ne(socialMessages.senderId, currentUserId),
+    ];
 
 
-  if (inquiryOnly) {
-    conditions.push(eq(socialMessages.messageType, 'inquiry'));
-  } else {
-    conditions.push(ne(socialMessages.messageType, 'inquiry'));
- // Allow scoping to general-only or priority-only seen-marking, since the
-    // General tab and Priority tab render two different message subsets and
-    // each should only mark its own subset seen when opened.
-    if (typeof isPriority === 'boolean') {
-      conditions.push(eq(socialMessages.isPriority, isPriority));
+    if (inquiryOnly) {
+      conditions.push(eq(socialMessages.messageType, 'inquiry'));
+    } else {
+      conditions.push(ne(socialMessages.messageType, 'inquiry'));
+      // Allow scoping to general-only or priority-only seen-marking, since the
+      // General tab and Priority tab render two different message subsets and
+      // each should only mark its own subset seen when opened.
+      if (typeof isPriority === 'boolean') {
+        conditions.push(eq(socialMessages.isPriority, isPriority));
+      }
     }
+
+    const updated = await db
+      .update(socialMessages)
+      .set({ isSeen: true, seenAt: new Date() })
+      .where(and(...conditions))
+      .returning({ id: socialMessages.id, senderId: socialMessages.senderId });
+
+    return {
+      success: true,
+      conversationId: convo.id,
+      markedCount: updated.length,
+      messageIds: updated.map(m => m.id),
+      // senderId is the same for every row in a 1:1 conversation — useful
+      // for the controller to emit a single socket "seen" event back to them
+      senderId: updated[0]?.senderId ?? null,
+    };
   }
-
-  const updated = await db
-    .update(socialMessages)
-    .set({ isSeen: true, seenAt: new Date() })
-    .where(and(...conditions))
-    .returning({ id: socialMessages.id, senderId: socialMessages.senderId });
-
-  return {
-    success: true,
-    conversationId: convo.id,
-    markedCount: updated.length,
-    messageIds: updated.map(m => m.id),
-    // senderId is the same for every row in a 1:1 conversation — useful
-    // for the controller to emit a single socket "seen" event back to them
-    senderId: updated[0]?.senderId ?? null,
-  };
-}
 
   static async deleteMessage(currentUserId, messageId) {
     const message = await db.query.socialMessages.findFirst({
@@ -936,49 +936,49 @@ static async markAllSeenInConversation(
 
         const metadata = isGroup
           ? {
-              groupId: post.id,
-              sharedGroup: {
-                id: post.id,
-                name: post._groupName,
-                slug: post._groupSlug,
-                coverImageUrl: post.mediaUrls?.[0] ?? null,
-              },
-            }
+            groupId: post.id,
+            sharedGroup: {
+              id: post.id,
+              name: post._groupName,
+              slug: post._groupSlug,
+              coverImageUrl: post.mediaUrls?.[0] ?? null,
+            },
+          }
           : isStory
             ? {
-                storyId: post.id,
-                sharedStory: {
-                  id: post.id,
-                  caption: post.caption,
-                  mediaUrl: post.mediaUrls?.[0],
-                  mediaType: post.mediaTypes?.[0],
-                  expiresAt: post._storyExpiresAt,
-                  user: post.user,
-                },
-              }
+              storyId: post.id,
+              sharedStory: {
+                id: post.id,
+                caption: post.caption,
+                mediaUrl: post.mediaUrls?.[0],
+                mediaType: post.mediaTypes?.[0],
+                expiresAt: post._storyExpiresAt,
+                user: post.user,
+              },
+            }
             : isProfile
               ? {
-                  profileUserId: post.id,
-                  sharedProfile: {
-                    id: post.user.id,
-                    username: post.user.username,
-                    firstName: post.user.firstName,
-                    lastName: post.user.lastName,
-                    image: post.user.image,
-                  },
-                }
+                profileUserId: post.id,
+                sharedProfile: {
+                  id: post.user.id,
+                  username: post.user.username,
+                  firstName: post.user.firstName,
+                  lastName: post.user.lastName,
+                  image: post.user.image,
+                },
+              }
               : {
-                  postId,
-                  sharedPost: {
-                    id: post.id,
-                    caption: post.caption,
-                    mediaUrls: post.mediaUrls,
-                    mediaTypes: post.mediaTypes,
-                    likesCount: post.likesCount,
-                    commentsCount: post.commentsCount,
-                    user: post.user,
-                  },
-                };
+                postId,
+                sharedPost: {
+                  id: post.id,
+                  caption: post.caption,
+                  mediaUrls: post.mediaUrls,
+                  mediaTypes: post.mediaTypes,
+                  likesCount: post.likesCount,
+                  commentsCount: post.commentsCount,
+                  user: post.user,
+                },
+              };
 
         const msg = await this.sendMessage(currentUserId, conversation.id, {
           messageType,

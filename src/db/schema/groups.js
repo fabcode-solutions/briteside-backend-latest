@@ -17,7 +17,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { users } from './users.js';
-import { categories } from './categories.js';
+import { interestCategories } from './social.js';
 
 export const groupRoleEnum = pgEnum('group_role', ['admin', 'moderator', 'member']);
 export const groupJoinRequestStatusEnum = pgEnum('group_join_request_status', [
@@ -248,6 +248,10 @@ export const discussionSubscriptions = pgTable(
   ]
 );
 
+// Categorized against interestCategories (the same pool shown as filters on
+// the Social feed, see social.js) rather than the generic `categories` table
+// Events use — discussions should offer the exact same category list as the
+// Social tab, not the Events one.
 export const discussionCategories = pgTable(
   'discussion_categories',
   {
@@ -257,7 +261,7 @@ export const discussionCategories = pgTable(
       .references(() => discussions.id, { onDelete: 'cascade' }),
     categoryId: uuid('category_id')
       .notNull()
-      .references(() => categories.id, { onDelete: 'cascade' }),
+      .references(() => interestCategories.id, { onDelete: 'cascade' }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
   },
