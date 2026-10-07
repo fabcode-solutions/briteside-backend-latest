@@ -18,6 +18,7 @@ import {
   listOrganizerRefunds,
   updateRefund,
 } from '../controllers/payment.controller.js';
+import { getSavedCard, quickPay } from '../controllers/quickPay.controller.js';
 import { PERMISSIONS } from '../config/event-team-permissions.js';
 
 const router = express.Router();
@@ -35,6 +36,10 @@ router.post('/smart-checkout-session', authMiddleware, createSmartCheckoutSessio
 // webhook).
 router.post('/ticket-payment-sheet', authMiddleware, createTicketPaymentSheet);
 router.post('/ticket-payment-sheet/complete', authMiddleware, completeTicketPaymentSheet);
+// Generic "pay a saved card directly" — currently only wired up for
+// priority messages (sourceType 'priority_message').
+router.get('/saved-card', authMiddleware, getSavedCard);
+router.post('/quick-pay', authMiddleware, quickPay);
 // Refund endpoints
 router.get('/orders/:orderId/refund-eligibility', authMiddleware, checkRefundEligibility);
 router.post('/orders/:orderId/refund', authMiddleware, teamMemberAuthMiddleware, applyRefund);

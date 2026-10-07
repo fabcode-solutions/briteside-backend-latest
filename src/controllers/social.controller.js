@@ -1625,8 +1625,11 @@ export const getInterestCategories = catchAsync(async (req, res) => {
   const userId = req.user.id;
   const page = parseInt(req.query.page) || 1;
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+  // ?scope=discussions — only the categories enabled for the group-discussion
+  // picker, instead of every category shown as a Social feed filter.
+  const forDiscussions = req.query.scope === 'discussions';
 
-  const result = await SocialService.getInterestCategories(userId, { page, limit });
+  const result = await SocialService.getInterestCategories(userId, { page, limit, forDiscussions });
 
   res.json({
     success: true,

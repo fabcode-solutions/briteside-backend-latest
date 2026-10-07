@@ -1731,8 +1731,16 @@ export class EventService {
         throw new ApiError(400, 'Event slug is required');
       }
 
+      // Reminder/notification emails link to /events/{event.id} (a raw UUID),
+      // not the slug — this page only ever looked up by slug, so every one of
+      // those links 404'd. Comparing a non-UUID string against the uuid `id`
+      // column throws in Postgres, so only add that branch when the param is
+      // actually UUID-shaped.
+      const isUuid =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(slug);
+
       const event = await db.query.events.findFirst({
-        where: eq(events.slug, slug),
+        where: isUuid ? or(eq(events.slug, slug), eq(events.id, slug)) : eq(events.slug, slug),
       });
 
       if (!event) {

@@ -47,7 +47,7 @@ import { SubscriptionService } from './subscription.service.js';
 import { FEATURES } from '../constants/features.js';
 import Stripe from 'stripe';
 import config from '../config/config.js';
-import { getRedirectUrls } from '../utils/redirect-urls.js';
+import { getRedirectUrls, isNativePlatform } from '../utils/redirect-urls.js';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 import { emitSocialChat } from '../socket/emitter.js';
@@ -1417,17 +1417,25 @@ export class TalentSessionService {
       estimatedStripeFeeCents,
     } = prep;
 
+    const nativeRedirect = isNativePlatform(platform);
+
+    // Native app keeps its own deep-link contract (/bookings?...) — only the
+    // web embedded flow is pointed at the shared /payment/success page.
     const redirectUrls = getRedirectUrls(
       platform,
       FRONTEND_URL,
       '/bookings?checkout_session_id={CHECKOUT_SESSION_ID}&status=success',
       '/bookings?checkout_session_id={CHECKOUT_SESSION_ID}&status=cancelled'
     );
+    const webReturnUrl = `${FRONTEND_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}&type=session`;
 
     const checkoutParams = {
       payment_method_types: ['card'],
       mode: 'payment',
       expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+      ...(nativeRedirect
+        ? { success_url: redirectUrls.successUrl, cancel_url: redirectUrls.cancelUrl }
+        : { ui_mode: 'embedded', return_url: webReturnUrl }),
       line_items: [
         {
           price_data: {
@@ -1451,8 +1459,6 @@ export class TalentSessionService {
           quantity: 1,
         },
       ],
-      success_url: redirectUrls.successUrl,
-      cancel_url: redirectUrls.cancelUrl,
       ...(booker?.email?.trim() ? { customer_email: booker.email.trim() } : {}),
       metadata: {
         type: 'talent_session',
@@ -1490,7 +1496,9 @@ export class TalentSessionService {
       })
       .where(eq(talentSessions.id, session.id));
 
-    return { checkoutUrl: stripeSession.url, sessionId: session.id };
+    return nativeRedirect
+      ? { checkoutUrl: stripeSession.url, sessionId: session.id }
+      : { clientSecret: stripeSession.client_secret, sessionId: session.id };
   }
 
   // ── Handle Stripe webhook after payment confirmed ─────────────────────────
@@ -2884,8 +2892,8 @@ export class TalentSessionService {
           quantity: 1,
         },
       ],
-      success_url: `${FRONTEND_URL}/bookings`,
-      cancel_url: `${FRONTEND_URL}/bookings`,
+      ui_mode: 'embedded',
+      return_url: `${FRONTEND_URL}/bookings`,
       customer_email: booker?.email,
       metadata,
       // No transfer_data/application_fee_amount on purpose — the talent's cut
@@ -2901,7 +2909,7 @@ export class TalentSessionService {
       .set({ stripeSessionId: checkoutSession.id })
       .where(eq(talentSessionTips.id, tip.id));
 
-    return { checkoutUrl: checkoutSession.url, tipId: tip.id };
+    return { clientSecret: checkoutSession.client_secret, tipId: tip.id };
   }
 
   static async handleTipPaymentWebhook(stripeSession) {

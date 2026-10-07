@@ -35,7 +35,7 @@ export const generateEventReminderEmail = (event, user, hoursBefore) => {
       <p>We can't wait to see you there! Don't forget to bring your ticket.</p>
 
       <p style="text-align: center; margin: 30px 0;">
-        <a href="${process.env.FRONTEND_URL || 'https://gokyro.com'}/events/${event.id}"
+        <a href="${process.env.FRONTEND_URL || 'https://gokyro.com'}/events/${event.slug}"
            style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
           View Event Details
         </a>
@@ -129,7 +129,7 @@ export const generateMerchandiseUpsellEmail = (event, user, merchandise, ticketC
       ${merchandiseHtml}
 
       <p style="text-align: center; margin: 30px 0;">
-        <a href="${process.env.FRONTEND_URL || 'https://gokyro.com'}/events/${event.id}/merchandise"
+        <a href="${process.env.FRONTEND_URL || 'https://gokyro.com'}/events/${event.slug}/merchandise"
            style="background-color: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
           Shop Merchandise Now
         </a>
@@ -154,7 +154,7 @@ export const generateMerchandiseUpsellEmail = (event, user, merchandise, ticketC
       .map(item => `- ${item.name}: $${item.price} (${item.quantityAvailable} available)`)
       .join('\n')}
 
-    Shop now: ${process.env.FRONTEND_URL || 'https://gokyro.com'}/events/${event.id}/merchandise
+    Shop now: ${process.env.FRONTEND_URL || 'https://gokyro.com'}/events/${event.slug}/merchandise
 
     Best regards,
     The GoKyro Team

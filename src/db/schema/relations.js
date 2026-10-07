@@ -1639,9 +1639,9 @@ export const discussionCategoriesRelations = relations(discussionCategories, ({ 
     fields: [discussionCategories.discussionId],
     references: [discussions.id],
   }),
-  category: one(categories, {
+  category: one(interestCategories, {
     fields: [discussionCategories.categoryId],
-    references: [categories.id],
+    references: [interestCategories.id],
   }),
 }));
 

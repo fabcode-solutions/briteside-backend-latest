@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
+    "build": "esbuild src/server.js --bundle --platform=node --external:express --outfile=dist/index.js",
     "prod": "cross-env NODE_ENV=production USE_AWS_SECRETS=true nodemon src/server.js",
     "dev": "nodemon src/server.js",
     "db:generate": "node scripts/with-secrets.js npx drizzle-kit generate",
@@ -58,6 +59,7 @@
     "drizzle-zod": "^0.8.3",
     "express": "^5.1.0",
     "express-rate-limit": "^8.5.2",
+    "firebase-admin": "^14.5.0",
     "google-auth-library": "^10.5.0",
     "helmet": "^8.1.0",
     "http-status": "^2.1.0",

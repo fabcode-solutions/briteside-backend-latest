@@ -13,7 +13,7 @@ import {
   groups,
   groupMembers, // ← added
 } from '../db/schema/groups.js';
-import { categories } from '../db/schema/categories.js';
+import { interestCategories } from '../db/schema/social.js';
 import { mentions } from '../db/schema/social.js';
 import { stories } from '../db/schema/social.js';
 import { users } from '../db/schema/users.js';
@@ -1060,16 +1060,21 @@ const getDiscussionCategories = async discussionIds => {
   const ids = Array.isArray(discussionIds) ? discussionIds : [discussionIds];
   if (ids.length === 0) return {};
 
+  // Inner join on purpose — a discussion_categories row whose categoryId no
+  // longer resolves to a real interest category (e.g. leftover data from
+  // before discussions were repointed at interestCategories) is orphaned,
+  // and should disappear rather than surface as a name:null placeholder.
   const categoryRecords = await db
     .select({
       discussionId: discussionCategories.discussionId,
-      categoryId: categories.id,
-      categoryName: categories.name,
-      categoryEmoji: categories.emoji,
-      categoryIconUrl: categories.iconUrl,
+      categoryId: interestCategories.id,
+      categoryName: interestCategories.name,
+      categorySlug: interestCategories.slug,
+      categoryIcon: interestCategories.icon,
+      categoryColor: interestCategories.color,
     })
     .from(discussionCategories)
-    .leftJoin(categories, eq(categories.id, discussionCategories.categoryId))
+    .innerJoin(interestCategories, eq(interestCategories.id, discussionCategories.categoryId))
     .where(inArray(discussionCategories.discussionId, ids));
 
   const categoriesMap = {};
@@ -1080,8 +1085,9 @@ const getDiscussionCategories = async discussionIds => {
     categoriesMap[record.discussionId].push({
       id: record.categoryId,
       name: record.categoryName,
-      emoji: record.categoryEmoji,
-      iconUrl: record.categoryIconUrl,
+      slug: record.categorySlug,
+      icon: record.categoryIcon,
+      color: record.categoryColor,
     });
   }
 

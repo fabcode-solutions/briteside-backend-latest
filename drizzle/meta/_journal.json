@@ -869,6 +869,20 @@
       "when": 1790768713189,
       "tag": "0131_nifty_namorita",
       "breakpoints": true
+    },
+    {
+      "idx": 132,
+      "version": "7",
+      "when": 1791204595016,
+      "tag": "0132_optimal_chronomancer",
+      "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1791206075829,
+      "tag": "0133_slow_supernaut",
+      "breakpoints": true
     }
   ]
 }

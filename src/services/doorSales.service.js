@@ -14,7 +14,7 @@ import { eq, and, inArray, asc, sql, count } from 'drizzle-orm';
 import ApiError from '../utils/api-error.js';
 import { MediaModerationService, MEDIA_ENTITY } from './moderation/mediaModeration.service.js';
 import { buildDoorSalesUrl } from '../utils/helper.js';
-import { getRedirectUrls } from '../utils/redirect-urls.js';
+import { getRedirectUrls, isNativePlatform } from '../utils/redirect-urls.js';
 
 let stripeClient = null;
 if (config?.stripe?.secretKey) {
@@ -303,13 +303,15 @@ export class DoorSalesService {
       `/door-sale/success?orderId=${result.id}`,
       `/door-sale/cancel?orderId=${result.id}`
     );
+    const nativeRedirect = isNativePlatform(platform);
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
       line_items: checkoutLineItems,
-      success_url: successUrl,
-      cancel_url: cancelUrl,
+      ...(nativeRedirect
+        ? { success_url: successUrl, cancel_url: cancelUrl }
+        : { ui_mode: 'embedded', return_url: successUrl }),
       metadata: {
         type: 'door_sale',
         feature: 'door_sale',
@@ -329,11 +331,9 @@ export class DoorSalesService {
       })
       .where(eq(guestOrders.id, result.id));
 
-    return {
-      checkoutUrl: session.url,
-      sessionId: session.id,
-      orderId: result.id,
-    };
+    return nativeRedirect
+      ? { checkoutUrl: session.url, sessionId: session.id, orderId: result.id }
+      : { clientSecret: session.client_secret, sessionId: session.id, orderId: result.id };
   }
 
   static async getEventByToken(token) {

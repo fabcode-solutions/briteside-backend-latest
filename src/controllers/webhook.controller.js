@@ -295,7 +295,7 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
     console.error('Error processing webhook event:', processErr);
   }
 });
-
+  
 export async function handleCheckoutSession(session) {
   const paymentId = session.payment_intent || session.id;
   let order = await db.query.orders.findFirst({

@@ -156,3 +156,8 @@ branch_structure.json
  
 drizzle/
 
+
+# Firebase service-account keys (FIREBASE_SERVICE_ACCOUNT_JSON) — never commit
+*firebase-adminsdk*.json
+*serviceAccount*.json
+service-account*.json

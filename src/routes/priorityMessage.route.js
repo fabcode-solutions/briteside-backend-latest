@@ -11,6 +11,7 @@ import { requireFeature } from '../middlewares/subscription.middleware.js';
 import { FEATURES } from '../constants/features.js';
 import {
   createCheckout,
+  prepareCheckout,
   prepareIapPurchase,
   getIapTiers,
   finalizeIapPurchase,
@@ -38,6 +39,9 @@ router.use(authMiddleware);
 
 // Customer sends a priority message — no Plus required (paying per message)
 router.post('/', createCheckout);
+// Same validation/persistence as above, minus the Stripe Checkout Session —
+// feeds the generic /payments/quick-pay endpoint a sourceId to charge.
+router.post('/prepare', prepareCheckout);
 // "Pay in App" — native App Store / Google Play purchase (price tiers).
 // Registered before '/:paymentId/...' so 'iap' is never read as a paymentId.
 router.get('/iap/tiers', getIapTiers);

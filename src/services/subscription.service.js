@@ -484,8 +484,8 @@ export class SubscriptionService {
       mode: 'subscription',
       customer: stripeCustomerId,
       line_items: [{ price: plan.stripePriceId, quantity: 1 }],
-      success_url: successUrl,
-      cancel_url: cancelUrl,
+      ui_mode: 'embedded',
+      return_url: successUrl,
       // Off by default — without this Checkout renders no promo code field at all,
       // so an existing coupon has no way to be redeemed. BriteSide Plus only;
       // group subscriptions and courses deliberately don't accept promo codes.
@@ -508,7 +508,7 @@ export class SubscriptionService {
       },
     });
 
-    return { sessionId: session.id, url: session.url };
+    return { sessionId: session.id, clientSecret: session.client_secret };
   }
 
   static async getCustomerPortalSession(userId, returnUrl) {

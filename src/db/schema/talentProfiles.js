@@ -33,10 +33,6 @@ export const talentProfiles = pgTable(
 
     // Display info
     category: varchar('category', { length: 100 }).notNull(),
-    // Nullable FK, added alongside the legacy free-text `category` column
-    // above rather than replacing it — `talentSearch` below still reads
-    // `category` directly, and existing profiles are backfilled into this
-    // separately (scripts/backfill-talent-categories.js), not migrated here.
     categoryId: uuid('category_id').references(() => talentCategories.id, { onDelete: 'set null' }),
     title: varchar('title', { length: 255 }).notNull(),
     bio: text('bio'),
@@ -78,11 +74,7 @@ export const talentProfiles = pgTable(
     // Verification & status
     isVerified: boolean('is_verified').notNull().default(false),
     isActive: boolean('is_active').notNull().default(true),
-       showShopProducts: boolean('show_shop_products').notNull().default(false),
-    // Talent opt-in: whether they're currently accepting priority (paid)
-    // messages. ANDed with the subscription plan's PRIORITY_MESSAGING feature
-    // in TalentProfileService._featureFlags — both must be true for
-    // priorityMessagingAvailable to be true.
+    showShopProducts: boolean('show_shop_products').notNull().default(false),
     priorityMessagingEnabled: boolean('priority_messaging_enabled').notNull().default(true),
     // Talent opt-in: whether the "Office Hours" 1:1-booking button shows on
     // groups they organize. Gated together with the org-level isBritesidePlus
@@ -94,12 +86,12 @@ export const talentProfiles = pgTable(
     reviewCount: integer('review_count').notNull().default(0),
     totalSessions: integer('total_sessions').notNull().default(0),
     location: varchar('location', { length: 255 }),
-city: varchar('city', { length: 100 }),
-state: varchar('state', { length: 100 }),
-country: varchar('country', { length: 100 }),
-countryCode: varchar('country_code', { length: 4 }),
-latitude: decimal('latitude', { precision: 10, scale: 7 }),
-longitude: decimal('longitude', { precision: 10, scale: 7 }),
+    city: varchar('city', { length: 100 }),
+    state: varchar('state', { length: 100 }),
+    country: varchar('country', { length: 100 }),
+    countryCode: varchar('country_code', { length: 4 }),
+    latitude: decimal('latitude', { precision: 10, scale: 7 }),
+    longitude: decimal('longitude', { precision: 10, scale: 7 }),
 
     // Priority message fee in cents (e.g. 500 = $5.00)
     priorityMessageFee: integer('priority_message_fee').notNull().default(500),
