@@ -170,12 +170,14 @@ export const getShopIapBuyOptions = catchAsync(async (req, res) => {
 });
 
 export const finalizeShopIapPurchase = catchAsync(async (req, res) => {
-  const { store, transactionId, purchaseToken, customerName, customerEmail } = req.body || {};
+  const { store, transactionId, purchaseToken, customerName, customerEmail, testOnly } =
+    req.body || {};
   const result = await ShopIapService.finalizePurchase(req.user.id, req.params.productId, store, {
     transactionId,
     purchaseToken,
     customerName,
     customerEmail,
+    testOnly: testOnly === true,
   });
   res.json({ success: true, message: 'Purchase confirmed', data: result });
 });

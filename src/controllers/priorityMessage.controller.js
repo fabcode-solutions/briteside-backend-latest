@@ -105,7 +105,7 @@ export const prepareIapPurchase = catchAsync(async (req, res) => {
 
 /**
  * POST /priority-messages/:paymentId/iap/finalize
- * Body: { store: 'apple' | 'google', transactionId?, purchaseToken? }
+ * Body: { store: 'apple' | 'google', transactionId?, purchaseToken?, testOnly? }
  * Verifies the native purchase with Apple/Google, then delivers the message.
  */
 /**
@@ -118,12 +118,12 @@ export const getIapTiers = catchAsync(async (req, res) => {
 });
 
 export const finalizeIapPurchase = catchAsync(async (req, res) => {
-  const { store, transactionId, purchaseToken } = req.body || {};
+  const { store, transactionId, purchaseToken, testOnly } = req.body || {};
   const result = await PriorityMessageIapService.finalize(
     req.user.id,
     req.params.paymentId,
     store,
-    { transactionId, purchaseToken },
+    { transactionId, purchaseToken, testOnly: testOnly === true },
     req.app.get('io')
   );
   res.json({ success: true, message: 'Priority message sent', data: result });

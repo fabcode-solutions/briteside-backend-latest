@@ -34,6 +34,8 @@ const URL_PATTERN = /^https?:\/\/.+/i;
  * Once orders exist (phase 2), buyers reach them only through the download
  * endpoint, which re-checks their order every time.
  */
+const SHOP_PER_LISTING_IAP = process.env.SHOP_PER_LISTING_IAP === 'true';
+
 export class ShopProductService {
   static sanitize(product, isOwner) {
     if (!product) return null;
@@ -440,14 +442,17 @@ export class ShopProductService {
       };
     });
 
-    // App-only, fire-and-forget — mirrors this product to Apple/Google as an
-    // in-app purchase if it's eligible. Never awaited: a store outage must
-    // never slow down or fail a seller's create request. Dynamic import
-    // avoids a circular dependency (shopIap.service.js imports this class
-    // for getShopSettings).
-    import('./shopIap.service.js')
-      .then(({ ShopIapService }) => ShopIapService.registerProductWithStores(created))
-      .catch(err => console.error(`[Shop] IAP registration import failed: ${err.message}`));
+    // Legacy, off by default: mirroring each listing to Apple/Google as its
+    // own in-app product (every one needs manual pricing + App Review). The
+    // apps now pay with the shared price tiers (iapTiers.js), so this only
+    // runs with SHOP_PER_LISTING_IAP=true. Fire-and-forget; dynamic
+    // import avoids a circular dependency (shopIap.service.js imports this
+    // class for getShopSettings).
+    if (SHOP_PER_LISTING_IAP) {
+      import('./shopIap.service.js')
+        .then(({ ShopIapService }) => ShopIapService.registerProductWithStores(created))
+        .catch(err => console.error(`[Shop] IAP registration import failed: ${err.message}`));
+    }
 
     return { ...this.sanitize(created, true), courseModules };
   try {
@@ -500,10 +505,12 @@ export class ShopProductService {
       };
     });
 
-    // App-only, fire-and-forget — see the identical call in createProduct.
-    import('./shopIap.service.js')
-      .then(({ ShopIapService }) => ShopIapService.registerProductWithStores(updated))
-      .catch(err => console.error(`[Shop] IAP registration import failed: ${err.message}`));
+    // Legacy, off by default — see the identical call in createProduct.
+    if (SHOP_PER_LISTING_IAP) {
+      import('./shopIap.service.js')
+        .then(({ ShopIapService }) => ShopIapService.registerProductWithStores(updated))
+        .catch(err => console.error(`[Shop] IAP registration import failed: ${err.message}`));
+    }
 
     return { ...this.sanitize(updated, true), courseModules };
   }
