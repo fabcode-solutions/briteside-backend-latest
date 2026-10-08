@@ -138,6 +138,7 @@ router.put(
   checkBlockedUrl('website', { optional: true }),
   checkBlockedUrl('bio', { optional: true, scanText: true }),
   checkBlockedUrl('buttonMeta', { optional: true, scanText: true }),
+   checkBlockedUrl('status', { optional: true, scanText: true }),
   updateSocialProfile
 );
 router.get('/organizers', getUserOrganizers);
