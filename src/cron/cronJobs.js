@@ -19,6 +19,7 @@ import {
 import { runReserveRelease } from './reserveRelease.js';
 import { runPayoutSweep } from './payoutSweep.js';
 import { startPriorityMessageRefundCron } from './priorityMessageRefund.js';
+import { startIapCatalogSyncCron } from './iapCatalogSync.js';
 import { publishScheduledPosts } from './publishScheduledPosts.js';
 import { cleanupStaleImports } from './cleanupStaleImports.js';
 import { sweepMissingConnectAccounts } from './connectAccountSweep.js';
@@ -114,6 +115,10 @@ export const initializeCronJobs = () => {
 
   // Every 30 minutes — refund unanswered priority messages past 48h
   startPriorityMessageRefundCron();
+
+  // Daily + shortly after start-up — create missing in-app price tiers on
+  // the App Store / Google Play (IAP_CATALOG_SYNC; on by default in production)
+  startIapCatalogSyncCron();
 
   // Every minute — publish scheduled posts + 1m session join alert/dialog
   cron.schedule('* * * * *', runCron('publishScheduledPosts', publishScheduledPosts));
