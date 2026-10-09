@@ -23,6 +23,9 @@ import {
   getShopSettings,
   setShopRefundPolicy,
   createShopCheckout,
+  prepareShopNativeCheckout,
+  createShopNativePaymentIntent,
+  finalizeShopNativePayment,
   getShopIapBuyOptions,
   finalizeShopIapPurchase,
   listShopPurchases,
@@ -40,10 +43,19 @@ import {
   declineCustomOffer,
   approveListingPurchase,
   acceptCustomOfferCheckout,
+  prepareCustomOfferAcceptCheckout,
+  createCustomOfferAcceptNativePaymentIntent,
+  finalizeCustomOfferAcceptNativePayment,
   cancelCustomOffer,
   completeCustomOffer,
   payRemainingCustomOfferCheckout,
+  prepareCustomOfferRemainderCheckout,
+  createCustomOfferRemainderNativePaymentIntent,
+  finalizeCustomOfferRemainderNativePayment,
   fundCustomOfferMilestone,
+  prepareCustomOfferMilestoneCheckout,
+  createCustomOfferMilestoneNativePaymentIntent,
+  finalizeCustomOfferMilestoneNativePayment,
   completeCustomOfferMilestone,
   submitCustomOfferWork,
   getCustomOfferDeliverables,
@@ -51,9 +63,13 @@ import {
   requestOfferRevision,
   listOfferRevisionRequests,
   requestOfferDateExtension,
+  requestOfferMoreTime,
   listOfferDateExtensionRequests,
   respondToOfferDateExtension,
   createOfferTipCheckout,
+  prepareOfferTipCheckout,
+  createOfferTipNativePaymentIntent,
+  finalizeOfferTipNativePayment,
   raiseOfferDispute,
   listOfferDisputes,
   acceptCustomOfferDelivery
@@ -155,16 +171,52 @@ router.post('/custom-offers/:offerId/decline', declineCustomOffer);
 // paid) — no charge, unlike accept-checkout below.
 router.post('/custom-offers/:offerId/approve', approveListingPurchase);
 router.post('/custom-offers/:offerId/accept-checkout', acceptCustomOfferCheckout);
+// Native Briteside checkout (NativeCheckoutModal) — prepare/intent/finalize split.
+router.post('/custom-offers/:offerId/accept-checkout/prepare', prepareCustomOfferAcceptCheckout);
+router.post(
+  '/custom-offers/:offerId/accept-checkout/native-intent',
+  createCustomOfferAcceptNativePaymentIntent
+);
+router.post(
+  '/custom-offers/:offerId/accept-checkout/native-finalize',
+  finalizeCustomOfferAcceptNativePayment
+);
 router.post('/custom-offers/:offerId/cancel', cancelCustomOffer);
 router.post('/custom-offers/:offerId/complete', completeCustomOffer);
 router.post('/custom-offers/:offerId/accept-delivery', acceptCustomOfferDelivery);
 router.post('/custom-offers/:offerId/pay-remaining-checkout', payRemainingCustomOfferCheckout);
+// Native Briteside checkout (NativeCheckoutModal) — prepare/intent/finalize split.
+router.post(
+  '/custom-offers/:offerId/pay-remaining-checkout/prepare',
+  prepareCustomOfferRemainderCheckout
+);
+router.post(
+  '/custom-offers/:offerId/pay-remaining-checkout/native-intent',
+  createCustomOfferRemainderNativePaymentIntent
+);
+router.post(
+  '/custom-offers/:offerId/pay-remaining-checkout/native-finalize',
+  finalizeCustomOfferRemainderNativePayment
+);
 
 // ── Per-milestone payment ('milestones' offers only) ─────────────────────────
 // Funds one stage at a time; the previous stage must already be approved.
 router.post(
   '/custom-offers/:offerId/milestones/:milestoneId/fund-checkout',
   fundCustomOfferMilestone
+);
+// Native Briteside checkout (NativeCheckoutModal) — prepare/intent/finalize split.
+router.post(
+  '/custom-offers/:offerId/milestones/:milestoneId/fund-checkout/prepare',
+  prepareCustomOfferMilestoneCheckout
+);
+router.post(
+  '/custom-offers/:offerId/milestones/:milestoneId/fund-checkout/native-intent',
+  createCustomOfferMilestoneNativePaymentIntent
+);
+router.post(
+  '/custom-offers/:offerId/milestones/:milestoneId/fund-checkout/native-finalize',
+  finalizeCustomOfferMilestoneNativePayment
 );
 // Buyer approves one delivered stage (48h payout hold starts for that stage).
 router.post(
@@ -188,7 +240,8 @@ router.get('/custom-offers/:offerId/revisions', listOfferRevisionRequests);
 
 // ── NEW: delivery date extension ─────────────────────────────────────────────
 router.post('/custom-offers/:offerId/date-extension', requestOfferDateExtension);
-router.get('/custom-offers/:offerId/date-extension', listOfferDateExtensionRequests); // ← ADD
+router.post('/custom-offers/:offerId/date-extension/request', requestOfferMoreTime);
+router.get('/custom-offers/:offerId/date-extension', listOfferDateExtensionRequests);
 router.post(
   '/custom-offers/:offerId/date-extension/:requestId/respond',
   respondToOfferDateExtension
@@ -196,6 +249,13 @@ router.post(
 
 // ── NEW: tipping ──────────────────────────────────────────────────────────────
 router.post('/custom-offers/:offerId/tip/checkout', createOfferTipCheckout);
+// Native Briteside checkout (NativeCheckoutModal) — prepare/intent/finalize split.
+router.post('/custom-offers/:offerId/tip/checkout/prepare', prepareOfferTipCheckout);
+router.post('/custom-offers/:offerId/tip/:tipId/native-intent', createOfferTipNativePaymentIntent);
+router.post(
+  '/custom-offers/:offerId/tip/:tipId/native-finalize',
+  finalizeOfferTipNativePayment
+);
 
 // ── NEW: disputes / resolution center ────────────────────────────────────────
 router.post('/custom-offers/:offerId/disputes', raiseOfferDispute);
@@ -219,6 +279,10 @@ router.put(
 router.delete('/products/:productId', deleteShopProduct);
 router.post('/products/:productId/view', recordShopProductView);
 router.post('/products/:productId/checkout', createShopCheckout);
+// Native Briteside checkout (NativeCheckoutModal) — prepare/intent/finalize split.
+router.post('/products/:productId/checkout/prepare', prepareShopNativeCheckout);
+router.post('/orders/:orderId/native-intent', createShopNativePaymentIntent);
+router.post('/orders/:orderId/native-finalize', finalizeShopNativePayment);
 // App-only — the web checkout above is untouched by these two.
 router.get('/products/:productId/iap/buy-options', getShopIapBuyOptions);
 router.post('/products/:productId/iap/purchase', finalizeShopIapPurchase);

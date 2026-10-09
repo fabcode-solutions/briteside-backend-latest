@@ -174,8 +174,20 @@ router.get('/discussion/:discussionId/replies', groupAccessMiddleware, getReplie
 router.get('/discussion/:discussionId/likes/count', groupAccessMiddleware, getDiscussionLikes);
 
 // POST /api/discussions - Create a new discussion
-router.post('/discussion', groupAccessMiddleware, createDiscussion);
-router.put('/discussion/:discussionId', groupAccessMiddleware, updateDiscussion);
+router.post(
+  '/discussion',
+  groupAccessMiddleware,
+  checkBlockedUrl('title', { optional: true, scanText: true }),
+  checkBlockedUrl('content', { optional: true, scanText: true }),
+  createDiscussion
+);
+router.put(
+  '/discussion/:discussionId',
+  groupAccessMiddleware,
+  checkBlockedUrl('title', { optional: true, scanText: true }),
+  checkBlockedUrl('content', { optional: true, scanText: true }),
+  updateDiscussion
+);
 router.delete('/discussion/:discussionId', groupAccessMiddleware, deleteDiscussion);
 
 // LIKES CRUD (TOGGLE)

@@ -12,6 +12,8 @@ import { FEATURES } from '../constants/features.js';
 import {
   createCheckout,
   prepareCheckout,
+  createNativePaymentIntent,
+  finalizeNativePayment,
   prepareIapPurchase,
   getIapTiers,
   finalizeIapPurchase,
@@ -53,6 +55,10 @@ router.post('/:paymentId/iap/finalize', finalizeIapPurchase);
 router.get('/pending/:talentProfileId', getPendingStatus);
 // Customer polls their own payment status
 router.get('/:paymentId/status', getPaymentStatus);
+// Native (non-Checkout-Session) card entry — Briteside-styled checkout UI
+// collects the card itself with Stripe Elements instead of embedding Stripe's own.
+router.post('/:paymentId/native-intent', createNativePaymentIntent);
+router.post('/:paymentId/native-finalize', finalizeNativePayment);
 // Talent reads received messages — requires priority_messaging feature
 router.get('/received', requireFeature(FEATURES.PRIORITY_MESSAGING), getReceivedMessages);
 router.get('/conversations', requireFeature(FEATURES.PRIORITY_MESSAGING), getPriorityConversations);

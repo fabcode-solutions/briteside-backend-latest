@@ -8,11 +8,10 @@
  * A shop product has ONE fixed price, so it's registered with the stores as
  * its own item. A priority-message checkout is priced per request (message +
  * extension units × the talent's fee, attachments, service fee), and the
- * stores only sell pre-registered prices — so this uses a fixed set of
- * CONSUMABLE price tiers, registered once (scripts/register-priority-message-
- * iap-tiers.js). A checkout is charged the smallest tier ≥ its web total ×
- * IAP_MARKUP_MULTIPLIER (the same 30% app markup the shop uses to cover
- * Apple's/Google's commission).
+ * stores only sell pre-registered prices — so this uses the shared
+ * CONSUMABLE price tiers (iapTiers.js, created on both stores automatically
+ * by IapCatalogService). A checkout is charged the smallest tier ≥ its web
+ * total × 1.3 (the 30% in-app markup covering Apple's/Google's commission).
  *
  * Flow:
  *   1. prepare()  — same validation/pricing/persistence as the Stripe flow
@@ -38,46 +37,31 @@ import { priorityMessagePayments } from '../db/schema/index.js';
 import ApiError from '../utils/api-error.js';
 import { PriorityMessageService } from './priorityMessage.service.js';
 import { ShopIapService } from './shop/shopIap.service.js';
-
-// Same app markup as the shop (ShopIapService's IAP_MARKUP_MULTIPLIER).
-export const PRIORITY_IAP_MARKUP_MULTIPLIER = 1.3;
-
-// Consumable price tiers, in USD cents. Changing this list means registering
-// the new tiers with both stores (and keeping the App's copy in sync —
-// briteside-expo/utils/priorityMessageIap.ts).
-export const PRIORITY_IAP_TIERS_CENTS = [
-  499, 999, 1499, 1999, 2499, 2999, 3999, 4999, 7499, 9999, 14999, 19999,
-];
+import {
+  getTierConfig,
+  productIdForTier,
+  tierForProductId,
+  tierForWebChargedCents,
+} from './iapTiers.js';
 
 export class PriorityMessageIapService {
-  /** The App's source of truth for tiers — it prices the "Pay in App"
-   * button from this (plus the store's own localized price per product),
-   * so the tier list is defined only here. */
+  /** The App's source of truth for tiers (shared with the shop — iapTiers.js). */
   static getTierConfig() {
-    return {
-      markupMultiplier: PRIORITY_IAP_MARKUP_MULTIPLIER,
-      tiers: PRIORITY_IAP_TIERS_CENTS.map(priceCents => ({
-        productId: this.productIdForTier(priceCents),
-        priceCents,
-      })),
-    };
+    return getTierConfig();
   }
 
-  /** Store product id for a tier — valid for both stores (Google: lowercase
-   * alphanumerics + '_' '.', ≤ 40 chars). */
   static productIdForTier(tierCents) {
-    return `pm_tier_${tierCents}`;
+    return productIdForTier(tierCents);
   }
 
   static tierForProductId(iapProductId) {
-    return PRIORITY_IAP_TIERS_CENTS.find(c => this.productIdForTier(c) === iapProductId) ?? null;
+    return tierForProductId(iapProductId);
   }
 
   /** Smallest tier covering the web total + app markup, or null if the total
    * is above the largest tier (the App then offers Pay on Web only). */
   static tierForWebChargedCents(webChargedCents) {
-    const target = Math.round(webChargedCents * PRIORITY_IAP_MARKUP_MULTIPLIER);
-    return PRIORITY_IAP_TIERS_CENTS.find(c => c >= target) ?? null;
+    return tierForWebChargedCents(webChargedCents);
   }
 
   static async prepare(senderId, input) {
@@ -117,7 +101,7 @@ export class PriorityMessageIapService {
     senderId,
     paymentId,
     store,
-    { transactionId, purchaseToken } = {},
+    { transactionId, purchaseToken, testOnly = false } = {},
     io = null
   ) {
     const payment = await db.query.priorityMessagePayments.findFirst({
@@ -148,6 +132,7 @@ export class PriorityMessageIapService {
         purchaseToken,
         payment.iapProductId
       );
+      await ShopIapService.rejectRealMoneyGooglePurchase(googlePurchase, testOnly);
       verifiedTransactionId = purchaseToken;
       googleOrderId = googlePurchase.orderId ?? null;
     } else {

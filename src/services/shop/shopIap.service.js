@@ -54,6 +54,7 @@ import config from '../../config/config.js';
 import logger from '../../config/logger.js';
 import { ShopOrderService } from './shopOrder.service.js';
 import { ShopProductService } from './shopProduct.service.js';
+import { productIdForTier, tierForWebChargedCents } from '../iapTiers.js';
 import { UserSpendService } from '../userSpend.service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -76,18 +77,19 @@ export class ShopIapService {
     );
   }
 
-  /** Both prices for the "How do you want to pay?" dialog — same fee formula
-   * as the web checkout (ShopOrderService.computeFees), just fed a 30%-higher
-   * base for the App option. */
+  /** Both prices for the "How do you want to pay?" dialog. In-app pays the
+   * shared price tier covering the exact web total × 1.3 (iapTiers.js) —
+   * appTierProductId is null when the total is above the largest tier
+   * (Pay on Web only). */
   static computePricingOptions(priceCents) {
     const web = ShopOrderService.computeFees(priceCents);
-    const appBasePriceCents = Math.round(priceCents * IAP_MARKUP_MULTIPLIER);
-    const app = ShopOrderService.computeFees(appBasePriceCents);
+    const tierCents = tierForWebChargedCents(web.chargedCents);
     return {
       webPriceCents: priceCents,
       webChargedCents: web.chargedCents,
-      appBasePriceCents,
-      appChargedCents: app.chargedCents,
+      appBasePriceCents: Math.round(priceCents * IAP_MARKUP_MULTIPLIER),
+      appChargedCents: tierCents,
+      appTierProductId: tierCents ? productIdForTier(tierCents) : null,
     };
   }
 
@@ -375,6 +377,36 @@ export class ShopIapService {
   }
 
   /**
+   * Test builds (development / preview) send `testOnly`. Google Play has no
+   * sandbox switch — it charges real money unless the buyer's account is a
+   * license tester — so a real-money purchase made from a test build is
+   * refunded (and revoked) here instead of being delivered. Test, promo-code
+   * and rewarded purchases carry `purchaseType`; real purchases omit it.
+   * (No Apple equivalent needed: development, preview and TestFlight builds
+   * always buy from the App Store Sandbox.)
+   */
+  static async rejectRealMoneyGooglePurchase(googlePurchase, testOnly) {
+    if (!testOnly || googlePurchase.purchaseType != null) return;
+    let refunded = false;
+    if (googlePurchase.orderId) {
+      try {
+        await this.refundGoogleOrder(googlePurchase.orderId);
+        refunded = true;
+      } catch (err) {
+        logger.error(
+          `[iap] refund of real-money test-build purchase ${googlePurchase.orderId} failed: ${err.message}`
+        );
+      }
+    }
+    throw new ApiError(
+      403,
+      refunded
+        ? 'Real-money purchases are blocked in test builds. This charge has been refunded — use a Google Play license tester account to test purchases.'
+        : 'Real-money purchases are blocked in test builds and this charge could not be refunded automatically. Please contact support.'
+    );
+  }
+
+  /**
    * Full refund of a Google Play order (Play doesn't support partial refunds
    * through the API). `revoke=true` also removes the purchase from the
    * buyer. Needs the service account's "Manage orders" permission.
@@ -469,12 +501,17 @@ export class ShopIapService {
     if (!product || product.deletedAt) throw new ApiError(404, 'Product not found');
     if (!this.isIapEligible(product)) return { iapEligible: false };
 
+    const pricing = this.computePricingOptions(product.priceCents);
     return {
-      iapEligible: true,
-      iapProductId: product.iapProductId,
-      appleReady: product.appleIapStatus === 'registered',
-      googleReady: product.googleIapStatus === 'registered',
-      ...this.computePricingOptions(product.priceCents),
+      // Above the largest tier → Pay on Web only.
+      iapEligible: !!pricing.appTierProductId,
+      // The shared price tier this purchase uses (iapTiers.js). Tiers are
+      // created on both stores automatically, so readiness is decided by the
+      // store itself on the device (whether it returns a price).
+      iapProductId: pricing.appTierProductId,
+      appleReady: true,
+      googleReady: true,
+      ...pricing,
     };
   }
 
@@ -490,7 +527,7 @@ export class ShopIapService {
     buyerId,
     productId,
     store,
-    { transactionId, purchaseToken, customerName, customerEmail } = {}
+    { transactionId, purchaseToken, customerName, customerEmail, testOnly = false } = {}
   ) {
     const product = await db.query.shopProducts.findFirst({
       where: eq(shopProducts.id, productId),
@@ -504,20 +541,29 @@ export class ShopIapService {
     const alreadyOwned = await ShopOrderService.findPaidOrder(buyerId, productId);
     if (alreadyOwned) throw new ApiError(409, 'You already own this product');
 
+    // The shared price tier this listing's price maps to (iapTiers.js) — the
+    // purchase must be for exactly that tier.
+    const pricing = this.computePricingOptions(product.priceCents);
+    const expectedProductId = pricing.appTierProductId;
+    if (!expectedProductId) {
+      throw new ApiError(400, 'This product is priced too high for in-app purchase');
+    }
+
     let verifiedTransactionId;
     let originalTransactionId = null;
 
     if (store === 'apple') {
       if (!transactionId) throw new ApiError(400, '`transactionId` is required');
       const decoded = await this.verifyAppleTransaction(transactionId);
-      if (decoded.productId !== product.iapProductId) {
+      if (decoded.productId !== expectedProductId) {
         throw new ApiError(400, "This transaction doesn't match this product");
       }
       verifiedTransactionId = decoded.transactionId;
       originalTransactionId = decoded.originalTransactionId ?? null;
     } else if (store === 'google') {
       if (!purchaseToken) throw new ApiError(400, '`purchaseToken` is required');
-      await this.verifyGooglePurchase(purchaseToken, product.iapProductId);
+      const googlePurchase = await this.verifyGooglePurchase(purchaseToken, expectedProductId);
+      await this.rejectRealMoneyGooglePurchase(googlePurchase, testOnly);
       verifiedTransactionId = purchaseToken;
     } else {
       throw new ApiError(400, '`store` must be "apple" or "google"');
@@ -526,7 +572,6 @@ export class ShopIapService {
     // Seller's cut is off the ORIGINAL price, unaffected by the app markup —
     // a seller earns the same whichever button the buyer tapped.
     const fees = ShopOrderService.computeFees(product.priceCents);
-    const pricing = this.computePricingOptions(product.priceCents);
     const settings = await ShopProductService.getShopSettings(product.userId);
 
     let order;
@@ -555,7 +600,7 @@ export class ShopIapService {
           customerName: customerName?.trim() || null,
           customerEmail: customerEmail?.trim() || null,
           purchaseChannel: store === 'apple' ? 'apple_iap' : 'google_iap',
-          iapProductId: product.iapProductId,
+          iapProductId: expectedProductId,
           iapTransactionId: verifiedTransactionId,
           iapOriginalTransactionId: originalTransactionId,
           iapVerifiedAt: new Date(),
@@ -581,7 +626,10 @@ export class ShopIapService {
 
     if (store === 'google') {
       try {
-        await this.acknowledgeGooglePurchase(purchaseToken, product.iapProductId);
+        // Consumable tier — the App consumes it (finishTransaction), which
+        // also acknowledges; acknowledging here first is harmless and covers
+        // an App killed before it could finish.
+        await this.acknowledgeGooglePurchase(purchaseToken, expectedProductId);
         await db
           .update(shopOrders)
           .set({ iapAcknowledged: true })

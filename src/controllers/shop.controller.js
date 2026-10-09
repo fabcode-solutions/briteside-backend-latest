@@ -162,6 +162,34 @@ export const createShopCheckout = catchAsync(async (req, res) => {
   });
 });
 
+// ── Native Briteside checkout (NativeCheckoutModal) ─────────────────────────
+
+export const prepareShopNativeCheckout = catchAsync(async (req, res) => {
+  const result = await ShopOrderService.prepareNativeCheckout(
+    req.user.id,
+    req.params.productId,
+    req.body?.platform,
+    { customerName: req.body?.customerName, customerEmail: req.body?.customerEmail }
+  );
+  res.status(201).json({ success: true, data: result });
+});
+
+export const createShopNativePaymentIntent = catchAsync(async (req, res) => {
+  const result = await ShopOrderService.createNativePaymentIntent(req.params.orderId, req.user.id);
+  res.json({ success: true, data: result });
+});
+
+export const finalizeShopNativePayment = catchAsync(async (req, res) => {
+  const { paymentIntentId } = req.body;
+  if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
+  const result = await ShopOrderService.finalizeNativePayment(
+    req.params.orderId,
+    req.user.id,
+    paymentIntentId
+  );
+  res.json({ success: true, data: result });
+});
+
 // ── In-app purchase (App-only — the web checkout above is untouched) ───────
 
 export const getShopIapBuyOptions = catchAsync(async (req, res) => {
@@ -170,12 +198,14 @@ export const getShopIapBuyOptions = catchAsync(async (req, res) => {
 });
 
 export const finalizeShopIapPurchase = catchAsync(async (req, res) => {
-  const { store, transactionId, purchaseToken, customerName, customerEmail } = req.body || {};
+  const { store, transactionId, purchaseToken, customerName, customerEmail, testOnly } =
+    req.body || {};
   const result = await ShopIapService.finalizePurchase(req.user.id, req.params.productId, store, {
     transactionId,
     purchaseToken,
     customerName,
     customerEmail,
+    testOnly: testOnly === true,
   });
   res.json({ success: true, message: 'Purchase confirmed', data: result });
 });
@@ -334,6 +364,35 @@ export const acceptCustomOfferCheckout = catchAsync(async (req, res) => {
   res.json({ success: true, message: 'Checkout ready', data: result });
 });
 
+// ── Native Briteside checkout (NativeCheckoutModal) ─────────────────────────
+
+export const prepareCustomOfferAcceptCheckout = catchAsync(async (req, res) => {
+  const result = await ShopCustomOfferService.prepareNativeAcceptCheckout(
+    req.user.id,
+    req.params.offerId
+  );
+  res.status(201).json({ success: true, data: result });
+});
+
+export const createCustomOfferAcceptNativePaymentIntent = catchAsync(async (req, res) => {
+  const result = await ShopCustomOfferService.createNativeAcceptPaymentIntent(
+    req.params.offerId,
+    req.user.id
+  );
+  res.json({ success: true, data: result });
+});
+
+export const finalizeCustomOfferAcceptNativePayment = catchAsync(async (req, res) => {
+  const { paymentIntentId } = req.body;
+  if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
+  const result = await ShopCustomOfferService.finalizeNativeAcceptPayment(
+    req.params.offerId,
+    req.user.id,
+    paymentIntentId
+  );
+  res.json({ success: true, data: result });
+});
+
 export const cancelCustomOffer = catchAsync(async (req, res) => {
   const io = req.app.get('io');
   const offer = await ShopCustomOfferService.cancelOffer(
@@ -377,6 +436,35 @@ export const payRemainingCustomOfferCheckout = catchAsync(async (req, res) => {
   res.json({ success: true, message: 'Checkout ready', data: result });
 });
 
+// ── Native Briteside checkout (NativeCheckoutModal) ─────────────────────────
+
+export const prepareCustomOfferRemainderCheckout = catchAsync(async (req, res) => {
+  const result = await ShopCustomOfferService.prepareNativeRemainderCheckout(
+    req.user.id,
+    req.params.offerId
+  );
+  res.status(201).json({ success: true, data: result });
+});
+
+export const createCustomOfferRemainderNativePaymentIntent = catchAsync(async (req, res) => {
+  const result = await ShopCustomOfferService.createNativeRemainderPaymentIntent(
+    req.params.offerId,
+    req.user.id
+  );
+  res.json({ success: true, data: result });
+});
+
+export const finalizeCustomOfferRemainderNativePayment = catchAsync(async (req, res) => {
+  const { paymentIntentId } = req.body;
+  if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
+  const result = await ShopCustomOfferService.finalizeNativeRemainderPayment(
+    req.params.offerId,
+    req.user.id,
+    paymentIntentId
+  );
+  res.json({ success: true, data: result });
+});
+
 // Funds EXACTLY one milestone of a 'milestones' offer — never a remaining
 // balance. Every guard (ownership, offer status, payment mode, stage
 // sequencing, seller payout readiness) is enforced in the service.
@@ -388,6 +476,35 @@ export const fundCustomOfferMilestone = catchAsync(async (req, res) => {
     req.body?.platform
   );
   res.json({ success: true, message: 'Checkout ready', data: result });
+});
+
+export const prepareCustomOfferMilestoneCheckout = catchAsync(async (req, res) => {
+  const result = await ShopCustomOfferService.prepareNativeMilestoneCheckout(
+    req.user.id,
+    req.params.offerId,
+    req.params.milestoneId
+  );
+  res.status(201).json({ success: true, data: result });
+});
+
+export const createCustomOfferMilestoneNativePaymentIntent = catchAsync(async (req, res) => {
+  const result = await ShopCustomOfferService.createNativeMilestonePaymentIntent(
+    req.params.offerId,
+    req.params.milestoneId,
+    req.user.id
+  );
+  res.json({ success: true, data: result });
+});
+
+export const finalizeCustomOfferMilestoneNativePayment = catchAsync(async (req, res) => {
+  const { paymentIntentId } = req.body;
+  if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
+  const result = await ShopCustomOfferService.finalizeNativeMilestonePayment(
+    req.params.milestoneId,
+    req.user.id,
+    paymentIntentId
+  );
+  res.json({ success: true, data: result });
 });
 
 // Buyer approves one delivered milestone. Starts that stage's 48h payout hold
@@ -456,7 +573,18 @@ export const requestOfferDateExtension = catchAsync(async (req, res) => {
     { requestedDueDate: req.body?.requestedDueDate, reason: req.body?.reason },
     io
   );
-  res.status(201).json({ success: true, message: 'Date extension requested', data: { request } });
+  res.status(201).json({ success: true, message: 'Delivery date updated', data: { request } });
+});
+
+export const requestOfferMoreTime = catchAsync(async (req, res) => {
+  const io = req.app.get('io');
+  const request = await ShopCustomOfferService.requestMoreTime(
+    req.user.id,
+    req.params.offerId,
+    { requestedDueDate: req.body?.requestedDueDate, reason: req.body?.reason },
+    io
+  );
+  res.status(201).json({ success: true, message: 'Request sent', data: { request } });
 });
 
 export const respondToOfferDateExtension = catchAsync(async (req, res) => {
@@ -470,11 +598,42 @@ export const respondToOfferDateExtension = catchAsync(async (req, res) => {
   );
   res.json({ success: true, message: `Request ${request.status}`, data: { request } });
 });
+
 export const createOfferTipCheckout = catchAsync(async (req, res) => {
   const result = await ShopCustomOfferService.createTipCheckout(req.user.id, req.params.offerId, {
     amountCents: req.body?.amountCents,
   });
   res.json({ success: true, message: 'Checkout ready', data: result });
+});
+
+// ── Native Briteside checkout (NativeCheckoutModal) ─────────────────────────
+
+export const prepareOfferTipCheckout = catchAsync(async (req, res) => {
+  const result = await ShopCustomOfferService.prepareNativeTipCheckout(
+    req.user.id,
+    req.params.offerId,
+    req.body?.amountCents
+  );
+  res.status(201).json({ success: true, data: result });
+});
+
+export const createOfferTipNativePaymentIntent = catchAsync(async (req, res) => {
+  const result = await ShopCustomOfferService.createNativeTipPaymentIntent(
+    req.params.tipId,
+    req.user.id
+  );
+  res.json({ success: true, data: result });
+});
+
+export const finalizeOfferTipNativePayment = catchAsync(async (req, res) => {
+  const { paymentIntentId } = req.body;
+  if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
+  const result = await ShopCustomOfferService.finalizeNativeTipPayment(
+    req.params.tipId,
+    req.user.id,
+    paymentIntentId
+  );
+  res.json({ success: true, data: result });
 });
 
 export const raiseOfferDispute = catchAsync(async (req, res) => {

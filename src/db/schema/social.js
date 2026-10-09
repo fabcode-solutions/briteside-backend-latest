@@ -368,6 +368,7 @@ export const stories = pgTable(
     visibility: varchar('visibility', { length: 20 }).notNull().default('followers'), // 'public' | 'followers'
     commentsDisabled: boolean('comments_disabled').default(false).notNull(),
     hideViewCount: boolean('hide_view_count').default(false).notNull(),
+    tags: json('tags').default([]), // Array of tag strings for quick access
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -783,6 +784,28 @@ export const postTags = pgTable(
     index('idx_post_tags_confidence').on(table.confidence),
     index('idx_post_tags_source').on(table.source),
     uniqueIndex('idx_post_tags_unique').on(table.postId, table.categoryId),
+  ]
+);
+
+// Story tags for interest categorization — mirrors postTags
+export const storyTags = pgTable(
+  'story_tags',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    storyId: uuid('story_id')
+      .notNull()
+      .references(() => stories.id, { onDelete: 'cascade' }),
+    categoryId: uuid('category_id')
+      .notNull()
+      .references(() => interestCategories.id, { onDelete: 'cascade' }),
+    confidence: integer('confidence').default(100).notNull(), // AI confidence score 0-100
+    source: varchar('source', { length: 20 }).default('manual').notNull(), // 'manual', 'ai', 'hashtag'
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    index('idx_story_tags_story').on(table.storyId),
+    index('idx_story_tags_category').on(table.categoryId),
+    uniqueIndex('idx_story_tags_unique').on(table.storyId, table.categoryId),
   ]
 );
 

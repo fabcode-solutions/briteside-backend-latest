@@ -1252,6 +1252,7 @@ export const createStory = catchAsync(async (req, res) => {
     hideViewCount,
     collectionId,
     mentionedUserIds,
+    tags,
   } = req.body;
 
   if (!mediaUrl) {
@@ -1271,6 +1272,7 @@ export const createStory = catchAsync(async (req, res) => {
     commentsDisabled: commentsDisabled ?? meta?.commentsDisabled ?? false,
     hideViewCount: hideViewCount ?? meta?.hideViewCount ?? false,
     mentionedUserIds: Array.isArray(mentionedUserIds) ? mentionedUserIds : [],
+    tags: Array.isArray(tags) ? tags : [],
   });
 
   if (collectionId) {

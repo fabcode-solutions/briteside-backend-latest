@@ -11,6 +11,8 @@ import {
   storyShares,
   storyPolls,
   storyPollResponses,
+  storyTags,
+  interestCategories,
   mentions,
 } from '../../db/schema/index.js';
 import { storyCollections, storyCollectionItems } from '../../db/schema/storyCollections.js';
@@ -97,6 +99,20 @@ export class StoryService {
       .limit(1);
     return row.length > 0;
   }
+  static async addTagsToStory(storyId, tagCategoryIds, source = 'manual') {
+    if (!storyId || !Array.isArray(tagCategoryIds)) return;
+    // Remove existing tags for this story (if updating)
+    await db.delete(storyTags).where(eq(storyTags.storyId, storyId));
+    if (tagCategoryIds.length === 0) return;
+    const tagRows = tagCategoryIds.map(categoryId => ({
+      storyId,
+      categoryId,
+      confidence: 100, // default confidence
+      source,
+    }));
+    await db.insert(storyTags).values(tagRows).returning();
+  }
+
   static async createStory(
     userId,
     {
@@ -108,6 +124,7 @@ export class StoryService {
       commentsDisabled,
       hideViewCount,
       mentionedUserIds,
+      tags,
     }
   ) {
     const VALID_VISIBILITY = ['public', 'followers'];
@@ -122,6 +139,14 @@ export class StoryService {
       texts: [caption],
     });
 
+    let tagNames = [];
+    if (Array.isArray(tags) && tags.length > 0) {
+      const tagCategories = await db.query.interestCategories.findMany({
+        where: inArray(interestCategories.id, tags),
+      });
+      tagNames = tagCategories.map(cat => cat.name);
+    }
+
     const [story] = await db
       .insert(stories)
       .values({
@@ -133,9 +158,14 @@ export class StoryService {
         visibility: resolvedVisibility,
         commentsDisabled: commentsDisabled ?? false,
         hideViewCount: hideViewCount ?? false,
+        tags: tagNames,
         expiresAt,
       })
       .returning();
+
+    if (Array.isArray(tags) && tags.length > 0) {
+      await StoryService.addTagsToStory(story.id, tags, 'manual');
+    }
 
     await MediaModerationService.adoptMediaVerdicts({
       entityType: MEDIA_ENTITY.STORY,

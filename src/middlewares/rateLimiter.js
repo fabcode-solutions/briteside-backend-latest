@@ -89,6 +89,16 @@ const bulkInviteLimiter = createLimiter({
   message: defaultMsg('Bulk invite limit reached. You can send up to 3 bulk invites per day.'),
 });
 
+// "Invite friends" (platform-wide, email-based) — separate from bulkInviteLimiter,
+// which gates the CSV-upload bulk invite to a specific event/group.
+const inviteLimiter = createLimiter({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: process.env.NODE_ENV !== 'production' ? 1000 : 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: defaultMsg('Too many invites sent. Please try again tomorrow.'),
+});
+
 const importPresignLimiter = createLimiter({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: process.env.NODE_ENV !== 'production' ? 1000 : 3,
@@ -136,6 +146,7 @@ export {
   verifyOtpLimiter,
   defaultLimiter,
   bulkInviteLimiter,
+  inviteLimiter,
   importPresignLimiter,
   analyticsTrackLimiter,
   analyticsRollupTriggerLimiter,
