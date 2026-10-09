@@ -10,6 +10,9 @@ import {
   createSmartCheckoutSession,
   createTicketPaymentSheet,
   completeTicketPaymentSheet,
+  prepareNativeTicketOrder,
+  createNativeTicketPaymentIntent,
+  finalizeNativeTicketPayment,
   getPublishableKey,
   checkRefundEligibility,
   applyRefund,
@@ -36,6 +39,11 @@ router.post('/smart-checkout-session', authMiddleware, createSmartCheckoutSessio
 // webhook).
 router.post('/ticket-payment-sheet', authMiddleware, createTicketPaymentSheet);
 router.post('/ticket-payment-sheet/complete', authMiddleware, completeTicketPaymentSheet);
+// Native WEB checkout (Briteside-themed card form) — same order/payment
+// primitives as the PaymentSheet flow above, split into prepare/intent/finalize.
+router.post('/tickets/prepare', authMiddleware, prepareNativeTicketOrder);
+router.post('/tickets/:orderId/native-intent', authMiddleware, createNativeTicketPaymentIntent);
+router.post('/tickets/:orderId/native-finalize', authMiddleware, finalizeNativeTicketPayment);
 // Generic "pay a saved card directly" — currently only wired up for
 // priority messages (sourceType 'priority_message').
 router.get('/saved-card', authMiddleware, getSavedCard);

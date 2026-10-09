@@ -86,7 +86,7 @@ export class ShopOrderService {
   }
 
   // ── Shared validation + DB persistence for both checkout paths ────────────
-  static async _prepareOrder(buyerId, productId, platform, customerInfo = {}) {
+  static async _prepareOrder(buyerId, productId, platform, customerInfo = {}, { native = false } = {}) {
     const product = await db.query.shopProducts.findFirst({
       where: eq(shopProducts.id, productId),
     });
@@ -107,7 +107,11 @@ export class ShopOrderService {
     // its pre-payment state, so it would strand at 'pending' forever.
     if (product.listingType === 'service' && product.priceCents > 0) {
       const { ShopCustomOfferService } = await import('./shopCustomOffer.service.js');
-      return { redirect: await ShopCustomOfferService.createListingPurchase(buyerId, product, platform) };
+      return {
+        redirect: native
+          ? await ShopCustomOfferService.prepareNativeListingPurchase(buyerId, product)
+          : await ShopCustomOfferService.createListingPurchase(buyerId, product, platform),
+      };
     }
 
     const alreadyOwned = await this.findPaidOrder(buyerId, productId);
@@ -297,6 +301,83 @@ export class ShopOrderService {
     return nativeRedirect
       ? { free: false, checkoutUrl: stripeSession.url, orderId: order.id }
       : { free: false, clientSecret: stripeSession.client_secret, orderId: order.id };
+  }
+
+  // ── Native Briteside checkout (NativeCheckoutModal) ───────────────────────
+  // Same _prepareOrder() pending-state row as the hosted-Checkout path above
+  // — just a raw PaymentIntent instead of a Checkout Session, and fulfillment
+  // reuses handlePaymentWebhook via a minimal shimmed "session" object (same
+  // trick as the ticket/talent-session native flows).
+
+  /** Prepare-only step — no Stripe call. Free products and service-listing
+   *  redirects are returned as-is (same shape as createCheckout) since
+   *  neither needs a PaymentIntent; only a real paid product returns a
+   *  `paymentId` for the modal to drive. */
+  static async prepareNativeCheckout(buyerId, productId, platform, customerInfo = {}) {
+    const prep = await this._prepareOrder(buyerId, productId, platform, customerInfo, {
+      native: true,
+    });
+    if (prep.free) return { free: true, orderId: prep.orderId };
+    if (prep.redirect) return prep.redirect;
+    return { paymentId: prep.order.id };
+  }
+
+  static async createNativePaymentIntent(orderId, buyerId) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+
+    const order = await db.query.shopOrders.findFirst({ where: eq(shopOrders.id, orderId) });
+    if (!order) throw new ApiError(404, 'Order not found');
+    if (order.buyerId !== buyerId) throw new ApiError(403, 'This order is not yours');
+    if (order.status !== 'pending') {
+      throw new ApiError(409, `This order is already ${order.status}`);
+    }
+
+    const buyer = await db.query.users.findFirst({
+      where: eq(users.id, buyerId),
+      columns: { email: true },
+    });
+
+    const intent = await stripe.paymentIntents.create({
+      amount: order.chargedCents,
+      currency: 'usd',
+      ...((order.customerEmail || buyer?.email)?.trim()
+        ? { receipt_email: (order.customerEmail || buyer.email).trim() }
+        : {}),
+      metadata: {
+        type: 'shop',
+        orderId: order.id,
+        productId: order.productId,
+        buyerId,
+        sellerId: order.sellerId,
+      },
+      // No transfer_data/application_fee_amount — same hold-then-payout rule
+      // as _createHostedOrderSession: the seller's cut is credited to the
+      // ledger and paid out later, not split at charge time.
+    });
+
+    return { clientSecret: intent.client_secret, paymentId: order.id };
+  }
+
+  static async finalizeNativePayment(orderId, buyerId, paymentIntentId) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+
+    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (intent.metadata?.orderId !== orderId || intent.metadata?.buyerId !== buyerId) {
+      throw new ApiError(409, 'Payment does not match this order');
+    }
+    if (intent.status !== 'succeeded') {
+      throw new ApiError(409, `Payment is not completed yet (status: ${intent.status})`);
+    }
+
+    // handlePaymentWebhook only reads .metadata.orderId and .payment_intent
+    // off its "session" argument — a real Checkout Session is not required.
+    await this.handlePaymentWebhook({
+      id: null,
+      payment_intent: intent.id,
+      metadata: intent.metadata,
+    });
+
+    return { orderId };
   }
 
   /**

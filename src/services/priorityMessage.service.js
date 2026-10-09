@@ -908,6 +908,88 @@ export class PriorityMessageService {
     }
   }
 
+  /**
+   * Native (non-Checkout-Session) card entry — step 1 of 2. Creates a
+   * PaymentIntent for an already-persisted pending payment (from prepare())
+   * so the frontend can collect a new card itself with Stripe Elements and
+   * confirm it there, instead of embedding Stripe's own Checkout UI.
+   * Mirrors chargeExistingPendingPayment()'s PaymentIntent shape, minus
+   * `confirm`/`off_session`/`payment_method` — this card doesn't exist yet.
+   */
+  static async createNativePaymentIntent(paymentId, requesterId) {
+    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+
+    const ctx = await this._loadPendingPaymentContext(paymentId);
+    const { payment, profile, chargedCents } = ctx;
+
+    if (payment.senderId !== requesterId) throw new ApiError(403, 'Forbidden');
+    if (payment.status !== 'pending') {
+      throw new ApiError(409, 'This payment is no longer pending');
+    }
+
+    const intent = await stripe.paymentIntents.create({
+      amount: chargedCents,
+      currency: 'usd',
+      automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
+      metadata: {
+        type: 'priority_message',
+        feature: 'priority_message',
+        paymentId: payment.id,
+        senderId: requesterId,
+        talentProfileId: payment.talentProfileId,
+        talentUserId: profile.userId,
+      },
+    });
+
+    await db
+      .update(priorityMessagePayments)
+      .set({ stripePaymentIntent: intent.id, updatedAt: new Date() })
+      .where(eq(priorityMessagePayments.id, payment.id));
+
+    return { clientSecret: intent.client_secret, paymentId: payment.id };
+  }
+
+  /**
+   * Native card entry — step 2 of 2. The frontend has already confirmed the
+   * PaymentIntent with Stripe.js directly (new card, client-side 3DS if
+   * needed); this verifies that directly against Stripe — never trusting the
+   * client's own claim — then delivers exactly like
+   * chargeExistingPendingPayment()'s success path does.
+   */
+  static async finalizeNativePayment(paymentId, requesterId, paymentIntentId, io = null) {
+    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+    if (!paymentIntentId) throw new ApiError(400, '`paymentIntentId` is required');
+
+    const ctx = await this._loadPendingPaymentContext(paymentId);
+    const { payment, profile } = ctx;
+
+    if (payment.senderId !== requesterId) throw new ApiError(403, 'Forbidden');
+    if (payment.status === 'paid') {
+      return { success: true, paymentId: payment.id };
+    }
+    if (payment.status !== 'pending') {
+      throw new ApiError(409, 'This payment is no longer pending');
+    }
+
+    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (intent.metadata?.paymentId !== paymentId || intent.metadata?.senderId !== requesterId) {
+      throw new ApiError(403, 'Payment intent does not match this payment');
+    }
+    if (intent.status !== 'succeeded') {
+      throw new ApiError(402, `Payment has not completed (status: ${intent.status})`);
+    }
+
+    await this._deliverPaidPayment(paymentId, {
+      senderId: requesterId,
+      talentUserId: profile.userId,
+      io,
+      paidFields: { stripePaymentIntent: intent.id },
+      spendFields: { stripePaymentIntentId: intent.id },
+    });
+
+    return { success: true, paymentId: payment.id };
+  }
+
   // ── Handle Stripe webhook after payment confirmed ─────────────────────────
 
   /**
