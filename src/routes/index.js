@@ -44,10 +44,13 @@ import giftCodeRoute from './giftCode.route.js';
 import importRoute from './import.route.js';
 import shopRoute from './shop.route.js';
 import impersonationRoutes from './impersonation.routes.js';
+import inviteRoute from './invite.route.js';
 const router = Router();
 
 // contact form (public)
 router.use('/contact', contactRoute);
+// invite friends (email)
+router.use('/invite', inviteRoute);
 // universal search (public)
 router.use('/search', searchRoute);
 // auth routes

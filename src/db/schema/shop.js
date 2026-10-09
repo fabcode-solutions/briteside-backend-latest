@@ -553,9 +553,14 @@ export const shopCustomServiceOffers = pgTable(
     description: text('description').notNull(),
     priceCents: integer('price_cents').notNull(),
     revisionsUsedCount: integer('revisions_used_count').notNull().default(0),
-     turnaround: varchar('turnaround', { length: 100 }), 
+     turnaround: varchar('turnaround', { length: 100 }),
     turnaroundMinutes: integer('turnaround_minutes'),
     dueDate: timestamp('due_date', { withTimezone: true }),
+    // Set whenever a date extension is applied (requestDateExtension), so the
+    // UI can show a "New delivery date in..." countdown the same way
+    // revision_requested shows "Redeliver in...". Cleared once work is
+    // delivered — the delivered-state countdown takes over at that point.
+    dueDateExtendedAt: timestamp('due_date_extended_at', { withTimezone: true }),
     deliverables: text('deliverables'),
 deliveredAt: timestamp('delivered_at', { withTimezone: true }),
     revisionsIncluded: boolean('revisions_included').notNull().default(false),

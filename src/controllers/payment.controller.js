@@ -184,6 +184,83 @@ export const completeTicketPaymentSheet = catchAsync(async (req, res) => {
   res.json({ success: true, data: result });
 });
 
+// ── Native web checkout (Briteside-themed card form, not PaymentSheet) ──────
+// Mirrors the priority-message native-checkout split: a "prepare" step that
+// creates the pending order (no Stripe call yet), then a lazy intent-creation
+// step on submit, then a synchronous finalize — reusing the exact same
+// service methods the mobile PaymentSheet flow already proved out above.
+
+/** Creates the order only — no Stripe call yet. Equivalent to the `paymentId`
+ *  returned by other flows' prepareCheckout. */
+export const prepareNativeTicketOrder = catchAsync(async (req, res) => {
+  const {
+    eventId,
+    ticketSelections = [],
+    merchandiseSelections = [],
+    holderName,
+    holderEmail,
+    holderPhone,
+    billingAddress,
+  } = req.body;
+
+  if (!eventId) throw new ApiError(400, 'eventId is required');
+  if (!ticketSelections || ticketSelections.length === 0) {
+    throw new ApiError(400, 'Ticket selections required');
+  }
+
+  const order = await OrderService.createOrder(
+    req.user.id,
+    eventId,
+    ticketSelections,
+    merchandiseSelections,
+    { holderName, holderPhone, holderEmail, billingAddress }
+  );
+
+  res.status(201).json({ success: true, data: { paymentId: order.id } });
+});
+
+/** Creates the PaymentIntent for an already-prepared order. */
+export const createNativeTicketPaymentIntent = catchAsync(async (req, res) => {
+  const { orderId } = req.params;
+  const { holderName, holderEmail, holderPhone, eventScheduleId } = req.body;
+
+  const order = await OrderService.getOrderById(orderId, req.user.id);
+  if (order.status !== 'pending') {
+    throw new ApiError(409, `This order is already ${order.status}`);
+  }
+
+  const result = await PaymentService.createTicketPaymentSheet(order, {
+    holderName: holderName || null,
+    holderEmail: holderEmail || null,
+    holderPhone: holderPhone || null,
+    eventScheduleId: eventScheduleId || null,
+  });
+
+  res.json({
+    success: true,
+    data: { clientSecret: result.paymentIntentClientSecret, paymentId: orderId },
+  });
+});
+
+/** Verifies the PaymentIntent with Stripe directly and issues tickets —
+ *  identical idempotent claim-and-issue path as completeTicketPaymentSheet. */
+export const finalizeNativeTicketPayment = catchAsync(async (req, res) => {
+  const { orderId } = req.params;
+  const { paymentIntentId } = req.body;
+  if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
+
+  const opts = { userId: req.user.id };
+  let result = await PaymentService.processPaymentSheetIntent(paymentIntentId, opts);
+  if (result.orderId !== orderId) throw new ApiError(409, 'Payment does not match this order');
+
+  for (let i = 0; i < 10 && result.status !== 'paid'; i++) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    result = await PaymentService.processPaymentSheetIntent(paymentIntentId, opts);
+  }
+
+  res.json({ success: true, data: result });
+});
+
 export const getPublishableKey = catchAsync(async (req, res) => {
   const publishableKey = PaymentService.getPublishableKey
     ? PaymentService.getPublishableKey()

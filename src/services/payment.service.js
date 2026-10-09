@@ -13,6 +13,7 @@ import {
 import { and, eq, isNull } from 'drizzle-orm';
 import ApiError from '../utils/api-error.js';
 import { StripeConnectService, getReserveRate } from './stripeConnect.service.js';
+import { SubscriptionService } from './subscription.service.js';
 
 let stripe = null;
 if (config.stripe?.secretKey) {
@@ -58,7 +59,7 @@ export class PaymentService {
     if (!order.userId) throw new ApiError(401, 'Sign in to pay in the app');
 
     const charge = await this._computeOrderCharge(order);
-    const stripeCustomerId = await StripeSmartCheckoutService.getOrCreateCustomer(order.userId);
+    const stripeCustomerId = await SubscriptionService.getOrCreateStripeCustomer(order.userId);
     const publishableKey = this.getPublishableKey();
     if (!publishableKey) throw new ApiError(503, 'Payment provider not configured');
 

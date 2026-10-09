@@ -78,6 +78,36 @@ export const prepareCheckout = catchAsync(async (req, res) => {
 });
 
 /**
+ * POST /priority-messages/:paymentId/native-intent
+ * Native Briteside-styled checkout, step 1: creates a PaymentIntent for a
+ * pending payment (from prepareCheckout) so the frontend can collect a new
+ * card itself with Stripe Elements, instead of Stripe's hosted Checkout UI.
+ */
+export const createNativePaymentIntent = catchAsync(async (req, res) => {
+  const result = await PriorityMessageService.createNativePaymentIntent(
+    req.params.paymentId,
+    req.user.id
+  );
+  res.status(201).json({ success: true, data: result });
+});
+
+/**
+ * POST /priority-messages/:paymentId/native-finalize
+ * Native checkout step 2: the frontend already confirmed the PaymentIntent
+ * with Stripe.js; this verifies it directly against Stripe and delivers the
+ * message(s) on success.
+ */
+export const finalizeNativePayment = catchAsync(async (req, res) => {
+  const result = await PriorityMessageService.finalizeNativePayment(
+    req.params.paymentId,
+    req.user.id,
+    req.body.paymentIntentId,
+    req.app.get('io')
+  );
+  res.json({ success: true, data: result });
+});
+
+/**
  * POST /priority-messages/iap/prepare
  * "Pay in App" (native App Store / Google Play sheet). Same body as
  * createCheckout; creates the pending payment and picks the consumable price

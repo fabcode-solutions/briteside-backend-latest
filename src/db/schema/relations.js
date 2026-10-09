@@ -102,6 +102,7 @@ import {
   interestCategories,
   userInterests,
   postTags,
+  storyTags,
   eventLikes,
   reviewHelpfulness,
   discussions,
@@ -1359,6 +1360,7 @@ export const storiesRelations = relations(stories, ({ one, many }) => ({
   comments: many(storyComments),
   shares: many(storyShares),
   polls: many(storyPolls),
+  tags: many(storyTags),
 }));
 
 export const storyViewsRelations = relations(storyViews, ({ one }) => ({
@@ -1666,6 +1668,7 @@ export const mentionsRelations = relations(mentions, ({ one }) => ({
 export const interestCategoriesRelations = relations(interestCategories, ({ many }) => ({
   userInterests: many(userInterests),
   postTags: many(postTags),
+  storyTags: many(storyTags),
 }));
 
 export const userInterestsRelations = relations(userInterests, ({ one }) => ({
@@ -1686,6 +1689,17 @@ export const postTagsRelations = relations(postTags, ({ one }) => ({
   }),
   category: one(interestCategories, {
     fields: [postTags.categoryId],
+    references: [interestCategories.id],
+  }),
+}));
+
+export const storyTagsRelations = relations(storyTags, ({ one }) => ({
+  story: one(stories, {
+    fields: [storyTags.storyId],
+    references: [stories.id],
+  }),
+  category: one(interestCategories, {
+    fields: [storyTags.categoryId],
     references: [interestCategories.id],
   }),
 }));

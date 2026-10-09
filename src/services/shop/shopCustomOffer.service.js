@@ -16,6 +16,7 @@ import { getRedirectUrls, isNativePlatform } from '../../utils/redirect-urls.js'
 import { UserSpendService } from '../userSpend.service.js';
 import { createNotification } from '../notification.service.js';
 import { ShopOrderService } from './shopOrder.service.js';
+import { SubscriptionService } from '../subscription.service.js';
 import { calculatePlatformAndServiceFeeCents } from '../../utils/orderProcessingFee.js';
 import { PayoutLedgerService } from '../payoutLedger.service.js';
 import { emitSocialChat } from '../../socket/emitter.js';
@@ -298,6 +299,7 @@ export class ShopCustomOfferService {
         status: shopCustomServiceOffers.status,
         deliveryState: shopCustomServiceOffers.deliveryState,
         deliveredAt: shopCustomServiceOffers.deliveredAt,
+        dueDateExtendedAt: shopCustomServiceOffers.dueDateExtendedAt,
         chargedCents: shopCustomServiceOffers.chargedCents,
         basePriceCoveredCents: shopCustomServiceOffers.basePriceCoveredCents, // NEW — lets the frontend show the real remaining balance instead of guessing from paymentMode
         expiresAt: shopCustomServiceOffers.expiresAt,
@@ -352,6 +354,7 @@ export class ShopCustomOfferService {
         attachments: shopCustomServiceOffers.attachments,
         deliveryState: shopCustomServiceOffers.deliveryState, // NEW
         deliveredAt: shopCustomServiceOffers.deliveredAt,
+        dueDateExtendedAt: shopCustomServiceOffers.dueDateExtendedAt,
         revisionsUsedCount: shopCustomServiceOffers.revisionsUsedCount,
         status: shopCustomServiceOffers.status,
         chargedCents: shopCustomServiceOffers.chargedCents,
@@ -870,7 +873,14 @@ export class ShopCustomOfferService {
    * createMilestoneFundingCheckout. This closes the temporary gap where this
    * path charged the full price for that mode.
    */
-  static async createListingPurchase(buyerId, product, platform) {
+  /** Validates the seller can accept payments and inserts the 'pending'
+   *  shopCustomServiceOffers row for a buyer-initiated listing purchase —
+   *  shared by the hosted-checkout path below and the native-checkout
+   *  prepare step, which stops here instead of also creating a Checkout
+   *  Session (the native accept-checkout intent/finalize endpoints are
+   *  reused for the rest since this offer is, from here on, indistinguishable
+   *  from any other pending offer). */
+  static async _createListingOffer(buyerId, product) {
     if (!stripe) throw new ApiError(503, 'Payments are not configured');
 
     // Same live re-check createAcceptCheckout does: chargesEnabled only
@@ -930,6 +940,22 @@ export class ShopCustomOfferService {
         expiresAt: new Date(Date.now() + 30 * 60 * 1000),
       })
       .returning();
+
+    return offer;
+  }
+
+  /** Native-checkout equivalent of createListingPurchase — creates the offer
+   *  row only; the buyer's own generic accept-checkout native-intent/finalize
+   *  endpoints take it from here, since this offer is a normal pending
+   *  shopCustomServiceOffers row like any other from this point on. */
+  static async prepareNativeListingPurchase(buyerId, product) {
+    const offer = await this._createListingOffer(buyerId, product);
+    return { paymentId: offer.id };
+  }
+
+  static async createListingPurchase(buyerId, product, platform) {
+    const offer = await this._createListingOffer(buyerId, product);
+    const paymentMode = offer.paymentMode;
 
     // 'milestones' charges stage 1 only, off the SNAPSHOTTED row rather than
     // recomputing from the template — the row is the source of truth for every
@@ -1220,6 +1246,93 @@ export class ShopCustomOfferService {
     }
 
     return { clientSecret: session.client_secret, offerId: offer.id };
+  }
+
+  // ── Native Briteside checkout (NativeCheckoutModal) ───────────────────────
+  // Same _prepareAcceptCheckout() validation/fee math as the hosted path
+  // above — just a raw PaymentIntent instead of a Checkout Session.
+  // Fulfillment reuses handlePaymentWebhook via a minimal shimmed "session"
+  // object (same trick as the ticket/talent-session/shop-order native flows).
+  //
+  // Not reproduced here: _stampMilestoneSession's "awaiting_payment" dedup
+  // guard for milestone offers — that guard exists purely to let a buyer
+  // resume an ABANDONED hosted Checkout session via stripe.checkout.sessions
+  // .retrieve(), which doesn't apply to a native PaymentIntent (no session to
+  // resume). Worst case without it: a buyer could open two native checkouts
+  // for the same milestone concurrently — the same risk profile already
+  // accepted for the ticket/talent-session native flows, which have no
+  // equivalent dedup either.
+
+  static async prepareNativeAcceptCheckout(buyerId, offerId) {
+    const prep = await this._prepareAcceptCheckout(buyerId, offerId);
+    return { paymentId: prep.offer.id };
+  }
+
+  static async createNativeAcceptPaymentIntent(offerId, buyerId) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+
+    const prep = await this._prepareAcceptCheckout(buyerId, offerId);
+    const { offer, buyer, milestoneRows, fees } = prep;
+
+    const metadata = {
+      type: 'shop_custom_offer',
+      offerId: offer.id,
+      buyerId: offer.buyerId,
+      sellerId: offer.sellerId,
+    };
+
+    // Only worth saving the card when there's a remainder left to collect
+    // later (deposit/milestones) — mirrors _createHostedAcceptSession's
+    // customer_creation/setup_future_usage gating.
+    const needsReusableCustomer = offer.paymentMode !== 'full';
+    const stripeCustomerId = needsReusableCustomer
+      ? await SubscriptionService.getOrCreateStripeCustomer(buyerId)
+      : null;
+
+    const intent = await stripe.paymentIntents.create({
+      amount: fees.chargedCents,
+      currency: 'usd',
+      ...(stripeCustomerId
+        ? { customer: stripeCustomerId, setup_future_usage: 'off_session' }
+        : buyer?.email?.trim()
+          ? { receipt_email: buyer.email.trim() }
+          : {}),
+      metadata,
+    });
+
+    await db
+      .update(shopCustomServiceOffers)
+      .set({
+        chargedCents: fees.chargedCents,
+        basePriceCoveredCents: prep.installmentBase,
+        sellerReceiveCents: fees.sellerReceiveCents,
+        platformShareCents: fees.platformShareCents,
+        updatedAt: new Date(),
+      })
+      .where(eq(shopCustomServiceOffers.id, offer.id));
+
+    return { clientSecret: intent.client_secret, paymentId: offer.id };
+  }
+
+  static async finalizeNativeAcceptPayment(offerId, buyerId, paymentIntentId) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+
+    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (intent.metadata?.offerId !== offerId || intent.metadata?.buyerId !== buyerId) {
+      throw new ApiError(409, 'Payment does not match this offer');
+    }
+    if (intent.status !== 'succeeded') {
+      throw new ApiError(409, `Payment is not completed yet (status: ${intent.status})`);
+    }
+
+    await this.handlePaymentWebhook({
+      id: null,
+      payment_intent: intent.id,
+      customer: intent.customer ?? null,
+      metadata: intent.metadata,
+    });
+
+    return { offerId };
   }
 
   /** Webhook target — mirrors ShopOrderService.handlePaymentWebhook's idempotency shape. */
@@ -2021,6 +2134,54 @@ export class ShopCustomOfferService {
     return { clientSecret: session.client_secret, offerId: offer.id };
   }
 
+  // ── Native Briteside checkout (NativeCheckoutModal) ───────────────────────
+  static async prepareNativeRemainderCheckout(buyerId, offerId) {
+    const prep = await this._prepareRemainderCheckout(buyerId, offerId);
+    return { paymentId: prep.offer.id };
+  }
+
+  static async createNativeRemainderPaymentIntent(offerId, buyerId) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+    const { offer, buyer, fees } = await this._prepareRemainderCheckout(buyerId, offerId);
+
+    const metadata = {
+      type: 'shop_custom_offer_remainder',
+      offerId: offer.id,
+      buyerId: offer.buyerId,
+      sellerId: offer.sellerId,
+    };
+
+    const intent = await stripe.paymentIntents.create({
+      amount: fees.chargedCents,
+      currency: 'usd',
+      ...(offer.stripeCustomerId
+        ? { customer: offer.stripeCustomerId }
+        : buyer?.email?.trim()
+          ? { receipt_email: buyer.email.trim() }
+          : {}),
+      metadata,
+    });
+
+    return { clientSecret: intent.client_secret, paymentId: offer.id };
+  }
+
+  static async finalizeNativeRemainderPayment(offerId, buyerId, paymentIntentId) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (intent.metadata?.offerId !== offerId || intent.metadata?.buyerId !== buyerId) {
+      throw new ApiError(409, 'Payment does not match this offer');
+    }
+    if (intent.status !== 'succeeded') {
+      throw new ApiError(409, `Payment is not completed yet (status: ${intent.status})`);
+    }
+    await this.handleRemainderPaymentWebhook({
+      id: null,
+      payment_intent: intent.id,
+      metadata: intent.metadata,
+    });
+    return { offerId };
+  }
+
   /**
    * Webhook target for the buyer-initiated remainder checkout above. Only
    * records the payment against the offer — it deliberately does NOT flip
@@ -2255,6 +2416,107 @@ export class ShopCustomOfferService {
     return nativeRedirect
       ? { checkoutUrl: session.url, offerId: offer.id, milestoneId: milestone.id }
       : { clientSecret: session.client_secret, offerId: offer.id, milestoneId: milestone.id };
+  }
+
+  // ── Native Briteside checkout (NativeCheckoutModal) ───────────────────────
+  // Not reproduced: the double-session guard above (stripe.checkout.sessions
+  // .retrieve only applies to real Checkout Sessions) — same accepted
+  // trade-off as the accept-checkout native flow's milestone-1 case.
+  static async prepareNativeMilestoneCheckout(buyerId, offerId, milestoneId) {
+    const offer = await this.loadOffer(offerId);
+    if (offer.buyerId !== buyerId) throw new ApiError(403, 'This offer is not for you');
+    if (offer.status !== 'accepted') {
+      throw new ApiError(409, `Only an accepted offer can be funded (this one is ${offer.status})`);
+    }
+    if (offer.paymentMode !== 'milestones') {
+      throw new ApiError(400, 'This offer is not on a milestone payment schedule');
+    }
+
+    const rows = await this._ensureMilestoneRows(offer);
+    const milestone = rows.find(r => r.id === milestoneId);
+    if (!milestone) throw new ApiError(404, 'Milestone not found on this offer');
+    if (!MILESTONE_FUNDABLE_STATUSES.includes(milestone.status)) {
+      throw new ApiError(409, `This milestone is already ${milestone.status}`);
+    }
+    if (milestone.position > 0) {
+      const previous = rows.find(r => r.position === milestone.position - 1);
+      if (!previous || !['completed', 'released'].includes(previous.status)) {
+        throw new ApiError(
+          409,
+          'The previous milestone must be approved before this one can be funded'
+        );
+      }
+    }
+
+    return { paymentId: milestone.id };
+  }
+
+  static async createNativeMilestonePaymentIntent(offerId, milestoneId, buyerId) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+    const offer = await this.loadOffer(offerId);
+    if (offer.buyerId !== buyerId) throw new ApiError(403, 'This offer is not for you');
+
+    let connectAccount = await StripeConnectService.getForUser(offer.sellerId);
+    if (connectAccount && !connectAccount.chargesEnabled) {
+      connectAccount = await StripeConnectService.syncStatus(offer.sellerId).catch(
+        () => connectAccount
+      );
+    }
+    if (!connectAccount?.chargesEnabled) {
+      throw new ApiError(400, "This creator can't accept payments yet");
+    }
+
+    const rows = await this._ensureMilestoneRows(offer);
+    const milestone = rows.find(r => r.id === milestoneId);
+    if (!milestone) throw new ApiError(404, 'Milestone not found on this offer');
+    if (!MILESTONE_FUNDABLE_STATUSES.includes(milestone.status)) {
+      throw new ApiError(409, `This milestone is already ${milestone.status}`);
+    }
+
+    const fees = ShopOrderService.computeFees(milestone.amountCents);
+    const buyer = await db.query.users.findFirst({
+      where: eq(users.id, buyerId),
+      columns: { email: true },
+    });
+
+    const metadata = {
+      type: 'shop_custom_offer_milestone',
+      offerId: offer.id,
+      milestoneId: milestone.id,
+      position: String(milestone.position),
+      buyerId,
+      sellerId: offer.sellerId,
+    };
+
+    const intent = await stripe.paymentIntents.create({
+      amount: fees.chargedCents,
+      currency: 'usd',
+      ...(offer.stripeCustomerId
+        ? { customer: offer.stripeCustomerId }
+        : buyer?.email?.trim()
+          ? { receipt_email: buyer.email.trim() }
+          : {}),
+      metadata,
+    });
+
+    return { clientSecret: intent.client_secret, paymentId: milestone.id };
+  }
+
+  static async finalizeNativeMilestonePayment(milestoneId, buyerId, paymentIntentId) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (intent.metadata?.milestoneId !== milestoneId || intent.metadata?.buyerId !== buyerId) {
+      throw new ApiError(409, 'Payment does not match this milestone');
+    }
+    if (intent.status !== 'succeeded') {
+      throw new ApiError(409, `Payment is not completed yet (status: ${intent.status})`);
+    }
+    await this.handleMilestonePaymentWebhook({
+      id: null,
+      payment_intent: intent.id,
+      metadata: intent.metadata,
+    });
+    return { milestoneId };
   }
 
   /**
@@ -2563,7 +2825,14 @@ export class ShopCustomOfferService {
 
     await db
       .update(shopCustomServiceOffers)
-      .set({ deliveryState: 'delivered', deliveredAt: new Date(), updatedAt: new Date() })
+      .set({
+        deliveryState: 'delivered',
+        deliveredAt: new Date(),
+        // The "new delivery date" countdown is superseded by the
+        // delivered-state "Auto-approves in" countdown now.
+        dueDateExtendedAt: null,
+        updatedAt: new Date(),
+      })
       .where(eq(shopCustomServiceOffers.id, offerId));
 
     await this.logActivity(offerId, sellerId, 'delivered', {
@@ -2749,6 +3018,10 @@ export class ShopCustomOfferService {
   }
   // ═══════════════════════════ Date extension ══════════════════════════════
 
+  // Sets a new delivery date immediately — no accept/decline step. The other
+  // party is just notified. (Kept the name/signature `requestDateExtension`
+  // used by the existing route/controller/frontend hook rather than
+  // renaming everything; only the behavior changed.)
   static async requestDateExtension(userId, offerId, { requestedDueDate, reason } = {}, io = null) {
     const offer = await this.loadOffer(offerId);
     if (offer.sellerId !== userId && offer.buyerId !== userId) {
@@ -2757,19 +3030,13 @@ export class ShopCustomOfferService {
     if (offer.status !== 'accepted') {
       throw new ApiError(
         409,
-        `Date extensions can only be requested on an in-progress offer (this one is ${offer.status})`
+        `The delivery date can only be changed on an in-progress offer (this one is ${offer.status})`
       );
     }
     if (!requestedDueDate) throw new ApiError(400, '`requestedDueDate` is required');
 
-    const alreadyPending = await db.query.shopCustomOfferDateExtensionRequests.findFirst({
-      where: and(
-        eq(shopCustomOfferDateExtensionRequests.offerId, offerId),
-        eq(shopCustomOfferDateExtensionRequests.status, 'pending')
-      ),
-    });
-    if (alreadyPending)
-      throw new ApiError(409, 'A date extension request is already pending on this offer');
+    const newDueDate = new Date(requestedDueDate);
+    const now = new Date();
 
     const [request] = await db
       .insert(shopCustomOfferDateExtensionRequests)
@@ -2777,8 +3044,80 @@ export class ShopCustomOfferService {
         offerId,
         requestedByUserId: userId,
         originalDueDate: offer.dueDate,
-        requestedDueDate: new Date(requestedDueDate),
+        requestedDueDate: newDueDate,
         reason: reason?.trim() || null,
+        // Not a 'pending' ask anymore — applied immediately. Kept as its own
+        // status (not reusing 'accepted') so activity history still reads
+        // correctly: nobody accepted this, it was just set.
+        status: 'applied',
+        resolvedAt: now,
+      })
+      .returning();
+
+    await db
+      .update(shopCustomServiceOffers)
+      .set({ dueDate: newDueDate, dueDateExtendedAt: now, updatedAt: now })
+      .where(eq(shopCustomServiceOffers.id, offerId));
+
+    await this.logActivity(offerId, userId, 'date_extension_set', {
+      requestId: request.id,
+      originalDueDate: offer.dueDate,
+      requestedDueDate: request.requestedDueDate,
+      reason: request.reason,
+    });
+
+    const otherPartyId = userId === offer.buyerId ? offer.sellerId : offer.buyerId;
+    await createNotification({
+      userId: otherPartyId,
+      title: 'Delivery date updated',
+      message: `A new delivery date was set for "${offer.title}".`,
+      type: 'shop_custom_offer',
+      relatedId: offer.id,
+      redirectTo: `/bookings?offerId=${offer.id}`,
+      metadata: { offerId: offer.id, requestId: request.id },
+    }).catch(err => logger.error(`[ShopCustomOffer] date-extension notify failed: ${err.message}`));
+    this._emitOfferUpdate(io, { ...offer, dueDate: newDueDate, dueDateExtendedAt: now });
+    return request;
+  }
+
+  // Asks the other party for more time instead of setting the date directly —
+  // creates a 'pending' row; the due date only actually changes if they
+  // accept via respondToDateExtension. Separate, additive flow alongside the
+  // immediate requestDateExtension ("Set new delivery date") above.
+  static async requestMoreTime(userId, offerId, { requestedDueDate, reason } = {}, io = null) {
+    const offer = await this.loadOffer(offerId);
+    if (offer.sellerId !== userId && offer.buyerId !== userId) {
+      throw new ApiError(403, 'This offer is not yours');
+    }
+    if (offer.status !== 'accepted') {
+      throw new ApiError(
+        409,
+        `A new delivery date can only be requested on an in-progress offer (this one is ${offer.status})`
+      );
+    }
+    if (!requestedDueDate) throw new ApiError(400, '`requestedDueDate` is required');
+
+    const existingPending = await db.query.shopCustomOfferDateExtensionRequests.findFirst({
+      where: and(
+        eq(shopCustomOfferDateExtensionRequests.offerId, offerId),
+        eq(shopCustomOfferDateExtensionRequests.status, 'pending')
+      ),
+    });
+    if (existingPending) {
+      throw new ApiError(409, 'There is already a pending delivery-date request on this offer');
+    }
+
+    const newDueDate = new Date(requestedDueDate);
+
+    const [request] = await db
+      .insert(shopCustomOfferDateExtensionRequests)
+      .values({
+        offerId,
+        requestedByUserId: userId,
+        originalDueDate: offer.dueDate,
+        requestedDueDate: newDueDate,
+        reason: reason?.trim() || null,
+        status: 'pending',
       })
       .returning();
 
@@ -2792,13 +3131,15 @@ export class ShopCustomOfferService {
     const otherPartyId = userId === offer.buyerId ? offer.sellerId : offer.buyerId;
     await createNotification({
       userId: otherPartyId,
-      title: 'Delivery date change requested',
-      message: `A new due date was proposed for "${offer.title}".`,
+      title: 'New delivery date requested',
+      message: `A new delivery date was requested for "${offer.title}".`,
       type: 'shop_custom_offer',
       relatedId: offer.id,
       redirectTo: `/bookings?offerId=${offer.id}`,
       metadata: { offerId: offer.id, requestId: request.id },
-    }).catch(err => logger.error(`[ShopCustomOffer] date-extension notify failed: ${err.message}`));
+    }).catch(err =>
+      logger.error(`[ShopCustomOffer] date-extension request notify failed: ${err.message}`)
+    );
     this._emitOfferUpdate(io, offer);
     return request;
   }
@@ -2841,9 +3182,10 @@ export class ShopCustomOfferService {
     if (!updated) throw new ApiError(409, 'This request was already resolved');
 
     if (action === 'accept') {
+      const now = new Date();
       await db
         .update(shopCustomServiceOffers)
-        .set({ dueDate: request.requestedDueDate, updatedAt: new Date() })
+        .set({ dueDate: request.requestedDueDate, dueDateExtendedAt: now, updatedAt: now })
         .where(eq(shopCustomServiceOffers.id, offerId));
     }
 
@@ -2866,7 +3208,10 @@ export class ShopCustomOfferService {
     }).catch(err =>
       logger.error(`[ShopCustomOffer] date-extension response notify failed: ${err.message}`)
     );
-    this._emitOfferUpdate(io, offer);
+    this._emitOfferUpdate(
+      io,
+      action === 'accept' ? { ...offer, dueDate: request.requestedDueDate } : offer
+    );
     return updated;
   }
 
@@ -2973,6 +3318,93 @@ export class ShopCustomOfferService {
       .where(eq(shopCustomOfferTips.id, tip.id));
 
     return { clientSecret: session.client_secret, tipId: tip.id };
+  }
+
+  // ── Native Briteside checkout (NativeCheckoutModal) ───────────────────────
+  /** Creates the pending shopCustomOfferTips row only — no Stripe call yet. */
+  static async prepareNativeTipCheckout(buyerId, offerId, amountCents) {
+    const offer = await this.loadOffer(offerId);
+    if (offer.buyerId !== buyerId) throw new ApiError(403, 'This offer is not yours');
+    if (offer.status !== 'completed') {
+      throw new ApiError(409, 'You can only tip after the project is completed');
+    }
+    if (!Number.isInteger(amountCents) || amountCents <= 0) {
+      throw new ApiError(400, 'Enter a valid tip amount');
+    }
+
+    const fees = this.computeTipFees(amountCents);
+    const [tip] = await db
+      .insert(shopCustomOfferTips)
+      .values({
+        offerId,
+        buyerId,
+        sellerId: offer.sellerId,
+        amountCents,
+        chargedCents: fees.chargedCents,
+      })
+      .returning();
+
+    return { paymentId: tip.id };
+  }
+
+  static async createNativeTipPaymentIntent(tipId, buyerId) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+
+    const tip = await db.query.shopCustomOfferTips.findFirst({
+      where: eq(shopCustomOfferTips.id, tipId),
+    });
+    if (!tip) throw new ApiError(404, 'Tip not found');
+    if (tip.buyerId !== buyerId) throw new ApiError(403, 'This tip is not yours');
+    if (tip.status !== 'pending') throw new ApiError(409, `This tip is already ${tip.status}`);
+
+    let connectAccount = await StripeConnectService.getForUser(tip.sellerId);
+    if (connectAccount && !connectAccount.chargesEnabled) {
+      connectAccount = await StripeConnectService.syncStatus(tip.sellerId).catch(
+        () => connectAccount
+      );
+    }
+    if (!connectAccount?.chargesEnabled) {
+      throw new ApiError(400, "This creator can't accept payments yet");
+    }
+
+    const buyer = await db.query.users.findFirst({
+      where: eq(users.id, buyerId),
+      columns: { email: true },
+    });
+
+    const metadata = {
+      type: 'shop_custom_offer_tip',
+      tipId: tip.id,
+      offerId: tip.offerId,
+      buyerId,
+      sellerId: tip.sellerId,
+    };
+
+    const intent = await stripe.paymentIntents.create({
+      amount: tip.chargedCents,
+      currency: 'usd',
+      ...(buyer?.email?.trim() ? { receipt_email: buyer.email.trim() } : {}),
+      metadata,
+    });
+
+    return { clientSecret: intent.client_secret, paymentId: tip.id };
+  }
+
+  static async finalizeNativeTipPayment(tipId, buyerId, paymentIntentId) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (intent.metadata?.tipId !== tipId || intent.metadata?.buyerId !== buyerId) {
+      throw new ApiError(409, 'Payment does not match this tip');
+    }
+    if (intent.status !== 'succeeded') {
+      throw new ApiError(409, `Payment is not completed yet (status: ${intent.status})`);
+    }
+    await this.handleTipPaymentWebhook({
+      id: null,
+      payment_intent: intent.id,
+      metadata: intent.metadata,
+    });
+    return { tipId };
   }
 
   static async handleTipPaymentWebhook(stripeSession) {
