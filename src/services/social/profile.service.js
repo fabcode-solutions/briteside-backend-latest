@@ -1,7 +1,13 @@
 import { db } from '../../db/index.js';
 import ApiError from '../../utils/api-error.js';
 import { TextModerationService, TEXT_ENTITY } from '../moderation/textModeration.service.js';
-import { MediaModerationService, MEDIA_ENTITY } from '../moderation/mediaModeration.service.js';
+import {
+  MediaModerationService,
+  MEDIA_ENTITY,
+  attachPostModerationStatuses,
+  attachPostCopyrightStatuses,
+  isHeldFromViewer,
+} from '../moderation/mediaModeration.service.js';
 import {
   users,
   userFollows,
@@ -586,6 +592,24 @@ static async getOrCreateSocialProfile(userId) {
           },
         },
       });
+
+      if (statusPost) {
+        await attachPostModerationStatuses([statusPost]);
+        await attachPostCopyrightStatuses([statusPost]);
+        // A profile's status post is served to every visitor — a held post
+        // (GetStream or a pending/confirmed copyright case) must not leak
+        // here just because it's pinned as the status post.
+        if (
+          isHeldFromViewer({
+            moderationStatus: statusPost.moderationStatus,
+            copyrightStatus: statusPost.copyrightStatus,
+            ownerId: statusPost.userId,
+            viewerId,
+          })
+        ) {
+          statusPost = null;
+        }
+      }
     }
 
     const shaped = wallPostRows

@@ -3,6 +3,7 @@ import { getBoss } from '../../lib/pgboss.js';
 import { streamClient } from '../../utils/streamClient.js';
 import { db } from '../../db/index.js';
 import { contentModeration } from '../../db/schema/moderation.js';
+import { acrCopyrightReviewCases } from '../../db/schema/acrCopyrightReviewCases.js';
 import { media, eventMedia } from '../../db/schema/index.js';
 import { posts, stories, socialProfiles } from '../../db/schema/social.js';
 import { events } from '../../db/schema/events.js';
@@ -77,12 +78,60 @@ const log = {
 export const HELD_FROM_OTHERS = new Set(['pending', 'rejected', 'shadowed', 'skipped', 'error']);
 const HELD_STATUSES = sql`('pending', 'rejected', 'shadowed', 'skipped', 'error')`;
 
+/**
+ * ACRCloud copyright review cases (`acr_copyright_review_cases`) are a
+ * SEPARATE table from `content_moderation` (see copyrightScan.service.js /
+ * copyrightReviewCase.service.js) — a match never writes a content_moderation
+ * row, flips an S3 ACL, or touches GetStream's own verdict machinery. This is
+ * a second, independent visibility rule layered on top: 'pending' (awaiting
+ * admin review) and 'confirmed_infringement' (admin-confirmed) are hidden
+ * from everyone but the owner, exactly like HELD_FROM_OTHERS above but driven
+ * by a different table. 'dismissed' (false positive) and 'reviewed' (no
+ * issue) are NOT held — the content is fully visible again.
+ */
+export const COPYRIGHT_HELD_FROM_OTHERS = new Set(['pending', 'confirmed_infringement']);
+const COPYRIGHT_HELD_STATUSES = sql`('pending', 'confirmed_infringement')`;
+
+/**
+ * Single source of truth for "should this viewer see this item", given both
+ * systems' statuses. Owner always sees their own (with the removed/blur/
+ * "under review" UI); everyone else is held by either system independently.
+ * Pure function — used by every single-item detail fetch and every
+ * share/forward path (post/story/discussion getById, DM share, profile wall
+ * status post) so the rule can't drift between call sites, and can be
+ * unit-tested without a DB.
+ */
+export function isHeldFromViewer({ moderationStatus, copyrightStatus, ownerId, viewerId }) {
+  if (ownerId != null && ownerId === viewerId) return false;
+  return HELD_FROM_OTHERS.has(moderationStatus) || COPYRIGHT_HELD_FROM_OTHERS.has(copyrightStatus);
+}
+
+// posts.mediaUrls / discussions.mediaUrls are JSON arrays of URL strings (not
+// media ids) — same ::text LIKE scan already used by propagateMediaVerdict
+// below to go the other direction (media url -> referencing rows).
+const postsCopyrightHeldExists = (urlsColumn, extra = sql``) => sql`EXISTS (
+  SELECT 1 FROM acr_copyright_review_cases cc
+  JOIN media m ON m.id = cc.media_id
+  WHERE cc.status IN ${COPYRIGHT_HELD_STATUSES}
+    AND ${urlsColumn}::text LIKE '%' || m.url || '%'
+    ${extra}
+)`;
+
+// stories.media_url is a single string column, not an array — direct equality.
+const storiesCopyrightHeldExists = (urlColumn, extra = sql``) => sql`EXISTS (
+  SELECT 1 FROM acr_copyright_review_cases cc
+  JOIN media m ON m.id = cc.media_id
+  WHERE cc.status IN ${COPYRIGHT_HELD_STATUSES}
+    AND m.url = ${urlColumn}
+    ${extra}
+)`;
+
 export const postsModerationGate = viewerId => sql`NOT EXISTS (
   SELECT 1 FROM content_moderation cm
   WHERE cm.post_id = ${posts.id}
     AND ${posts.userId} != ${viewerId}
     AND cm.status IN ${HELD_STATUSES}
-)`;
+) AND NOT ${postsCopyrightHeldExists(posts.mediaUrls, sql`AND ${posts.userId} != ${viewerId}`)}`;
 
 // Strict variant: hides held posts from EVERYONE, including the author. Used on
 // another user's profile, where an author must not surface their own removed
@@ -91,14 +140,14 @@ export const postsModerationGateStrict = () => sql`NOT EXISTS (
   SELECT 1 FROM content_moderation cm
   WHERE cm.post_id = ${posts.id}
     AND cm.status IN ${HELD_STATUSES}
-)`;
+) AND NOT ${postsCopyrightHeldExists(posts.mediaUrls)}`;
 
 export const storiesModerationGate = viewerId => sql`NOT EXISTS (
   SELECT 1 FROM content_moderation cm
   WHERE cm.story_id = ${stories.id}
     AND ${stories.userId} != ${viewerId}
     AND cm.status IN ${HELD_STATUSES}
-)`;
+) AND NOT ${storiesCopyrightHeldExists(stories.mediaUrl, sql`AND ${stories.userId} != ${viewerId}`)}`;
 
 // Strict variant: excludes held stories for everyone, author included. Used for
 // the "has an active story" ring — a held (removed/pending) story must not light
@@ -107,14 +156,14 @@ export const storiesModerationGateStrict = () => sql`NOT EXISTS (
   SELECT 1 FROM content_moderation cm
   WHERE cm.story_id = ${stories.id}
     AND cm.status IN ${HELD_STATUSES}
-)`;
+) AND NOT ${storiesCopyrightHeldExists(stories.mediaUrl)}`;
 
 export const discussionsModerationGate = viewerId => sql`NOT EXISTS (
   SELECT 1 FROM content_moderation cm
   WHERE cm.discussion_id = ${discussions.id}
     AND ${discussions.userId} != ${viewerId}
     AND cm.status IN ${HELD_STATUSES}
-)`;
+) AND NOT ${postsCopyrightHeldExists(discussions.mediaUrls, sql`AND ${discussions.userId} != ${viewerId}`)}`;
 
 /**
  * Attach `moderationStatus` to a list of posts or stories (one batched
@@ -139,6 +188,49 @@ async function attachStatuses(items, fkColumn) {
 export const attachPostModerationStatuses = items => attachStatuses(items, 'postId');
 export const attachStoryModerationStatuses = items => attachStatuses(items, 'storyId');
 export const attachDiscussionModerationStatuses = items => attachStatuses(items, 'discussionId');
+
+/**
+ * Copyright case status (if any), keyed by media URL, batched for a set of
+ * URLs — read-only join into acr_copyright_review_cases. Never writes to
+ * that table; this is purely for visibility gating / surfacing the status.
+ */
+async function copyrightStatusesForUrls(urls) {
+  const cleaned = [...new Set((urls || []).filter(Boolean))];
+  if (cleaned.length === 0) return new Map();
+  const rows = await db
+    .select({ url: media.url, status: acrCopyrightReviewCases.status })
+    .from(acrCopyrightReviewCases)
+    .innerJoin(media, eq(media.id, acrCopyrightReviewCases.mediaId))
+    .where(inArray(media.url, cleaned));
+  return new Map(rows.map(r => [r.url, r.status]));
+}
+
+/**
+ * Attach `copyrightStatus` (raw acr_copyright_review_cases status, or null)
+ * to a list of posts/stories/discussions via their media URL(s). `getUrls`
+ * must return a single URL (stories) or an array of URLs (posts/discussions)
+ * for a given item. Mutates and returns the same array, mirroring
+ * attachStatuses above.
+ */
+async function attachCopyrightStatuses(items, getUrls) {
+  const list = (items || []).filter(Boolean);
+  const allUrls = list.flatMap(item => {
+    const u = getUrls(item);
+    return Array.isArray(u) ? u : u ? [u] : [];
+  });
+  const statusByUrl = await copyrightStatusesForUrls(allUrls);
+  for (const item of list) {
+    const u = getUrls(item);
+    const urls = Array.isArray(u) ? u : u ? [u] : [];
+    item.copyrightStatus = urls.map(x => statusByUrl.get(x)).find(Boolean) ?? null;
+  }
+  return items;
+}
+
+export const attachPostCopyrightStatuses = items => attachCopyrightStatuses(items, p => p.mediaUrls);
+export const attachStoryCopyrightStatuses = items => attachCopyrightStatuses(items, s => s.mediaUrl);
+export const attachDiscussionCopyrightStatuses = items =>
+  attachCopyrightStatuses(items, d => d.mediaUrls);
 
 export class MediaModerationService {
   /**
@@ -203,10 +295,12 @@ export class MediaModerationService {
 
   /**
    * Filter + stamp a list of post objects for a viewer (one query):
-   * drops posts held from non-owners (pending/rejected/shadowed/skipped/error),
-   * keeps the owner's own, and sets `moderationStatus` on survivors so the
-   * frontend can blur flagged ones. For relational listings (saved/liked/
-   * reposted/…) where the SQL gate can't be a top-level WHERE.
+   * drops posts held from non-owners (pending/rejected/shadowed/skipped/error,
+   * or a copyright case pending/confirmed_infringement), keeps the owner's
+   * own, and sets `moderationStatus`/`copyrightStatus` on survivors so the
+   * frontend can blur flagged ones / show "Under review". For relational
+   * listings (saved/liked/reposted/…) where the SQL gate can't be a
+   * top-level WHERE.
    */
   static async applyPostModeration(postObjects, viewerId) {
     const list = (postObjects || []).filter(Boolean);
@@ -217,11 +311,17 @@ export class MediaModerationService {
       .from(contentModeration)
       .where(inArray(contentModeration.postId, ids));
     const statusById = new Map(rows.map(r => [r.postId, r.status]));
+    const copyrightByUrl = await copyrightStatusesForUrls(list.flatMap(p => p.mediaUrls || []));
     const out = [];
     for (const p of list) {
       const st = statusById.get(p.id) ?? 'approved';
-      if (HELD_FROM_OTHERS.has(st) && p.userId !== viewerId) continue; // held → drop
+      const copyrightStatus =
+        (p.mediaUrls || []).map(u => copyrightByUrl.get(u)).find(Boolean) ?? null;
+      if (isHeldFromViewer({ moderationStatus: st, copyrightStatus, ownerId: p.userId, viewerId })) {
+        continue; // held → drop
+      }
       p.moderationStatus = st;
+      p.copyrightStatus = copyrightStatus;
       out.push(p);
     }
     return out;

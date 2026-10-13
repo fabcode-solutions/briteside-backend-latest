@@ -45,7 +45,8 @@ import {
   postsModerationGate,
   postsModerationGateStrict,
   attachPostModerationStatuses,
-  HELD_FROM_OTHERS,
+  attachPostCopyrightStatuses,
+  isHeldFromViewer,
 } from '../moderation/mediaModeration.service.js';
 import FileManagementService from '../fileManagement.service.js';
 import { createNotification } from '../notification.service.js';
@@ -992,11 +993,14 @@ export class PostService {
       isReposted: post.reposts ? post.reposts.length > 0 : false,
       collaborators: collaboratorsByPost.get(post.id) || [],
       moderationStatus: post.moderationStatus ?? 'approved',
+      copyrightStatus: post.copyrightStatus ?? null,
       ...extra,
     });
 
     await attachPostModerationStatuses(postsData);
     await attachPostModerationStatuses(pinnedPostsData);
+    await attachPostCopyrightStatuses(postsData);
+    await attachPostCopyrightStatuses(pinnedPostsData);
 
     const formattedPosts = postsData.map(post => formatPost(post));
     const formattedPinnedPosts = pinnedPostsData.map(post =>
@@ -1094,10 +1098,19 @@ export class PostService {
     if (!post) throw new ApiError(404, 'Post not found');
 
     await attachPostModerationStatuses([post]);
+    await attachPostCopyrightStatuses([post]);
 
-    // Held content (pending/rejected/shadowed/…) is invisible to non-owners,
-    // even by direct id. Owner still sees their own (with the removed/blur UI).
-    if (HELD_FROM_OTHERS.has(post.moderationStatus) && post.userId !== viewerId) {
+    // Held content (pending/rejected/shadowed/… OR a pending/confirmed
+    // copyright case) is invisible to non-owners, even by direct id. Owner
+    // still sees their own (with the removed/blur/"under review" UI).
+    if (
+      isHeldFromViewer({
+        moderationStatus: post.moderationStatus,
+        copyrightStatus: post.copyrightStatus,
+        ownerId: post.userId,
+        viewerId,
+      })
+    ) {
       throw new ApiError(404, 'Post not found');
     }
 
@@ -1165,6 +1178,7 @@ export class PostService {
       isReposted: post.reposts ? post.reposts.length > 0 : false,
       collaborators: collabRows.map(r => r.collaborator),
       moderationStatus: post.moderationStatus ?? 'approved',
+      copyrightStatus: post.copyrightStatus ?? null,
     };
 
     const filterEnabled = await TextModerationService.getFilterEnabled(viewerId);
