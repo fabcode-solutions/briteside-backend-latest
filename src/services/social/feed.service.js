@@ -254,6 +254,7 @@ export class FeedService {
     }
 
     const linkedProductsByPost = await PostService._linkedProductsByPost(postsData.map(p => p.id));
+    const linkedEventByPost = await PostService._linkedEventsByPost(postsData);
 
     // Who among the people I follow reposted each of these posts — used to
     // attach "reposted by" attribution below for posts that only qualify
@@ -334,6 +335,7 @@ export class FeedService {
       hideLikes: post.settings?.hideLikes || false,
       linkButton: post.settings?.linkButton || null,
       linkedProducts: linkedProductsByPost.get(post.id) || [],
+      linkedEvent: linkedEventByPost.get(post.id) || null,
       collaborators: collaboratorsByPost.get(post.id) || [],
       user: {
         id: post.user.id,
@@ -586,6 +588,7 @@ export class FeedService {
     }
 
     const linkedProductsByPost = await PostService._linkedProductsByPost(postsData.map(p => p.id));
+    const linkedEventByPost = await PostService._linkedEventsByPost(postsData);
 
     const shapedPosts = postsData.map(post => ({
       id: post.id,
@@ -607,6 +610,7 @@ export class FeedService {
       hideLikes: post.settings?.hideLikes || false,
       linkButton: post.settings?.linkButton || null,
       linkedProducts: linkedProductsByPost.get(post.id) || [],
+      linkedEvent: linkedEventByPost.get(post.id) || null,
       collaborators: collaboratorsByPost.get(post.id) || [],
       user: {
         id: post.user.id,
@@ -994,6 +998,7 @@ export class FeedService {
     const linkedProductsByPost = await PostService._linkedProductsByPost(
       pageItems.map(({ post }) => post.id)
     );
+    const linkedEventByPost = await PostService._linkedEventsByPost(pageItems.map(({ post }) => post));
 
     const shapedPosts = pageItems.map(({ post, isFollowing, repostedBy }) => ({
       id: post.id,
@@ -1017,6 +1022,7 @@ export class FeedService {
       hideLikes: post.settings?.hideLikes || false,
       linkButton: post.settings?.linkButton || null,
       linkedProducts: linkedProductsByPost.get(post.id) || [],
+      linkedEvent: linkedEventByPost.get(post.id) || null,
       collaborators: collaboratorsByPost.get(post.id) || [],
       user: {
         id: post.user.id,

@@ -5,6 +5,7 @@ import ApiError from '../utils/api-error.js';
 import FileManagementService from './fileManagement.service.js';
 import logger from '../config/logger.js';
 import { MediaModerationService, MEDIA_ENTITY } from './moderation/mediaModeration.service.js';
+import { CopyrightScanService } from './copyrightScan.service.js';
 import { db } from '../db/index.js';
 import { media } from '../db/schema/index.js';
 import { contentModeration } from '../db/schema/moderation.js';
@@ -194,6 +195,17 @@ export class UploadService {
           imageUrls: isVideo ? [] : [publicUrl],
           videoUrls: isVideo ? [publicUrl] : [],
         });
+
+        // Independent ACRCloud copyright-audio scan — videos only. Writes
+        // only to acr_copyright_scans; never touches content_moderation,
+        // S3 ACLs, or moderation notifications (see CopyrightScanService).
+        if (isVideo) {
+          await CopyrightScanService.enqueue({
+            mediaId: trackedFile.id,
+            userId,
+            url: publicUrl,
+          });
+        }
       }
 
       return {

@@ -190,6 +190,66 @@ export const createSessionCheckout = catchAsync(async (req, res) => {
   res.status(201).json({ success: true, data: result });
 });
 
+// ── Native Briteside checkout (NativeCheckoutModal) ─────────────────────────
+
+export const prepareSessionBooking = catchAsync(async (req, res) => {
+  const {
+    talentProfileId,
+    date,
+    time,
+    durationMins,
+    subject,
+    discussion,
+    isGift,
+    giftDetails,
+    giftCode,
+    timezone,
+  } = req.body;
+
+  if (!talentProfileId) throw new ApiError(400, '`talentProfileId` is required');
+  if (!date) throw new ApiError(400, '`date` is required (YYYY-MM-DD)');
+  if (!time) throw new ApiError(400, '`time` is required (HH:MM)');
+  if (!durationMins) throw new ApiError(400, '`durationMins` is required');
+  if (!subject && !giftCode) throw new ApiError(400, '`subject` is required');
+
+  const result = await TalentSessionService.prepareBooking({
+    talentProfileId,
+    bookerId: req.user.id,
+    date,
+    time,
+    durationMins: parseInt(durationMins),
+    subject,
+    discussion,
+    isGift,
+    giftDetails,
+    giftCode,
+    bookerTimezone: timezone,
+  });
+
+  res.status(201).json({ success: true, data: result });
+});
+
+export const createSessionNativePaymentIntent = catchAsync(async (req, res) => {
+  const result = await TalentSessionService.createNativePaymentIntent(
+    req.params.sessionId,
+    req.user.id
+  );
+  res.json({ success: true, data: result });
+});
+
+export const finalizeSessionNativePayment = catchAsync(async (req, res) => {
+  const io = req.app.get('io');
+  const { paymentIntentId } = req.body;
+  if (!paymentIntentId) throw new ApiError(400, 'paymentIntentId is required');
+  const result = await TalentSessionService.finalizeNativePayment(
+    req.params.sessionId,
+    req.user.id,
+    paymentIntentId,
+    io
+  );
+  res.json({ success: true, data: result });
+});
+
 export const bookSession = catchAsync(async (req, res) => {
   const {
     talentProfileId,

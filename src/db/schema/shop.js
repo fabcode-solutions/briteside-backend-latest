@@ -80,6 +80,11 @@ export const shopProducts = pgTable(
     // Service-listing fields — currently the only serviceKind is 'project'.
     serviceKind: varchar('service_kind', { length: 20 }),
     turnaround: varchar('turnaround', { length: 100 }),
+    // Machine-readable counterpart to `turnaround` (which is display text
+    // only) — lets a listing purchase compute a real due date on accept, the
+    // same way a direct custom offer already does via its own
+    // turnaroundMinutes column. Nullable: legacy listings only have the text.
+    turnaroundMinutes: integer('turnaround_minutes'),
     cancellationPolicy: text('cancellation_policy'),
     revisionsIncluded: boolean('revisions_included'),
     revisionsCount: integer('revisions_count'),

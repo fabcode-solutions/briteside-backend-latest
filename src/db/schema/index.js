@@ -161,6 +161,12 @@ export * from './imports.js';
 // Stream content moderation verdicts (media/posts/stories)
 export * from './moderation.js';
 
+// ACRCloud copyright-audio scan results (separate from moderation.js)
+export * from './acrCopyrightScans.js';
+
+// ACRCloud copyright-match admin review queue (separate from moderation.js)
+export * from './acrCopyrightReviewCases.js';
+
 // Unified analytics / event-tracking system
 export * from './analyticsEvents.js';
 export * from './analyticsIdentity.js';

@@ -743,6 +743,7 @@ export const createPost = catchAsync(async (req, res) => {
     scheduledAt,
     collaboratorIds: Array.isArray(collaboratorIds) ? collaboratorIds : [],
     linkedProductIds: Array.isArray(req.body.linkedProductIds) ? req.body.linkedProductIds : [],
+    linkedEventId: req.body.linkedEventId || null,
     isPlus: req.user.isBritesidePlus,
   });
 
@@ -879,6 +880,7 @@ export const updatePost = catchAsync(async (req, res) => {
     // Left undefined when absent, so an edit that never mentions products
     // leaves the post's existing links untouched.
     linkedProductIds: req.body.linkedProductIds,
+    linkedEventId: req.body.linkedEventId,
     isPlus: req.user.isBritesidePlus,
   });
   res.json({

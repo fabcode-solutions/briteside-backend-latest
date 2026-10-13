@@ -18,6 +18,8 @@ import {
   postShopProducts,
   shopProducts,
   postTabLinks,
+  events,
+  organizers,
 } from '../../db/schema/index.js';
 import { SocialAnalyticsService } from './socialAnalytics.service.js';
 import {
@@ -220,6 +222,108 @@ export class PostService {
     return byPost;
   }
 
+  /**
+   * Validates the single event a post links to — same Plus gate and
+   * mutual-exclusivity rule as a link button / linked products (a post
+   * carries at most one of the three). The event must have been created by
+   * this user (organizer ownership, via organizers.userId), or linking is
+   * rejected rather than silently dropped.
+   */
+  static async _resolveLinkedEvent(userId, linkedEventId, { isPlus, hasLinkButton, hasLinkedProducts }) {
+    if (!linkedEventId) return null;
+
+    if (!isPlus) {
+      throw new ApiError(
+        403,
+        'Linking an event to a post is a BriteSide Plus feature. Upgrade to add one.'
+      );
+    }
+    if (hasLinkButton || hasLinkedProducts) {
+      throw new ApiError(400, 'A post can link a URL, shop products, or one event — not more than one');
+    }
+
+    const [owned] = await db
+      .select({ id: events.id })
+      .from(events)
+      .innerJoin(organizers, eq(organizers.id, events.organizerId))
+      .where(
+        and(eq(events.id, linkedEventId), eq(organizers.userId, userId), isNull(events.deletedAt))
+      );
+
+    if (!owned) {
+      throw new ApiError(400, 'You can only link an event you created');
+    }
+
+    return linkedEventId;
+  }
+
+  /**
+   * Linked event for a page of posts, keyed by postId — display-only fields
+   * plus a trimmed ticket list, just enough for the post card to compute the
+   * identical "Get Tickets — From $X" CTA the Event Detail page shows,
+   * without shipping the full event object (see @/lib/ticket-utils).
+   */
+  static async _linkedEventsByPost(postRows) {
+    const byPost = new Map();
+    const eventIds = [...new Set(postRows.map(p => p.linkedEventId).filter(Boolean))];
+    if (eventIds.length === 0) return byPost;
+
+    const eventRows = await db.query.events.findMany({
+      where: and(inArray(events.id, eventIds), isNull(events.deletedAt)),
+      columns: {
+        id: true,
+        title: true,
+        slug: true,
+        coverImages: true,
+        isFree: true,
+        platformFeePercentage: true,
+      },
+      with: {
+        tickets: {
+          columns: {
+            price: true,
+            saleDiscountPercent: true,
+            saleStartDate: true,
+            saleEndDate: true,
+            isSaleActive: true,
+            quantityAvailable: true,
+            quantitySold: true,
+          },
+        },
+      },
+    });
+
+    const eventsById = new Map(
+      eventRows.map(e => [
+        e.id,
+        {
+          id: e.id,
+          title: e.title,
+          slug: e.slug,
+          coverImage: e.coverImages?.[0] ?? null,
+          isFree: e.isFree,
+          platformFeePercentage: e.platformFeePercentage ? Number(e.platformFeePercentage) : 0,
+          tickets: e.tickets.map(t => ({
+            price: t.price,
+            saleDiscountPercent: t.saleDiscountPercent,
+            saleStartDate: t.saleStartDate,
+            saleEndDate: t.saleEndDate,
+            isSaleActive: t.isSaleActive,
+            isSoldOut: t.quantitySold >= t.quantityAvailable,
+          })),
+        },
+      ])
+    );
+
+    for (const p of postRows) {
+      if (p.linkedEventId && eventsById.has(p.linkedEventId)) {
+        byPost.set(p.id, eventsById.get(p.linkedEventId));
+      }
+    }
+
+    return byPost;
+  }
+
   static async createPost(
     userId,
     {
@@ -235,6 +339,7 @@ export class PostService {
       scheduledAt,
       collaboratorIds,
       linkedProductIds,
+      linkedEventId,
       isPlus,
     }
   ) {
@@ -266,6 +371,12 @@ export class PostService {
     const resolvedProductIds = await PostService._resolveLinkedProducts(userId, linkedProductIds, {
       isPlus,
       hasLinkButton: !!mergedSettings.linkButton,
+    });
+
+    const resolvedLinkedEventId = await PostService._resolveLinkedEvent(userId, linkedEventId, {
+      isPlus,
+      hasLinkButton: !!mergedSettings.linkButton,
+      hasLinkedProducts: resolvedProductIds.length > 0,
     });
 
     let tagNames = [];
@@ -303,6 +414,7 @@ export class PostService {
         tags: tagNames,
         visibility: resolvedVisibility,
         settings: mergedSettings,
+        linkedEventId: resolvedLinkedEventId,
         status: isScheduled ? 'scheduled' : 'published',
         scheduledAt: scheduledDate,
       })
@@ -825,6 +937,7 @@ export class PostService {
     }
 
     const linkedProductsByPost = await PostService._linkedProductsByPost(allPostIds);
+    const linkedEventByPost = await PostService._linkedEventsByPost(postsData);
 
     const uniqueUserIds = [...new Set(postsData.map(post => post.userId))];
     const userStoryStatus = await Promise.all(
@@ -873,6 +986,7 @@ export class PostService {
       hideLikes: post.settings?.hideLikes || false,
       linkButton: post.settings?.linkButton || null,
       linkedProducts: linkedProductsByPost.get(post.id) || [],
+      linkedEvent: linkedEventByPost.get(post.id) || null,
       isLiked: post.likes.length > 0,
       isSaved: post.saves.length > 0,
       isReposted: post.reposts ? post.reposts.length > 0 : false,
@@ -1007,6 +1121,7 @@ export class PostService {
 
     const hasStory = await StoryService.hasActiveStory(post.userId);
     const linkedProducts = (await PostService._linkedProductsByPost([postId])).get(postId) || [];
+    const linkedEvent = (await PostService._linkedEventsByPost([post])).get(postId) || null;
 
     const response = {
       id: post.id,
@@ -1044,6 +1159,7 @@ export class PostService {
       hideLikes: post.settings?.hideLikes || false,
       linkButton: post.settings?.linkButton || null,
       linkedProducts,
+      linkedEvent,
       isLiked: post.likes.length > 0,
       isSaved: post.saves.length > 0,
       isReposted: post.reposts ? post.reposts.length > 0 : false,
@@ -1077,6 +1193,7 @@ export class PostService {
       aspectRatios,
       scheduledAt,
       linkedProductIds,
+      linkedEventId,
       isPlus,
     }
   ) {
@@ -1111,6 +1228,16 @@ export class PostService {
       resolvedProductIds = await PostService._resolveLinkedProducts(userId, linkedProductIds, {
         isPlus,
         hasLinkButton: !!setData.settings?.linkButton,
+      });
+    }
+
+    // Same undefined-leaves-alone / explicit-null-clears-it convention as
+    // linkedProductIds above.
+    if (linkedEventId !== undefined) {
+      setData.linkedEventId = await PostService._resolveLinkedEvent(userId, linkedEventId, {
+        isPlus,
+        hasLinkButton: !!setData.settings?.linkButton,
+        hasLinkedProducts: resolvedProductIds !== null && resolvedProductIds.length > 0,
       });
     }
 
