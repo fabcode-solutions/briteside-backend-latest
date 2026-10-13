@@ -19,6 +19,7 @@ const { initImportWorker } = await import('./workers/importWorker.js');
 const { initModerationWorker } = await import('./workers/moderationWorker.js');
 const { initUrlModerationSyncWorker } = await import('./workers/urlModerationSyncWorker.js');
 const { initAnalyticsWorker } = await import('./workers/analyticsWorker.js');
+const { initCopyrightScanWorker } = await import('./workers/copyrightScanWorker.js');
 
 const PORT = process.env.PORT || 3330;
 
@@ -35,6 +36,7 @@ await initImportWorker();
 await initModerationWorker();
 await initUrlModerationSyncWorker();
 await initAnalyticsWorker();
+await initCopyrightScanWorker();
 
 // Initialize cron jobs after async work is done
 initializeCronJobs();

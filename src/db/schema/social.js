@@ -16,6 +16,7 @@ import {
 import { sql } from 'drizzle-orm';
 import { users } from './users.js';
 import { organizers } from './organizers.js';
+import { events } from './events.js';
 import { timeStamps } from '../schema-helper.js';
 
 export const genderEnum = pgEnum('gender', ['male', 'female', 'other', 'prefer_not_to_say']);
@@ -154,6 +155,10 @@ export const posts = pgTable(
     visibility: varchar('visibility', { length: 20 }).notNull().default('public'),
     settings: json('settings').default({ commentsDisabled: false, hideLikes: false }),
     tags: json('tags').default([]), // Array of tag strings for quick access
+    // A post links a URL, OR shop products, OR one event — never more than
+    // one of the three (enforced in post.service.js). set null (not cascade)
+    // on event deletion: the post itself should survive, just lose the link.
+    linkedEventId: uuid('linked_event_id').references(() => events.id, { onDelete: 'set null' }),
     wallPostId: uuid('wall_post_id').references(() => socialWallPosts.id, { onDelete: 'set null' }),
     status: varchar('status', { length: 20 }).notNull().default('published'), // 'published' | 'scheduled'
     scheduledAt: timestamp('scheduled_at', { withTimezone: true }),
@@ -174,6 +179,7 @@ export const posts = pgTable(
     index('idx_posts_status').on(table.status),
     index('idx_posts_scheduled_at').on(table.scheduledAt),
     index('idx_posts_source').on(table.source),
+    index('idx_posts_linked_event').on(table.linkedEventId),
   ]
 );
 

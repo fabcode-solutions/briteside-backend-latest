@@ -1501,6 +1501,91 @@ export class TalentSessionService {
       : { clientSecret: stripeSession.client_secret, sessionId: session.id };
   }
 
+  /** Prepare-only step for the native flow — creates the `awaiting_payment`
+   *  session row (same validation as createCheckout) without touching Stripe. */
+  static async prepareBooking(args) {
+    const prep = await this._prepareSessionBooking(args);
+    return {
+      paymentId: prep.session.id,
+      talentPriceCents: prep.talentPriceCents,
+      platformAndServiceFeeCents: prep.platformAndServiceFeeCents,
+      chargedCents: prep.chargedCents,
+    };
+  }
+
+  // ── Native Briteside checkout (NativeCheckoutModal) ───────────────────────
+  // Same prepared `talentSessions` row (status: 'awaiting_payment') as the
+  // hosted-Checkout path above — just a raw PaymentIntent instead of a
+  // Checkout Session, and fulfillment reuses handlePaymentWebhook below via a
+  // minimal shimmed "session" object, same trick as the ticket PaymentSheet
+  // flow's processPaymentSheetIntent → handleCheckoutSession.
+
+  static async createNativePaymentIntent(sessionId, bookerId) {
+    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+
+    const session = await db.query.talentSessions.findFirst({
+      where: eq(talentSessions.id, sessionId),
+    });
+    if (!session) throw new ApiError(404, 'Session not found');
+    if (session.bookerId !== bookerId) throw new ApiError(403, 'This booking is not yours');
+    if (session.status !== 'awaiting_payment') {
+      throw new ApiError(409, `This booking is already ${session.status}`);
+    }
+
+    const profile = await db.query.talentProfiles.findFirst({
+      where: eq(talentProfiles.id, session.talentProfileId),
+    });
+    if (!profile) throw new ApiError(404, 'Talent not found');
+
+    const booker = await db.query.users.findFirst({ where: eq(users.id, bookerId) });
+
+    const platformAndServiceFeeCents = calculatePlatformAndServiceFeeCents(session.priceCents);
+    const chargedCents = session.priceCents + platformAndServiceFeeCents;
+
+    const intent = await stripe.paymentIntents.create({
+      amount: chargedCents,
+      currency: 'usd',
+      ...(booker?.email?.trim() ? { receipt_email: booker.email.trim() } : {}),
+      metadata: {
+        type: 'talent_session',
+        sessionId: session.id,
+        bookerId,
+        talentUserId: profile.userId,
+      },
+      // No transfer_data/application_fee_amount — same deliver-first escrow
+      // rule as _createHostedSessionCheckout: the talent's cut is held and
+      // paid out later, not split at charge time.
+    });
+
+    return { clientSecret: intent.client_secret, paymentId: session.id };
+  }
+
+  static async finalizeNativePayment(sessionId, bookerId, paymentIntentId, io = null) {
+    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+
+    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (intent.metadata?.sessionId !== sessionId || intent.metadata?.bookerId !== bookerId) {
+      throw new ApiError(409, 'Payment does not match this booking');
+    }
+    if (intent.status !== 'succeeded') {
+      throw new ApiError(409, `Payment is not completed yet (status: ${intent.status})`);
+    }
+
+    // handlePaymentWebhook only reads .id/.payment_intent/.amount_total/.metadata
+    // off its "session" argument — a real Checkout Session is not required.
+    await this.handlePaymentWebhook(
+      {
+        id: null,
+        payment_intent: intent.id,
+        amount_total: intent.amount_received || intent.amount,
+        metadata: intent.metadata,
+      },
+      io
+    );
+
+    return { sessionId };
+  }
+
   // ── Handle Stripe webhook after payment confirmed ─────────────────────────
 
   static async handlePaymentWebhook(stripeSession, io) {

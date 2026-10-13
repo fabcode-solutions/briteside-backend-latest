@@ -905,9 +905,10 @@ export class ShopCustomOfferService {
       this._computeMilestoneAmounts(product.priceCents, product.milestones);
     }
 
-    // Inserted directly rather than through validate(): a shop listing has no
-    // turnaroundMinutes, which validate() requires. Every NOT NULL column on
-    // the table is supplied explicitly below.
+    // Inserted directly rather than through validate(): a listing's
+    // turnaroundMinutes is optional (unlike a direct custom offer, where
+    // validate() requires it), so this can't reuse that check. Every NOT
+    // NULL column on the table is supplied explicitly below.
     const [offer] = await db
       .insert(shopCustomServiceOffers)
       .values({
@@ -921,9 +922,11 @@ export class ShopCustomOfferService {
         description: product.description?.trim() || product.title,
         priceCents: product.priceCents,
         turnaround: product.turnaround?.trim() || null,
-        // Listings carry only display text, no machine-readable duration, so
-        // the due date stays null until the seller sets one.
-        turnaroundMinutes: null,
+        // Carried over from the listing when it has a structured duration
+        // (set via the listing form's turnaround presets). Older listings
+        // saved before that field existed are still null, and the due date
+        // then stays null until the seller sets one.
+        turnaroundMinutes: product.turnaroundMinutes ?? null,
         dueDate: null,
         revisionsIncluded: !!product.revisionsIncluded,
         revisionsCount: product.revisionsIncluded ? (product.revisionsCount ?? null) : null,
@@ -2962,6 +2965,9 @@ export class ShopCustomOfferService {
         revisionsUsedCount: sql`${shopCustomServiceOffers.revisionsUsedCount} + 1`,
         deliveryState: 'revision_requested',
         deliveredAt: null,
+        // The "new delivery date" countdown is superseded by the
+        // revision_requested-state "Redeliver in" countdown now.
+        dueDateExtendedAt: null,
         updatedAt: new Date(),
       })
       .where(eq(shopCustomServiceOffers.id, offerId));

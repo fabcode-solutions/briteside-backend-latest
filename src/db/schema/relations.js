@@ -1290,6 +1290,10 @@ export const postsRelations = relations(posts, ({ one, many }) => ({
     fields: [posts.wallPostId],
     references: [socialWallPosts.id],
   }),
+  linkedEvent: one(events, {
+    fields: [posts.linkedEventId],
+    references: [events.id],
+  }),
   likes: many(postLikes),
   comments: many(postComments),
   shares: many(postShares),
