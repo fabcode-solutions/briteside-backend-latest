@@ -1,7 +1,18 @@
 import 'dotenv/config.js';
+import fs from 'fs';
+import path from 'path';
+import dotenv from 'dotenv';
 import z from 'zod';
 
 import logger from './logger.js';
+
+// Raw values from the .env file only (AWS secrets can't overwrite these)
+let fileEnv = {};
+try {
+  fileEnv = dotenv.parse(fs.readFileSync(path.resolve(process.cwd(), '.env')));
+} catch (e) {
+  fileEnv = {};
+}
 
 const EnvVariables = z.object({
   PORT: z.preprocess(a => +a, z.number().optional().default(5000)),
@@ -55,10 +66,11 @@ const EnvVariables = z.object({
   // Google Play In-App Purchase — Play Developer API (service account)
   GOOGLE_PLAY_PACKAGE_NAME: z.string().optional(),
   GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: z.string().optional(),
-  // Google Play Real-time Developer Notifications (Pub/Sub push → /api/webhooks/google-play).
-  // The push subscription's OIDC audience and the service account it signs as.
-  GOOGLE_PLAY_RTDN_PUSH_AUDIENCE: z.string().optional(),
-  GOOGLE_PLAY_RTDN_PUSH_SERVICE_ACCOUNT: z.string().optional(),
+
+  // ACRCloud — audio fingerprint matching for copyright scans
+  ACRCLOUD_HOST: z.string().optional(),
+  ACRCLOUD_ACCESS_KEY: z.string().optional(),
+  ACRCLOUD_ACCESS_SECRET: z.string().optional(),
 });
 
 let envVars;
@@ -69,8 +81,6 @@ try {
   logger.error(`Env validation error: ${error}`);
   process.exit(1);
 }
-
-const isProduction = process.env.NODE_ENV === 'production';
 
 const env = {
   nodeEnv: process.env.NODE_ENV,
@@ -94,15 +104,21 @@ const env = {
     email: envVars.GMAIL_EMAIL,
     appPassword: envVars.GMAIL_APP_PASSWORD,
   },
-  // production -> live keys (STRIPE_*), everything else -> test keys (STRIPE_*_LOCAL only)
   stripe: {
-    secretKey: isProduction ? envVars.STRIPE_SECRET_KEY : envVars.STRIPE_SECRET_KEY_LOCAL,
-    publishableKey: isProduction
-      ? envVars.STRIPE_PUBLISHABLE_KEY
-      : envVars.STRIPE_PUBLISHABLE_KEY_LOCAL,
-    webhookSecret: isProduction
-      ? envVars.STRIPE_WEBHOOK_SECRET
-      : envVars.STRIPE_WEBHOOK_SECRET_LOCAL,
+    secretKey:
+      fileEnv.STRIPE_SECRET_KEY_LOCAL ||
+      envVars.STRIPE_SECRET_KEY_LOCAL ||
+      envVars.STRIPE_SECRET_KEY,
+
+    publishableKey:
+      fileEnv.STRIPE_PUBLISHABLE_KEY_LOCAL ||
+      envVars.STRIPE_PUBLISHABLE_KEY_LOCAL ||
+      envVars.STRIPE_PUBLISHABLE_KEY,
+
+    webhookSecret:
+      fileEnv.STRIPE_WEBHOOK_SECRET_LOCAL ||
+      envVars.STRIPE_WEBHOOK_SECRET_LOCAL ||
+      envVars.STRIPE_WEBHOOK_SECRET,
   },
   google: {
     clientId: envVars.GOOGLE_CLIENT_ID,
@@ -143,9 +159,39 @@ const env = {
     packageName: envVars.GOOGLE_PLAY_PACKAGE_NAME,
     serviceAccountJson: envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON,
     configured: !!(envVars.GOOGLE_PLAY_PACKAGE_NAME && envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON),
-    rtdnPushAudience: envVars.GOOGLE_PLAY_RTDN_PUSH_AUDIENCE,
-    rtdnPushServiceAccount: envVars.GOOGLE_PLAY_RTDN_PUSH_SERVICE_ACCOUNT,
+  },
+  acrcloud: {
+    host: envVars.ACRCLOUD_HOST,
+    accessKey: envVars.ACRCLOUD_ACCESS_KEY,
+    accessSecret: envVars.ACRCLOUD_ACCESS_SECRET,
+    configured: !!(
+      envVars.ACRCLOUD_HOST &&
+      envVars.ACRCLOUD_ACCESS_KEY &&
+      envVars.ACRCLOUD_ACCESS_SECRET
+    ),
   },
 };
+
+// --- Debug: show which Stripe keys are being used (masked) ---
+const mask = k => (k ? `${k.slice(0, 8)}...${k.slice(-4)}` : 'NOT SET');
+
+console.log(
+  '[Stripe] secretKey source:',
+  fileEnv.STRIPE_SECRET_KEY_LOCAL ? '.env LOCAL' : 'OTHER',
+  '→',
+  mask(env.stripe.secretKey),
+);
+console.log(
+  '[Stripe] publishableKey source:',
+  fileEnv.STRIPE_PUBLISHABLE_KEY_LOCAL ? '.env LOCAL' : 'OTHER',
+  '→',
+  mask(env.stripe.publishableKey),
+);
+console.log(
+  '[Stripe] webhookSecret source:',
+  fileEnv.STRIPE_WEBHOOK_SECRET_LOCAL ? '.env LOCAL' : 'OTHER',
+  '→',
+  mask(env.stripe.webhookSecret),
+);
 
 export default env;

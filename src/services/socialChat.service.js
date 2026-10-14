@@ -12,7 +12,16 @@ import ApiError from '../utils/api-error.js';
 import { priorityMessagePayments } from '../db/schema/priorityMessagePayments.js';
 import { priorityMessageAttachments } from '../db/schema/priorityMessageAttachments.js';
 import { TextModerationService, TEXT_ENTITY } from './moderation/textModeration.service.js';
-import { MediaModerationService } from './moderation/mediaModeration.service.js';
+import {
+  MediaModerationService,
+  attachPostModerationStatuses,
+  attachPostCopyrightStatuses,
+  attachStoryModerationStatuses,
+  attachStoryCopyrightStatuses,
+  attachDiscussionModerationStatuses,
+  attachDiscussionCopyrightStatuses,
+  isHeldFromViewer,
+} from './moderation/mediaModeration.service.js';
 import { BlockService } from './social/block.service.js';
 function orderUserPair(userId1, userId2) {
   return userId1 < userId2 ? { a: userId1, b: userId2 } : { a: userId2, b: userId1 };
@@ -828,6 +837,23 @@ export class SocialChatService {
       },
     });
 
+    if (post) {
+      await attachPostModerationStatuses([post]);
+      await attachPostCopyrightStatuses([post]);
+      // Held content (GetStream or a pending/confirmed copyright case) must
+      // never be forwarded into someone else's DM inbox by a non-owner.
+      if (
+        isHeldFromViewer({
+          moderationStatus: post.moderationStatus,
+          copyrightStatus: post.copyrightStatus,
+          ownerId: post.userId,
+          viewerId: currentUserId,
+        })
+      ) {
+        throw new ApiError(404, 'Post not found');
+      }
+    }
+
     let isStory = false;
     let isGroup = false;
     let isProfile = false;
@@ -848,6 +874,19 @@ export class SocialChatService {
           !(await StoryService.isStoryFavourited(story.id, currentUserId))
         ) {
           throw new ApiError(410, 'Story has expired');
+        }
+
+        await attachStoryModerationStatuses([story]);
+        await attachStoryCopyrightStatuses([story]);
+        if (
+          isHeldFromViewer({
+            moderationStatus: story.moderationStatus,
+            copyrightStatus: story.copyrightStatus,
+            ownerId: story.userId,
+            viewerId: currentUserId,
+          })
+        ) {
+          throw new ApiError(404, 'Story not found');
         }
 
         isStory = true;
@@ -1040,6 +1079,19 @@ export class SocialChatService {
     });
 
     if (!discussion) throw new ApiError(404, 'Discussion not found');
+
+    await attachDiscussionModerationStatuses([discussion]);
+    await attachDiscussionCopyrightStatuses([discussion]);
+    if (
+      isHeldFromViewer({
+        moderationStatus: discussion.moderationStatus,
+        copyrightStatus: discussion.copyrightStatus,
+        ownerId: discussion.userId,
+        viewerId: currentUserId,
+      })
+    ) {
+      throw new ApiError(404, 'Discussion not found');
+    }
 
     const uniqueRecipients = [...new Set(recipientUserIds)].filter(id => id !== currentUserId);
     if (uniqueRecipients.length === 0) throw new ApiError(400, 'No valid recipients provided');

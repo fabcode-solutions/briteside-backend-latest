@@ -22,9 +22,10 @@ import { TextModerationService, TEXT_ENTITY } from './moderation/textModeration.
 import {
   MediaModerationService,
   MEDIA_ENTITY,
-  HELD_FROM_OTHERS,
   discussionsModerationGate,
   attachDiscussionModerationStatuses,
+  attachDiscussionCopyrightStatuses,
+  isHeldFromViewer,
 } from './moderation/mediaModeration.service.js';
 import { and, eq, sql, desc, count, isNull, inArray, or, countDistinct } from 'drizzle-orm';
 
@@ -226,6 +227,7 @@ export class DiscussionService {
     }));
 
     await attachDiscussionModerationStatuses(finalData);
+    await attachDiscussionCopyrightStatuses(finalData);
 
     const discussionsFilterEnabled = await TextModerationService.getFilterEnabled(userId);
     await TextModerationService.maskFlaggedText(finalData, {
@@ -283,9 +285,18 @@ export class DiscussionService {
 
     if (discussion) {
       await attachDiscussionModerationStatuses([discussion]);
-      // Held content (pending/rejected/shadowed/…) is invisible to non-owners,
-      // even by direct id. Owner still sees their own (with the removed/blur UI).
-      if (HELD_FROM_OTHERS.has(discussion.moderationStatus) && discussion.userId !== userId) {
+      await attachDiscussionCopyrightStatuses([discussion]);
+      // Held content (pending/rejected/shadowed/… OR a pending/confirmed
+      // copyright case) is invisible to non-owners, even by direct id. Owner
+      // still sees their own (with the removed/blur/"under review" UI).
+      if (
+        isHeldFromViewer({
+          moderationStatus: discussion.moderationStatus,
+          copyrightStatus: discussion.copyrightStatus,
+          ownerId: discussion.userId,
+          viewerId: userId,
+        })
+      ) {
         return null;
       }
 

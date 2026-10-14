@@ -25,6 +25,7 @@ import {
   storiesModerationGate,
   storiesModerationGateStrict,
   attachStoryModerationStatuses,
+  attachStoryCopyrightStatuses,
 } from '../moderation/mediaModeration.service.js';
 import FileManagementService from '../fileManagement.service.js';
 import { BlockService } from './block.service.js';
@@ -312,6 +313,8 @@ export class StoryService {
 
     await attachStoryModerationStatuses(setAStories);
     await attachStoryModerationStatuses(setBStories);
+    await attachStoryCopyrightStatuses(setAStories);
+    await attachStoryCopyrightStatuses(setBStories);
 
     const storiesFilterEnabled = await TextModerationService.getFilterEnabled(viewerId);
     const allStories = [...setAStories, ...setBStories];

@@ -24,6 +24,15 @@ const checkoutSchema = z.object({
   cancelUrl: z.string().min(1, 'cancelUrl is required'),
 });
 
+const nativeIntentSchema = z.object({
+  planId: z.string().uuid('Plan ID must be a valid UUID'),
+});
+
+const nativeFinalizeSchema = z.object({
+  subscriptionId: z.string().min(1, 'subscriptionId is required'),
+  paymentIntentId: z.string().min(1, 'paymentIntentId is required'),
+});
+
 const portalSchema = z.object({
   returnUrl: z.string().url('Return URL must be a valid URL'),
 });
@@ -41,6 +50,22 @@ router.post(
   authMiddleware,
   validate(checkoutSchema),
   subscriptionController.createCheckoutSession
+);
+
+// Native checkout — create subscription + PaymentIntent
+router.post(
+  '/native-intent',
+  authMiddleware,
+  validate(nativeIntentSchema),
+  subscriptionController.createNativeSubscriptionIntent
+);
+
+// Native checkout — verify PaymentIntent and activate subscription
+router.post(
+  '/native-finalize',
+  authMiddleware,
+  validate(nativeFinalizeSchema),
+  subscriptionController.finalizeNativeSubscription
 );
 
 // Get Stripe Customer Portal session

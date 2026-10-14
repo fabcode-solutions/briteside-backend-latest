@@ -202,6 +202,19 @@ export class ShopProductService {
       }
     }
 
+    // Optional: a listing predating this field, or one a seller hasn't
+    // re-saved yet, has no turnaroundMinutes — that's fine, it just can't
+    // compute a real due date on purchase until it's set.
+    if (data.turnaroundMinutes !== undefined && data.turnaroundMinutes !== null) {
+      const turnaroundMinutes = Number(data.turnaroundMinutes);
+      if (!Number.isInteger(turnaroundMinutes) || turnaroundMinutes <= 0) {
+        throw new ApiError(400, 'turnaroundMinutes must be a positive whole number of minutes');
+      }
+      if (turnaroundMinutes > 90 * 24 * 60) {
+        throw new ApiError(400, 'Turnaround cannot exceed 90 days');
+      }
+    }
+
     if (data.paymentMode !== undefined && data.paymentMode !== null) {
       if (!PAYMENT_MODES.includes(data.paymentMode)) {
         throw new ApiError(400, `paymentMode must be one of: ${PAYMENT_MODES.join(', ')}`);
@@ -265,6 +278,7 @@ export class ShopProductService {
       listingType: data.listingType ?? 'product',
       serviceKind: data.serviceKind || null,
       turnaround: data.turnaround?.trim() || null,
+      turnaroundMinutes: data.turnaroundMinutes != null ? Number(data.turnaroundMinutes) : null,
       cancellationPolicy: data.cancellationPolicy?.trim() || null,
       revisionsIncluded: data.revisionsIncluded ?? false,
       revisionsCount: data.revisionsIncluded ? Number(data.revisionsCount) : null,

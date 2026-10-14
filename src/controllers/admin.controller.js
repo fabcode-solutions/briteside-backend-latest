@@ -14,6 +14,7 @@ import * as appealService from '../services/appeal.service.js';
 import { GroupCourseService } from '../services/groupCourse.service.js';
 import { GroupSubscriptionService } from '../services/groupSubscription.service.js';
 import { MediaModerationService } from '../services/moderation/mediaModeration.service.js';
+import { CopyrightReviewCaseService } from '../services/copyrightReviewCase.service.js';
 import { TalentSessionService } from '../services/talentSession.service.js';
 import { CallFrameArchiveService } from '../services/moderation/callFrameArchive.service.js';
 import { PopularCoverService } from '../services/social/popularCover.service.js';
@@ -1061,6 +1062,54 @@ const reviewMediaModerationItem = catchAsync(async (req, res) => {
     .json({ success: true, message: 'Moderation item reviewed', data: item });
 });
 
+/**
+ * List ACRCloud copyright-match admin review cases. Defaults to no status
+ * filter (callers pass ?status=pending for the actionable queue).
+ * @route GET /api/admin/copyright/cases
+ */
+const listCopyrightReviewCases = catchAsync(async (req, res) => {
+  const { status, page, limit } = req.query;
+  const data = await CopyrightReviewCaseService.list({
+    status,
+    page: page ? Number(page) : undefined,
+    limit: limit ? Number(limit) : undefined,
+  });
+  res.status(httpStatus.OK).json({ success: true, data });
+});
+
+/**
+ * Full detail for one copyright review case, including every ACRCloud match
+ * from that scan and any posts currently referencing the media.
+ * @route GET /api/admin/copyright/cases/:id
+ */
+const getCopyrightReviewCase = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const data = await CopyrightReviewCaseService.getById(id);
+  if (!data) {
+    throw new ApiError(httpStatus.NOT_FOUND, 'Copyright review case not found');
+  }
+  res.status(httpStatus.OK).json({ success: true, data });
+});
+
+/**
+ * Admin decision on a copyright match: reviewed, dismissed, or confirmed as
+ * infringement. Never blocks/deletes the video itself — record-keeping only.
+ * @route PATCH /api/admin/copyright/cases/:id/action
+ */
+const reviewCopyrightCase = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const { action, notes } = req.body;
+
+  const item = await CopyrightReviewCaseService.review({
+    id,
+    action,
+    adminId: req.user.id,
+    notes,
+  });
+
+  res.status(httpStatus.OK).json({ success: true, message: 'Copyright case reviewed', data: item });
+});
+
 const impersonateUser = catchAsync(async (req, res) => {
   const { userId } = req.params;
   const { reason } = req.body;
@@ -1082,6 +1131,9 @@ export const adminController = {
   deletePost,
   listMediaModerationQueue,
   reviewMediaModerationItem,
+  listCopyrightReviewCases,
+  getCopyrightReviewCase,
+  reviewCopyrightCase,
   listCallModerationQueue,
   getFrameSignedUrl,
   getReportStatistics,

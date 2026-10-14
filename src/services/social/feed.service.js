@@ -18,6 +18,7 @@ import { PostService } from './post.service.js';
 import {
   postsModerationGate,
   attachPostModerationStatuses,
+  attachPostCopyrightStatuses,
 } from '../moderation/mediaModeration.service.js';
 import { TextModerationService, TEXT_ENTITY } from '../moderation/textModeration.service.js';
 import { userFollowRequests } from '../../db/schema/index.js';
@@ -224,6 +225,7 @@ export class FeedService {
     const requestedSet = new Set(pendingRequests.map(r => r.targetId));
 
     await attachPostModerationStatuses(postsData);
+    await attachPostCopyrightStatuses(postsData);
 
     const postIds = postsData.map(p => p.id);
     const collabRows = postIds.length
@@ -254,6 +256,7 @@ export class FeedService {
     }
 
     const linkedProductsByPost = await PostService._linkedProductsByPost(postsData.map(p => p.id));
+    const linkedEventByPost = await PostService._linkedEventsByPost(postsData);
 
     // Who among the people I follow reposted each of these posts — used to
     // attach "reposted by" attribution below for posts that only qualify
@@ -334,6 +337,7 @@ export class FeedService {
       hideLikes: post.settings?.hideLikes || false,
       linkButton: post.settings?.linkButton || null,
       linkedProducts: linkedProductsByPost.get(post.id) || [],
+      linkedEvent: linkedEventByPost.get(post.id) || null,
       collaborators: collaboratorsByPost.get(post.id) || [],
       user: {
         id: post.user.id,
@@ -352,6 +356,7 @@ export class FeedService {
       isSaved: post.saves.length > 0,
       isReposted: post.reposts ? post.reposts.length > 0 : false,
       moderationStatus: post.moderationStatus ?? 'approved',
+      copyrightStatus: post.copyrightStatus ?? null,
     }));
 
     const filterEnabled = await TextModerationService.getFilterEnabled(userId);
@@ -542,6 +547,7 @@ export class FeedService {
     const requestedSet = new Set(pendingRequests.map(r => r.targetId));
 
     await attachPostModerationStatuses(postsData);
+    await attachPostCopyrightStatuses(postsData);
 
     for (const post of postsData) {
       post.isFollowing = await FollowService.isFollowing(userId, post.userId);
@@ -586,6 +592,7 @@ export class FeedService {
     }
 
     const linkedProductsByPost = await PostService._linkedProductsByPost(postsData.map(p => p.id));
+    const linkedEventByPost = await PostService._linkedEventsByPost(postsData);
 
     const shapedPosts = postsData.map(post => ({
       id: post.id,
@@ -607,6 +614,7 @@ export class FeedService {
       hideLikes: post.settings?.hideLikes || false,
       linkButton: post.settings?.linkButton || null,
       linkedProducts: linkedProductsByPost.get(post.id) || [],
+      linkedEvent: linkedEventByPost.get(post.id) || null,
       collaborators: collaboratorsByPost.get(post.id) || [],
       user: {
         id: post.user.id,
@@ -630,6 +638,7 @@ export class FeedService {
       tags: post.tags,
       visibility: post.visibility,
       moderationStatus: post.moderationStatus ?? 'approved',
+      copyrightStatus: post.copyrightStatus ?? null,
     }));
 
     const exploreFilterEnabled = await TextModerationService.getFilterEnabled(userId);
@@ -952,6 +961,7 @@ export class FeedService {
     const requestedSet = new Set(pendingRequests.map(r => r.targetId));
 
     await attachPostModerationStatuses(pageItems.map(({ post }) => post));
+    await attachPostCopyrightStatuses(pageItems.map(({ post }) => post));
 
     const uniqueUserIds = [...new Set(pageItems.map(({ post }) => post.userId))];
     const userStoryStatus = await Promise.all(
@@ -994,6 +1004,7 @@ export class FeedService {
     const linkedProductsByPost = await PostService._linkedProductsByPost(
       pageItems.map(({ post }) => post.id)
     );
+    const linkedEventByPost = await PostService._linkedEventsByPost(pageItems.map(({ post }) => post));
 
     const shapedPosts = pageItems.map(({ post, isFollowing, repostedBy }) => ({
       id: post.id,
@@ -1017,6 +1028,7 @@ export class FeedService {
       hideLikes: post.settings?.hideLikes || false,
       linkButton: post.settings?.linkButton || null,
       linkedProducts: linkedProductsByPost.get(post.id) || [],
+      linkedEvent: linkedEventByPost.get(post.id) || null,
       collaborators: collaboratorsByPost.get(post.id) || [],
       user: {
         id: post.user.id,
@@ -1039,6 +1051,7 @@ export class FeedService {
       isStatusPost: post.isStatusPost || false,
       isCoverPost: post.isCoverPost || false,
       moderationStatus: post.moderationStatus ?? 'approved',
+      copyrightStatus: post.copyrightStatus ?? null,
     }));
 
     const personalizedFilterEnabled = await TextModerationService.getFilterEnabled(userId);

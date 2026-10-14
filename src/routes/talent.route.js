@@ -19,6 +19,9 @@ import {
   getAvailability,
   getAvailableSlots,
   createSessionCheckout,
+  prepareSessionBooking,
+  createSessionNativePaymentIntent,
+  finalizeSessionNativePayment,
   bookSession,
   confirmSession,
   declineSession,
@@ -149,6 +152,10 @@ router.get('/me/payout-ledger/early-payout', authMiddleware, getEarlyPayoutEligi
 router.post('/me/payout-ledger/early-payout/claim', authMiddleware, claimEarlyPayoutHandler);
 
 router.post('/sessions/checkout', authMiddleware, createSessionCheckout);
+// Native Briteside checkout (NativeCheckoutModal) — prepare/intent/finalize split.
+router.post('/sessions/checkout/prepare', authMiddleware, prepareSessionBooking);
+router.post('/sessions/:sessionId/native-intent', authMiddleware, createSessionNativePaymentIntent);
+router.post('/sessions/:sessionId/native-finalize', authMiddleware, finalizeSessionNativePayment);
 router.post('/sessions/book', authMiddleware, bookSession);
 router.post('/sessions/:sessionId/tip/checkout', authMiddleware, createSessionTipCheckout);
 

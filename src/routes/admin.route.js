@@ -89,6 +89,11 @@ const reviewModerationItemSchema = z.object({
   reason: z.string().max(1000).optional(),
 });
 
+const reviewCopyrightCaseSchema = z.object({
+  action: z.enum(['reviewed', 'dismissed', 'confirmed_infringement']),
+  notes: z.string().max(1000).optional(),
+});
+
 const createCategorySchema = z.object({
   name: z
     .string()
@@ -192,6 +197,15 @@ router.patch(
 );
 router.get('/moderation/calls', adminController.listCallModerationQueue);
 router.get('/moderation/frames/:frameId/signed-url', adminController.getFrameSignedUrl);
+
+// ACRCloud copyright-match admin review queue (separate from content_moderation)
+router.get('/copyright/cases', adminController.listCopyrightReviewCases);
+router.get('/copyright/cases/:id', adminController.getCopyrightReviewCase);
+router.patch(
+  '/copyright/cases/:id/action',
+  validate(reviewCopyrightCaseSchema),
+  adminController.reviewCopyrightCase
+);
 
 // Logo library management routes (shared "popular covers" picker)
 router.get('/logos', adminController.listLogos);
