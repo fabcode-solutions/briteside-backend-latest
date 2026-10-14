@@ -76,6 +76,8 @@ import {
   deactivateGroupTier,
   getMyGroupSubscription,
   createGroupCheckoutSession,
+  createGroupNativeSubscriptionIntent,
+  finalizeGroupNativeSubscription,
   cancelGroupSubscription,
   refundGroupSubscription,
   getGroupSubscriptionPortal,
@@ -245,6 +247,8 @@ router.delete('/:groupId/subscription/tiers/:tierId', deactivateGroupTier);
 router.get('/:groupId/subscription/me', getMyGroupSubscription);
 router.get('/:groupId/subscription/me/refund', checkGroupSubscriptionRefund);
 router.post('/:groupId/subscription/checkout', createGroupCheckoutSession);
+router.post('/:groupId/subscription/native-intent', createGroupNativeSubscriptionIntent);
+router.post('/:groupId/subscription/native-finalize', finalizeGroupNativeSubscription);
 router.post('/:groupId/subscription/cancel', cancelGroupSubscription);
 router.post('/:groupId/subscription/refund', refundGroupSubscription);
 router.post('/:groupId/subscription/portal', getGroupSubscriptionPortal);

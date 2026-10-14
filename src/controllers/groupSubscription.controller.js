@@ -44,6 +44,25 @@ export const createGroupCheckoutSession = catchAsync(async (req, res) => {
   res.json({ success: true, data: session });
 });
 
+export const createGroupNativeSubscriptionIntent = catchAsync(async (req, res) => {
+  const { tierId } = req.body;
+  const result = await GroupSubscriptionService.createNativeSubscriptionIntent(
+    req.user.id,
+    tierId
+  );
+  res.json({ success: true, data: result });
+});
+
+export const finalizeGroupNativeSubscription = catchAsync(async (req, res) => {
+  const { subscriptionId, paymentIntentId } = req.body;
+  const result = await GroupSubscriptionService.finalizeNativeSubscription(
+    req.user.id,
+    subscriptionId,
+    paymentIntentId
+  );
+  res.json({ success: true, data: result });
+});
+
 export const cancelGroupSubscription = catchAsync(async (req, res) => {
   const result = await GroupSubscriptionService.cancelGroupSubscription(
     req.user.id,

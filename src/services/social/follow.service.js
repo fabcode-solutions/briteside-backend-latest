@@ -1,6 +1,6 @@
 import { db } from '../../db/index.js';
 import { users, userFollows, socialProfiles, userFollowRequests } from '../../db/schema/index.js';
-import { eq, and, count, desc, sql } from 'drizzle-orm';
+import { eq, and, count, desc, sql, inArray } from 'drizzle-orm';
 import ApiError from '../../utils/api-error.js';
 import { getActorDisplayName } from '../../utils/helper.js';
 import {
@@ -204,6 +204,32 @@ export class FollowService {
       offset,
     });
 
+    const followerIds = followers.map(f => f.follower.id);
+    const viewer = viewerId ?? userId;
+
+    const [viewerFollows, viewerRequests] = followerIds.length
+      ? await Promise.all([
+          db.query.userFollows.findMany({
+            where: and(
+              eq(userFollows.followerId, viewer),
+              inArray(userFollows.followingId, followerIds)
+            ),
+            columns: { followingId: true },
+          }),
+          db.query.userFollowRequests.findMany({
+            where: and(
+              eq(userFollowRequests.requesterId, viewer),
+              eq(userFollowRequests.status, 'pending'),
+              inArray(userFollowRequests.targetId, followerIds)
+            ),
+            columns: { targetId: true },
+          }),
+        ])
+      : [[], []];
+
+    const followingSet = new Set(viewerFollows.map(f => f.followingId));
+    const requestedSet = new Set(viewerRequests.map(r => r.targetId));
+
     return followers.map(f => ({
       id: f.follower.id,
       username: f.follower.username,
@@ -213,6 +239,8 @@ export class FollowService {
       bio: f.follower.socialProfile?.bio,
       followedAt: f.createdAt,
       allowTagging: f.follower.allowTagging ?? true,
+      isFollowing: followingSet.has(f.follower.id),
+      isRequested: requestedSet.has(f.follower.id),
     }));
   }
 
@@ -254,6 +282,32 @@ export class FollowService {
       offset,
     });
 
+    const followingIds = following.map(f => f.following.id);
+    const viewer = viewerId ?? userId;
+
+    const [viewerFollows, viewerRequests] = followingIds.length
+      ? await Promise.all([
+          db.query.userFollows.findMany({
+            where: and(
+              eq(userFollows.followerId, viewer),
+              inArray(userFollows.followingId, followingIds)
+            ),
+            columns: { followingId: true },
+          }),
+          db.query.userFollowRequests.findMany({
+            where: and(
+              eq(userFollowRequests.requesterId, viewer),
+              eq(userFollowRequests.status, 'pending'),
+              inArray(userFollowRequests.targetId, followingIds)
+            ),
+            columns: { targetId: true },
+          }),
+        ])
+      : [[], []];
+
+    const followingSet = new Set(viewerFollows.map(f => f.followingId));
+    const requestedSet = new Set(viewerRequests.map(r => r.targetId));
+
     return following.map(f => ({
       id: f.following.id,
       username: f.following.username,
@@ -263,6 +317,8 @@ export class FollowService {
       bio: f.following.socialProfile?.bio,
       followedAt: f.createdAt,
       allowMessagesFrom: f.following.allowMessagesFrom ?? 'everyone',
+      isFollowing: followingSet.has(f.following.id),
+      isRequested: requestedSet.has(f.following.id),
     }));
   }
 

@@ -13,6 +13,7 @@ import { db } from '../db/index.js';
 import { acrCopyrightScans } from '../db/schema/acrCopyrightScans.js';
 import { CopyrightReviewCaseService } from './copyrightReviewCase.service.js';
 import logger from '../config/logger.js';
+import env from '../config/config.js';
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -170,11 +171,9 @@ export class CopyrightScanService {
    * never touches content_moderation, S3 ACLs, or moderation notifications.
    */
   static async runCheck({ mediaId, userId, url }) {
-    const host = process.env.ACRCLOUD_HOST;
-    const accessKey = process.env.ACRCLOUD_ACCESS_KEY;
-    const accessSecret = process.env.ACRCLOUD_ACCESS_SECRET;
+    const { host, accessKey, accessSecret } = env.acrcloud;
 
-    if (!host || !accessKey || !accessSecret) {
+    if (!env.acrcloud.configured) {
       log.warn('ACRCloud credentials not configured — skipping copyright scan', { mediaId });
       await upsertScan({
         mediaId,

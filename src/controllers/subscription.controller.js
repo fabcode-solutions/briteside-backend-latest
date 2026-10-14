@@ -37,6 +37,42 @@ const createCheckoutSession = catchAsync(async (req, res) => {
 });
 
 /**
+ * Native checkout step 1 — create the Stripe subscription directly and
+ * return the first invoice's PaymentIntent client secret.
+ * @route POST /api/subscriptions/native-intent
+ */
+const createNativeSubscriptionIntent = catchAsync(async (req, res) => {
+  const { planId } = req.body;
+
+  const result = await SubscriptionService.createNativeSubscriptionIntent(req.user.id, planId);
+
+  res.status(httpStatus.OK).json({
+    success: true,
+    data: result,
+  });
+});
+
+/**
+ * Native checkout step 2 — verify the confirmed PaymentIntent and activate
+ * the subscription.
+ * @route POST /api/subscriptions/native-finalize
+ */
+const finalizeNativeSubscription = catchAsync(async (req, res) => {
+  const { subscriptionId, paymentIntentId } = req.body;
+
+  const result = await SubscriptionService.finalizeNativeSubscription(
+    req.user.id,
+    subscriptionId,
+    paymentIntentId
+  );
+
+  res.status(httpStatus.OK).json({
+    success: true,
+    data: result,
+  });
+});
+
+/**
  * Create Stripe Customer Portal session
  * @route POST /api/subscriptions/portal
  */
@@ -107,6 +143,8 @@ const getMyGroupSubscriptions = catchAsync(async (req, res) => {
 export const subscriptionController = {
   getPlans,
   createCheckoutSession,
+  createNativeSubscriptionIntent,
+  finalizeNativeSubscription,
   getCustomerPortalSession,
   getMySubscription,
   getMySubscriptionHistory,

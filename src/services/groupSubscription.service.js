@@ -215,6 +215,13 @@ export class GroupSubscriptionService {
     });
     if (!tier) throw new ApiError(404, 'Subscription tier not found or inactive');
 
+    if (!tier.stripePriceId) {
+      throw new ApiError(
+        422,
+        'This subscription tier is not yet configured for payment. Please contact the group organizer.'
+      );
+    }
+
     const group = await db.query.groups.findFirst({ where: eq(groups.id, tier.groupId) });
     if (!group) throw new ApiError(404, 'Group not found');
     if (!group.isPaid) throw new ApiError(400, 'This group does not require a subscription');
@@ -277,6 +284,131 @@ export class GroupSubscriptionService {
     });
 
     return { sessionId: session.id, clientSecret: session.client_secret };
+  }
+
+  /**
+   * Native checkout step 1 — creates the Stripe subscription directly (instead
+   * of a Checkout Session) with `payment_behavior: 'default_incomplete'`, so
+   * the frontend can collect card details itself via Stripe Elements and
+   * confirm the first invoice's PaymentIntent client-side.
+   */
+  static async createNativeSubscriptionIntent(userId, tierId) {
+    const tier = await db.query.groupSubscriptionTiers.findFirst({
+      where: and(eq(groupSubscriptionTiers.id, tierId), eq(groupSubscriptionTiers.isActive, true)),
+    });
+    if (!tier) throw new ApiError(404, 'Subscription tier not found or inactive');
+
+    if (!tier.stripePriceId) {
+      throw new ApiError(
+        422,
+        'This subscription tier is not yet configured for payment. Please contact the group organizer.'
+      );
+    }
+
+    const group = await db.query.groups.findFirst({ where: eq(groups.id, tier.groupId) });
+    if (!group) throw new ApiError(404, 'Group not found');
+    if (!group.isPaid) throw new ApiError(400, 'This group does not require a subscription');
+
+    const existing = await db.query.groupSubscriptions.findFirst({
+      where: and(
+        eq(groupSubscriptions.userId, userId),
+        eq(groupSubscriptions.groupId, tier.groupId),
+        inArray(groupSubscriptions.status, [...ACTIVE_STATUSES, 'past_due'])
+      ),
+    });
+    if (existing) throw new ApiError(409, 'You already have an active subscription for this group');
+
+    const { percentage: platformFeePercent } = await adminService.getPlatformFeePercentage();
+    let [stripeCustomerId, organizerConnect] = await Promise.all([
+      SubscriptionService.getOrCreateStripeCustomer(userId),
+      StripeConnectService.getForUser(group.createdBy).catch(() => null),
+    ]);
+    if (organizerConnect && !organizerConnect.chargesEnabled) {
+      organizerConnect = await StripeConnectService.syncStatus(group.createdBy).catch(
+        () => organizerConnect
+      );
+    }
+    const s = getStripe();
+
+    const subscriptionParams = {
+      customer: stripeCustomerId,
+      items: [{ price: tier.stripePriceId }],
+      payment_behavior: 'default_incomplete',
+      payment_settings: {
+        save_default_payment_method: 'on_subscription',
+        payment_method_types: ['card'],
+      },
+      expand: ['latest_invoice.payment_intent'],
+      metadata: {
+        type: 'group_subscription',
+        userId,
+        groupId: tier.groupId,
+        tierId: tier.id,
+        organizerId: group.createdBy,
+        platformFeePercent: String(platformFeePercent),
+      },
+    };
+
+    if (organizerConnect?.chargesEnabled) {
+      subscriptionParams.application_fee_percent = 5;
+      subscriptionParams.transfer_data = { destination: organizerConnect.stripeAccountId };
+    }
+
+    const subscription = await s.subscriptions.create(subscriptionParams);
+    const paymentIntent = subscription.latest_invoice?.payment_intent;
+    if (!paymentIntent?.client_secret) {
+      throw new ApiError(500, 'Failed to initialize payment for this subscription');
+    }
+
+    return {
+      paymentId: subscription.id,
+      clientSecret: paymentIntent.client_secret,
+    };
+  }
+
+  /**
+   * Native checkout step 2 — call after Stripe.js has confirmed the first
+   * invoice's PaymentIntent client-side. Verifies it server-side against
+   * Stripe and runs the same activation as the Checkout Session webhook.
+   */
+  static async finalizeNativeSubscription(userId, subscriptionId, paymentIntentId) {
+    const s = getStripe();
+    const stripeSub = await s.subscriptions.retrieve(subscriptionId, {
+      expand: ['latest_invoice.payment_intent'],
+    });
+
+    if (stripeSub.metadata?.userId !== userId) {
+      throw new ApiError(403, 'This subscription does not belong to you');
+    }
+
+    const paymentIntent = stripeSub.latest_invoice?.payment_intent;
+    if (
+      !paymentIntent ||
+      paymentIntent.id !== paymentIntentId ||
+      paymentIntent.status !== 'succeeded'
+    ) {
+      throw new ApiError(400, 'Payment has not been completed for this subscription');
+    }
+
+    if (!ACTIVE_STATUSES.includes(stripeSub.status)) {
+      throw new ApiError(400, `Subscription is not active (status: ${stripeSub.status})`);
+    }
+
+    const { groupId, tierId, platformFeePercent } = stripeSub.metadata ?? {};
+    if (!groupId || !tierId) throw new ApiError(500, 'Subscription is missing required metadata');
+
+    const dbSub = await this._activateGroupSubscription(
+      { userId, groupId, tierId, platformFeePercent },
+      stripeSub,
+      subscriptionId
+    );
+
+    return {
+      success: true,
+      subscriptionId: stripeSub.id,
+      status: stripeSub.status,
+      alreadyProcessed: !dbSub,
+    };
   }
 
   /**
@@ -612,8 +744,22 @@ static async refundGroupSubscription(userId, groupId) {
       created: stripeSub.created,
     });
 
-    const { periodStart: checkoutPeriodStart, periodEnd: checkoutPeriodEnd } =
-      resolveSubPeriod(stripeSub);
+    await this._activateGroupSubscription(
+      { userId, groupId, tierId, platformFeePercent },
+      stripeSub,
+      session.id
+    );
+  }
+
+  /**
+   * Shared activation logic for a newly paid group subscription — inserts the
+   * groupSubscriptions row, records spend, adds the user to groupMembers,
+   * resolves any pending join request, and sends the welcome email.
+   * Used by both the Checkout Session webhook and the native card-payment flow.
+   * Returns null (without side effects) if this subscription was already activated.
+   */
+  static async _activateGroupSubscription({ userId, groupId, tierId, platformFeePercent }, stripeSub, stripeSourceId) {
+    const { periodStart, periodEnd } = resolveSubPeriod(stripeSub);
 
     const [dbSub] = await db
       .insert(groupSubscriptions)
@@ -622,16 +768,16 @@ static async refundGroupSubscription(userId, groupId) {
         groupId,
         tierId,
         status: 'active',
-        stripeSubscriptionId: session.subscription,
-        currentPeriodStart: checkoutPeriodStart,
-        currentPeriodEnd: checkoutPeriodEnd,
+        stripeSubscriptionId: stripeSub.id,
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
         cancelAtPeriodEnd: false,
         platformFeePercent: platformFeePercent ?? null,
       })
       .onConflictDoNothing()
       .returning();
 
-    if (!dbSub) return; // idempotency guard
+    if (!dbSub) return null; // idempotency guard
 
     // Record spend — fetch tier + group for metadata
     try {
@@ -659,7 +805,7 @@ static async refundGroupSubscription(userId, groupId) {
           periodStart: dbSub.currentPeriodStart?.toISOString() ?? null,
           periodEnd: dbSub.currentPeriodEnd?.toISOString() ?? null,
         },
-        stripeSessionId: session.id,
+        stripeSessionId: stripeSourceId,
         paidAt: new Date(),
       });
     } catch (spendErr) {
@@ -706,6 +852,8 @@ static async refundGroupSubscription(userId, groupId) {
     this._sendWelcomeEmail(userId, groupId, tierId, stripeSub).catch(err =>
       console.error('Subscription welcome email failed:', err.message)
     );
+
+    return dbSub;
   }
 
   /**

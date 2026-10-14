@@ -263,6 +263,29 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
       // their existing checkout.session.* handling, untouched.
       const { PaymentService } = await import('../services/payment.service.js');
       await PaymentService.processPaymentSheetIntent(event.data.object);
+    } else if (
+      event.type === 'payment_intent.succeeded' &&
+      event.data.object?.metadata?.type === 'talent_session'
+    ) {
+      // Safety net for the web native-checkout flow (Stripe Elements card
+      // form, not a Checkout Session) — normally the client's own
+      // native-finalize call activates the booking right after
+      // confirmCardPayment resolves, but if the tab closes or the network
+      // drops in between, the card is still charged and this webhook is the
+      // only thing left to move the session out of 'awaiting_payment'.
+      // handlePaymentWebhook's atomic claim makes this exactly-once whether
+      // this fires before or after the client's own finalize call.
+      const pi = event.data.object;
+      const io = req.app.get('io');
+      await TalentSessionService.handlePaymentWebhook(
+        {
+          id: null,
+          payment_intent: pi.id,
+          amount_total: pi.amount_received || pi.amount,
+          metadata: pi.metadata,
+        },
+        io
+      );
     } else if (event.type === 'charge.dispute.created') {
       // Phase 4 of the payout architecture — see PAYMENTS_ARCHITECTURE.md §5.
       // Requires this webhook endpoint to be subscribed to

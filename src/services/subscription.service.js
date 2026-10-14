@@ -511,6 +511,146 @@ export class SubscriptionService {
     return { sessionId: session.id, clientSecret: session.client_secret };
   }
 
+  /**
+   * Native checkout step 1 — creates the Stripe subscription directly (instead
+   * of a Checkout Session) with `payment_behavior: 'default_incomplete'`, so
+   * the frontend can collect card details itself via Stripe Elements and
+   * confirm the first invoice's PaymentIntent client-side.
+   */
+  static async createNativeSubscriptionIntent(userId, planId) {
+    this.ensureStripe();
+
+    const plan = await db.query.subscriptionPlans.findFirst({
+      where: eq(subscriptionPlans.id, planId),
+    });
+
+    if (!plan) {
+      throw new ApiError(httpStatus.NOT_FOUND, 'Subscription plan not found');
+    }
+
+    if (!plan.isActive) {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'This plan is no longer available');
+    }
+
+    if (!plan.stripePriceId) {
+      throw new ApiError(
+        httpStatus.UNPROCESSABLE_ENTITY,
+        'This plan is not yet configured for payment. Please contact support.'
+      );
+    }
+
+    const existingSub = await db.query.userSubscriptions.findFirst({
+      where: and(
+        eq(userSubscriptions.userId, userId),
+        inArray(userSubscriptions.status, ACTIVE_STATUSES)
+      ),
+    });
+
+    if (existingSub) {
+      throw new ApiError(httpStatus.CONFLICT, 'User already has an active subscription');
+    }
+
+    const stripeCustomerId = await this.getOrCreateStripeCustomer(userId);
+
+    const existingStripeSubs = await stripe.subscriptions.list({
+      customer: stripeCustomerId,
+      status: 'active',
+      limit: 10,
+    });
+    const duplicate = existingStripeSubs.data.find(
+      sub =>
+        sub.metadata?.planId === planId ||
+        sub.items?.data?.some(item => item.price?.id === plan.stripePriceId)
+    );
+    if (duplicate) {
+      throw new ApiError(
+        httpStatus.CONFLICT,
+        'User already has an active subscription for this plan'
+      );
+    }
+
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+      columns: { email: true, firstName: true, lastName: true },
+    });
+
+    const subscription = await stripe.subscriptions.create({
+      customer: stripeCustomerId,
+      items: [{ price: plan.stripePriceId }],
+      payment_behavior: 'default_incomplete',
+      payment_settings: {
+        save_default_payment_method: 'on_subscription',
+        payment_method_types: ['card'],
+      },
+      expand: ['latest_invoice.payment_intent'],
+      metadata: {
+        userId,
+        planId,
+        planName: plan.name,
+        billingInterval: plan.interval,
+        userEmail: user?.email ?? '',
+      },
+    });
+
+    const paymentIntent = subscription.latest_invoice?.payment_intent;
+    if (!paymentIntent?.client_secret) {
+      throw new ApiError(
+        httpStatus.INTERNAL_SERVER_ERROR,
+        'Failed to initialize payment for this subscription'
+      );
+    }
+
+    return {
+      paymentId: subscription.id,
+      clientSecret: paymentIntent.client_secret,
+    };
+  }
+
+  /**
+   * Native checkout step 2 — call after Stripe.js has confirmed the first
+   * invoice's PaymentIntent client-side. Verifies it server-side against
+   * Stripe and runs the same activation as the Checkout Session webhook.
+   */
+  static async finalizeNativeSubscription(userId, subscriptionId, paymentIntentId) {
+    this.ensureStripe();
+    const stripeSubscription = await stripe.subscriptions.retrieve(subscriptionId, {
+      expand: ['latest_invoice.payment_intent'],
+    });
+
+    if (stripeSubscription.metadata?.userId !== userId) {
+      throw new ApiError(httpStatus.FORBIDDEN, 'This subscription does not belong to you');
+    }
+
+    const paymentIntent = stripeSubscription.latest_invoice?.payment_intent;
+    if (
+      !paymentIntent ||
+      paymentIntent.id !== paymentIntentId ||
+      paymentIntent.status !== 'succeeded'
+    ) {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'Payment has not been completed for this subscription');
+    }
+
+    if (!ACTIVE_STATUSES.includes(stripeSubscription.status)) {
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        `Subscription is not active (status: ${stripeSubscription.status})`
+      );
+    }
+
+    const planId = stripeSubscription.metadata?.planId;
+    if (!planId) {
+      throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, 'Subscription is missing required metadata');
+    }
+
+    await this._activateUserSubscription({ userId, planId }, stripeSubscription, subscriptionId);
+
+    return {
+      success: true,
+      subscriptionId: stripeSubscription.id,
+      status: stripeSubscription.status,
+    };
+  }
+
   static async getCustomerPortalSession(userId, returnUrl) {
     this.ensureStripe();
 
@@ -1043,13 +1183,23 @@ export class SubscriptionService {
     this.ensureStripe();
     const stripeSubscription = await stripe.subscriptions.retrieve(session.subscription);
 
+    await this._activateUserSubscription({ userId, planId }, stripeSubscription, session.id);
+  }
+
+  /**
+   * Shared activation logic for a newly paid BriteSide Plus subscription —
+   * inserts (or idempotently updates) the userSubscriptions row, records
+   * spend, sends the signup email, and syncs the denormalized isBritesidePlus
+   * flag. Used by both the Checkout Session webhook and the native
+   * card-payment flow.
+   */
+  static async _activateUserSubscription({ userId, planId }, stripeSubscription, stripeSourceId) {
     // Idempotency: check if subscription already exists
     const existing = await db.query.userSubscriptions.findFirst({
       where: eq(userSubscriptions.stripeSubscriptionId, stripeSubscription.id),
     });
 
-    const { periodStart: csPeriodStart, periodEnd: csPeriodEnd } =
-      resolveSubPeriod(stripeSubscription);
+    const { periodStart, periodEnd } = resolveSubPeriod(stripeSubscription);
 
     if (existing) {
       // Already processed, update if needed
@@ -1057,13 +1207,13 @@ export class SubscriptionService {
         .update(userSubscriptions)
         .set({
           status: 'active',
-          currentPeriodStart: csPeriodStart,
-          currentPeriodEnd: csPeriodEnd,
+          currentPeriodStart: periodStart,
+          currentPeriodEnd: periodEnd,
           updatedAt: new Date(),
         })
         .where(eq(userSubscriptions.id, existing.id));
       await this._syncPlusFlag(userId);
-      return;
+      return existing;
     }
 
     const [subscription] = await db
@@ -1073,8 +1223,8 @@ export class SubscriptionService {
         planId,
         stripeSubscriptionId: stripeSubscription.id,
         status: 'active',
-        currentPeriodStart: csPeriodStart,
-        currentPeriodEnd: csPeriodEnd,
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
         createdAt: new Date(),
         updatedAt: new Date(),
       })
@@ -1104,10 +1254,10 @@ export class SubscriptionService {
         metadata: {
           planName: plan?.name ?? null,
           interval: plan?.interval ?? null,
-          periodStart: new Date(stripeSubscription.current_period_start * 1000).toISOString(),
-          periodEnd: new Date(stripeSubscription.current_period_end * 1000).toISOString(),
+          periodStart: periodStart?.toISOString() ?? null,
+          periodEnd: periodEnd?.toISOString() ?? null,
         },
-        stripeSessionId: session.id,
+        stripeSessionId: stripeSourceId,
         paidAt: new Date(),
       });
     } catch (spendErr) {
@@ -1127,6 +1277,7 @@ export class SubscriptionService {
     }
 
     await this._syncPlusFlag(userId);
+    return subscription;
   }
 
   // Recomputes users.isBritesidePlus from live userSubscriptions rows.
