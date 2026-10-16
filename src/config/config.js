@@ -172,32 +172,4 @@ const env = {
   },
 };
 
-// --- Debug: show which Stripe keys are being used (masked) ---
-const mask = k => (k ? `${k.slice(0, 8)}...${k.slice(-4)}` : 'NOT SET');
-
-console.log(
-  '[Stripe] secretKey source:',
-  fileEnv.STRIPE_SECRET_KEY_LOCAL ? '.env LOCAL' : 'OTHER',
-  '→',
-  mask(env.stripe.secretKey),
-);
-console.log(
-  '[Stripe] publishableKey source:',
-  fileEnv.STRIPE_PUBLISHABLE_KEY_LOCAL ? '.env LOCAL' : 'OTHER',
-  '→',
-  mask(env.stripe.publishableKey),
-);
-console.log(
-  '[Stripe] webhookSecret source:',
-  fileEnv.STRIPE_WEBHOOK_SECRET_LOCAL ? '.env LOCAL' : 'OTHER',
-  '→',
-  mask(env.stripe.webhookSecret),
-);
-
-// --- Debug: show ACRCloud config (masked) ---
-console.log('[ACRCloud] configured:', env.acrcloud.configured);
-console.log('[ACRCloud] host:', env.acrcloud.host || 'NOT SET');
-console.log('[ACRCloud] accessKey:', mask(env.acrcloud.accessKey));
-console.log('[ACRCloud] accessSecret:', mask(env.acrcloud.accessSecret));
-
 export default env;
