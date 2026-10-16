@@ -596,13 +596,13 @@ static async getOrCreateSocialProfile(userId) {
       if (statusPost) {
         await attachPostModerationStatuses([statusPost]);
         await attachPostCopyrightStatuses([statusPost]);
-        // A profile's status post is served to every visitor — a held post
-        // (GetStream or a pending/confirmed copyright case) must not leak
-        // here just because it's pinned as the status post.
+        // A profile's status post is served to every visitor — a held
+        // (GetStream-moderated) post must not leak here just because it's
+        // pinned as the status post. A copyright match never holds content
+        // — only mutes its audio client-side.
         if (
           isHeldFromViewer({
             moderationStatus: statusPost.moderationStatus,
-            copyrightStatus: statusPost.copyrightStatus,
             ownerId: statusPost.userId,
             viewerId,
           })

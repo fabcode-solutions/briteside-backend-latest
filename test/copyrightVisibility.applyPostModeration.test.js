@@ -35,14 +35,14 @@ vi.mock('../src/db/index.js', () => ({
 
 const { MediaModerationService } = await import('../src/services/moderation/mediaModeration.service.js');
 
-describe('applyPostModeration — uploader, admin, and other-user visibility (relational listings)', () => {
+describe('applyPostModeration — a copyright match never hides a post, only tags it for client-side audio muting', () => {
   const uploaderId = 'uploader-1';
   const otherUserId = 'other-user-2';
 
-  const heldPost = {
-    id: 'post-held',
+  const matchedPost = {
+    id: 'post-matched',
     userId: uploaderId,
-    mediaUrls: ['https://cdn.example.com/held-video.mp4'],
+    mediaUrls: ['https://cdn.example.com/matched-video.mp4'],
   };
   const cleanPost = {
     id: 'post-clean',
@@ -54,58 +54,63 @@ describe('applyPostModeration — uploader, admin, and other-user visibility (re
     // No GetStream hold on either post — only the copyright case drives this.
     setMockRows({
       contentModeration: [],
-      copyright: [{ url: 'https://cdn.example.com/held-video.mp4', status: 'pending' }],
+      copyright: [{ url: 'https://cdn.example.com/matched-video.mp4', status: 'pending' }],
     });
   });
 
-  it('uploader viewing their own feed still sees their own pending-copyright-case post', async () => {
+  it('uploader viewing their own feed sees their own pending-copyright-case post, stamped for muting', async () => {
     const result = await MediaModerationService.applyPostModeration(
-      [{ ...heldPost }, { ...cleanPost }],
+      [{ ...matchedPost }, { ...cleanPost }],
       uploaderId
     );
     const ids = result.map(p => p.id);
-    expect(ids).toContain('post-held');
+    expect(ids).toContain('post-matched');
     expect(ids).toContain('post-clean');
-    const held = result.find(p => p.id === 'post-held');
-    expect(held.copyrightStatus).toBe('pending');
+    const matched = result.find(p => p.id === 'post-matched');
+    expect(matched.copyrightStatus).toBe('pending');
   });
 
-  it('a different user cannot see the pending-copyright-case post, but sees the clean one', async () => {
+  it('a different user still sees the pending-copyright-case post, stamped for muting', async () => {
     const result = await MediaModerationService.applyPostModeration(
-      [{ ...heldPost }, { ...cleanPost }],
+      [{ ...matchedPost }, { ...cleanPost }],
       otherUserId
     );
     const ids = result.map(p => p.id);
-    expect(ids).not.toContain('post-held');
+    expect(ids).toContain('post-matched');
     expect(ids).toContain('post-clean');
+    const matched = result.find(p => p.id === 'post-matched');
+    expect(matched.copyrightStatus).toBe('pending');
   });
 
-  it('a different user can see the post again once the case is dismissed', async () => {
+  it('a different user sees the post with no copyright tag once the case is dismissed', async () => {
     setMockRows({
       contentModeration: [],
-      copyright: [{ url: 'https://cdn.example.com/held-video.mp4', status: 'dismissed' }],
+      copyright: [{ url: 'https://cdn.example.com/matched-video.mp4', status: 'dismissed' }],
     });
     const result = await MediaModerationService.applyPostModeration(
-      [{ ...heldPost }, { ...cleanPost }],
+      [{ ...matchedPost }, { ...cleanPost }],
       otherUserId
     );
     const ids = result.map(p => p.id);
-    expect(ids).toContain('post-held');
-    const dismissed = result.find(p => p.id === 'post-held');
+    expect(ids).toContain('post-matched');
+    const dismissed = result.find(p => p.id === 'post-matched');
     expect(dismissed.copyrightStatus).toBe('dismissed');
   });
 
-  it('a different user still cannot see the post once infringement is confirmed', async () => {
+  it('a different user still sees the post once infringement is confirmed, stamped for muting', async () => {
     setMockRows({
       contentModeration: [],
       copyright: [
-        { url: 'https://cdn.example.com/held-video.mp4', status: 'confirmed_infringement' },
+        { url: 'https://cdn.example.com/matched-video.mp4', status: 'confirmed_infringement' },
       ],
     });
     const result = await MediaModerationService.applyPostModeration(
-      [{ ...heldPost }, { ...cleanPost }],
+      [{ ...matchedPost }, { ...cleanPost }],
       otherUserId
     );
-    expect(result.map(p => p.id)).not.toContain('post-held');
+    const ids = result.map(p => p.id);
+    expect(ids).toContain('post-matched');
+    const confirmed = result.find(p => p.id === 'post-matched');
+    expect(confirmed.copyrightStatus).toBe('confirmed_infringement');
   });
 });

@@ -13,6 +13,7 @@ import {
   jsonb,
   customType,
   unique,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { organizers } from './organizers.js';
@@ -100,6 +101,10 @@ export const events = pgTable(
     presetId: uuid('preset_id').references(() => organizerPresets.id, { onDelete: 'set null' }),
     snsTopicArn: varchar('sns_topic_arn', { length: 255 }),
     showTicketsRemaining: boolean('show_tickets_remaining').default(true).notNull(),
+    // Client-generated key for one create-event submit attempt. Lets a request
+    // that's accidentally sent twice (network retry, double-click) resolve to
+    // the same event instead of creating a duplicate — see EventService.createEvent.
+    clientRequestId: varchar('client_request_id', { length: 100 }),
   },
   table => [
     check('end_date_check', sql`${table.endDate} > ${table.startDate}`),
@@ -120,6 +125,9 @@ export const events = pgTable(
     index('idx_events_slug').on(table.slug),
     index('idx_events_search_fts').using('gin', table.eventSearch),
     index('idx_events_preset').on(table.presetId),
+    uniqueIndex('uq_events_organizer_client_request')
+      .on(table.organizerId, table.clientRequestId)
+      .where(sql`client_request_id IS NOT NULL`),
   ]
 );
 

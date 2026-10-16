@@ -10,8 +10,10 @@ export const createEvent = catchAsync(async (req, res) => {
     throw new ApiError(400, 'Organizer profile required to create events');
   }
 
+  // Counted inside EventService.createEvent itself — it only runs on the one
+  // path that actually inserts a new event, not on an idempotent replay of a
+  // request that already created one (see createEvent's clientRequestId check).
   const event = await EventService.createEvent(organizerId, req.body);
-  await OrganizerService.incrementEventCount(req.user.id);
 
   res.status(201).json({
     success: true,

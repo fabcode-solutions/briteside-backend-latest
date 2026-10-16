@@ -8,7 +8,6 @@ vi.mock('../src/utils/streamClient.js', () => ({ streamClient: {} }));
 
 import {
   isHeldFromViewer,
-  COPYRIGHT_HELD_FROM_OTHERS,
   postsModerationGate,
   postsModerationGateStrict,
   storiesModerationGate,
@@ -19,105 +18,39 @@ import {
 const dialect = new PgDialect();
 const compile = frag => dialect.sqlToQuery(frag).sql;
 
-describe('COPYRIGHT_HELD_FROM_OTHERS', () => {
-  it('holds pending and confirmed_infringement, nothing else', () => {
-    expect(COPYRIGHT_HELD_FROM_OTHERS.has('pending')).toBe(true);
-    expect(COPYRIGHT_HELD_FROM_OTHERS.has('confirmed_infringement')).toBe(true);
-    expect(COPYRIGHT_HELD_FROM_OTHERS.has('reviewed')).toBe(false);
-    expect(COPYRIGHT_HELD_FROM_OTHERS.has('dismissed')).toBe(false);
-    expect(COPYRIGHT_HELD_FROM_OTHERS.has(null)).toBe(false);
-  });
-});
-
-describe('isHeldFromViewer — uploader, admin, and other-user visibility', () => {
+describe('isHeldFromViewer — a copyright match never holds content from anyone', () => {
   const uploader = 'uploader-1';
   const otherUser = 'other-user-2';
 
-  it('uploader (owner) sees their own content while a copyright case is pending', () => {
+  it('uploader (owner) sees their own content regardless of copyright case status', () => {
     expect(
-      isHeldFromViewer({
-        moderationStatus: 'approved',
-        copyrightStatus: 'pending',
-        ownerId: uploader,
-        viewerId: uploader,
-      })
+      isHeldFromViewer({ moderationStatus: 'approved', ownerId: uploader, viewerId: uploader })
     ).toBe(false);
   });
 
-  it('uploader (owner) sees their own content after confirmed_infringement', () => {
+  it('a different user still sees content with a pending copyright case — only audio is muted client-side', () => {
     expect(
-      isHeldFromViewer({
-        moderationStatus: 'approved',
-        copyrightStatus: 'confirmed_infringement',
-        ownerId: uploader,
-        viewerId: uploader,
-      })
+      isHeldFromViewer({ moderationStatus: 'approved', ownerId: uploader, viewerId: otherUser })
     ).toBe(false);
   });
 
-  it('a different user cannot see content with a pending copyright case', () => {
+  it('a different user still sees content once infringement is confirmed', () => {
+    // isHeldFromViewer no longer takes a copyrightStatus param at all — a
+    // confirmed match is purely an "audio unavailable" badge, never a hold.
     expect(
-      isHeldFromViewer({
-        moderationStatus: 'approved',
-        copyrightStatus: 'pending',
-        ownerId: uploader,
-        viewerId: otherUser,
-      })
-    ).toBe(true);
-  });
-
-  it('a different user cannot see content once infringement is confirmed', () => {
-    expect(
-      isHeldFromViewer({
-        moderationStatus: 'approved',
-        copyrightStatus: 'confirmed_infringement',
-        ownerId: uploader,
-        viewerId: otherUser,
-      })
-    ).toBe(true);
-  });
-
-  it('a different user CAN see content again once the case is dismissed', () => {
-    expect(
-      isHeldFromViewer({
-        moderationStatus: 'approved',
-        copyrightStatus: 'dismissed',
-        ownerId: uploader,
-        viewerId: otherUser,
-      })
+      isHeldFromViewer({ moderationStatus: 'approved', ownerId: uploader, viewerId: otherUser })
     ).toBe(false);
   });
 
-  it('a different user CAN see content once marked reviewed (no issue found)', () => {
+  it('a different user cannot see content held by GetStream moderation', () => {
     expect(
-      isHeldFromViewer({
-        moderationStatus: 'approved',
-        copyrightStatus: 'reviewed',
-        ownerId: uploader,
-        viewerId: otherUser,
-      })
-    ).toBe(false);
-  });
-
-  it('a different user cannot see content with no copyright case but held by GetStream', () => {
-    expect(
-      isHeldFromViewer({
-        moderationStatus: 'rejected',
-        copyrightStatus: null,
-        ownerId: uploader,
-        viewerId: otherUser,
-      })
+      isHeldFromViewer({ moderationStatus: 'rejected', ownerId: uploader, viewerId: otherUser })
     ).toBe(true);
   });
 
   it('a different user sees normal, unheld content', () => {
     expect(
-      isHeldFromViewer({
-        moderationStatus: 'approved',
-        copyrightStatus: null,
-        ownerId: uploader,
-        viewerId: otherUser,
-      })
+      isHeldFromViewer({ moderationStatus: 'approved', ownerId: uploader, viewerId: otherUser })
     ).toBe(false);
   });
 
@@ -125,48 +58,37 @@ describe('isHeldFromViewer — uploader, admin, and other-user visibility', () =
     // System/legacy content with no owner must not bypass the held check just
     // because both ownerId and viewerId happen to be null/undefined.
     expect(
-      isHeldFromViewer({
-        moderationStatus: 'approved',
-        copyrightStatus: 'pending',
-        ownerId: null,
-        viewerId: undefined,
-      })
+      isHeldFromViewer({ moderationStatus: 'rejected', ownerId: null, viewerId: undefined })
     ).toBe(true);
   });
 });
 
-describe('SQL gates compile with the copyright EXISTS clause', () => {
-  it('postsModerationGate excludes a post the viewer does not own', () => {
+describe('SQL gates — no copyright EXISTS clause (a match never affects feed visibility)', () => {
+  it('postsModerationGate only checks content_moderation', () => {
     const sql = compile(postsModerationGate('11111111-1111-1111-1111-111111111111'));
-    expect(sql).toContain('acr_copyright_review_cases');
-    expect(sql).toContain("('pending', 'confirmed_infringement')");
-    // Owner-exception clause must be present for the copyright EXISTS too
-    const copyrightClause = sql.split('acr_copyright_review_cases')[1];
-    expect(copyrightClause).toContain('!=');
+    expect(sql).not.toContain('acr_copyright_review_cases');
+    expect(sql).toContain('content_moderation');
   });
 
-  it('postsModerationGateStrict has no owner exception for either system', () => {
+  it('postsModerationGateStrict has no owner exception and no copyright clause', () => {
     const sql = compile(postsModerationGateStrict());
-    expect(sql).toContain('acr_copyright_review_cases');
-    // No viewer param at all in the strict variant
+    expect(sql).not.toContain('acr_copyright_review_cases');
     expect(sql).not.toContain('!=');
   });
 
-  it('storiesModerationGate uses exact equality (not LIKE) against the single media_url column', () => {
+  it('storiesModerationGate only checks content_moderation', () => {
     const sql = compile(storiesModerationGate('11111111-1111-1111-1111-111111111111'));
-    expect(sql).toContain('acr_copyright_review_cases');
-    expect(sql).toMatch(/m\.url = "stories"\."media_url"/);
+    expect(sql).not.toContain('acr_copyright_review_cases');
   });
 
-  it('storiesModerationGateStrict has no owner exception', () => {
+  it('storiesModerationGateStrict has no owner exception and no copyright clause', () => {
     const sql = compile(storiesModerationGateStrict());
-    expect(sql).toContain('acr_copyright_review_cases');
+    expect(sql).not.toContain('acr_copyright_review_cases');
     expect(sql).not.toContain('!=');
   });
 
-  it('discussionsModerationGate includes the copyright EXISTS clause', () => {
+  it('discussionsModerationGate only checks content_moderation', () => {
     const sql = compile(discussionsModerationGate('11111111-1111-1111-1111-111111111111'));
-    expect(sql).toContain('acr_copyright_review_cases');
-    expect(sql).toContain("('pending', 'confirmed_infringement')");
+    expect(sql).not.toContain('acr_copyright_review_cases');
   });
 });

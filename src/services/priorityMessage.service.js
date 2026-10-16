@@ -282,17 +282,16 @@ export class PriorityMessageService {
     const totalAttachmentCents = totalAttachments * ATTACHMENT_PRICE_CENTS;
 
     // ── Base cost (message/extension units + attachments) ──────────────────
-    // Attachments are folded into base so they get the same 95/5 talent/platform
-    // split as message content — talent earns 95% of attachment price too.
     const baseCents = profile.priorityMessageFee * totalUnits + totalAttachmentCents;
 
     // Merged "Platform & Service Fee" (7.5% of base) — 100% Briteside revenue.
     const platformAndServiceFeeCents = calculatePlatformAndServiceFeeCents(baseCents);
 
-    // Talent's cut is 95% of base — includes their share of attachment price.
-    // This is a separate marketplace commission, unrelated to the Platform &
-    // Service Fee, and is unaffected by it.
-    const talentDeductionCents = Math.round(baseCents * 0.05);
+    // No marketplace commission on priority messages — the talent keeps the
+    // full base price (including attachment price). Kept as explicit fields
+    // (rather than removed) since they're persisted in payment metadata and
+    // read back elsewhere for display/reporting.
+    const talentDeductionCents = 0;
     const talentNetCents = baseCents - talentDeductionCents;
 
     // What the sender is charged — base + the merged fee. Stripe's own
@@ -304,8 +303,8 @@ export class PriorityMessageService {
     // or deducted from the talent's Connect transfer.
     const estimatedStripeFeeCents = Math.round(chargedCents * 0.029) + 30;
 
-    // Platform keeps: the Platform & Service Fee (100% Briteside revenue) +
-    // talent's 5% marketplace commission. Stripe's cost comes out of
+    // Platform keeps: the Platform & Service Fee (100% Briteside revenue).
+    // No talent commission to add on top. Stripe's cost comes out of
     // Briteside's own revenue.
     const applicationFeeCents = platformAndServiceFeeCents + talentDeductionCents;
 
@@ -662,6 +661,7 @@ export class PriorityMessageService {
       totalAttachments,
       baseCents,
       chargedCents,
+      platformAndServiceFeeCents,
       messages: msgList.map((m, idx) => ({
         position: idx,
         charLimit: 280 + (m.contentExtended ? m.contentExtended.length : 0),
@@ -684,8 +684,16 @@ export class PriorityMessageService {
    * a new attempt once it's 'paid'/'partial', never while 'pending').
    */
   static async prepare(senderId, input) {
-    const { payment, msgList, totalUnits, totalExtensionUnits, totalAttachments, baseCents, chargedCents } =
-      await this._createPendingPayment(senderId, input);
+    const {
+      payment,
+      msgList,
+      totalUnits,
+      totalExtensionUnits,
+      totalAttachments,
+      baseCents,
+      chargedCents,
+      platformAndServiceFeeCents,
+    } = await this._createPendingPayment(senderId, input);
 
     return {
       paymentId: payment.id,
@@ -695,6 +703,8 @@ export class PriorityMessageService {
       totalExtensionUnits,
       totalAttachments,
       baseCents,
+      chargedCents,
+      platformAndServiceFeeCents,
     };
   }
 
@@ -1217,7 +1227,11 @@ export class PriorityMessageService {
         title: `⭐ Priority message from ${senderName}`,
         message: `${senderName} sent you a $${amountDollars} priority message${countLabel}.`,
         type: 'chat_message',
-        redirectTo: `/messages?conversationId=${conversation.id}`,
+        // Plain ?conversationId= routes the frontend to the General tab —
+        // this is a priority message, so it needs the Priority tab's own
+        // deep-link params (tab=priority&priorityMsgId=<item id>) or it
+        // lands the talent in the wrong message box entirely.
+        redirectTo: `/messages?tab=priority&priorityMsgId=${items[0]?.id ?? ''}`,
         relatedId: deliveredMessages[0],
         metadata: {
           isPriority: true,
@@ -1548,12 +1562,8 @@ export class PriorityMessageService {
     const enriched = rows.map(row => ({
       id: row.itemId,
       paymentId: row.paymentId,
-      amountCents: Math.round(
-        (row.baseCents - Math.round(row.baseCents * 0.05)) / (row.messageCount || 1)
-      ),
-      amount: Math.round(
-        (row.baseCents - Math.round(row.baseCents * 0.05)) / (row.messageCount || 1) / 100
-      ),
+      amountCents: Math.round(row.baseCents / (row.messageCount || 1)),
+      amount: Math.round(row.baseCents / (row.messageCount || 1) / 100),
       totalCount: row.messageCount,
       repliedCount: repliedCountMap.get(row.paymentId) ?? 0,
       subject: row.subject,
@@ -1713,10 +1723,8 @@ export class PriorityMessageService {
         unreadCount: unreadCountMap.get(row.conversationId) ?? 0,
         priority: {
           paymentId: row.paymentId,
-          amountCents: (row.baseCents || 0) - Math.round((row.baseCents || 0) * 0.05),
-          amount: Math.round(
-            ((row.baseCents || 0) - Math.round((row.baseCents || 0) * 0.05)) / 100
-          ),
+          amountCents: row.baseCents || 0,
+          amount: Math.round((row.baseCents || 0) / 100),
           messageCount: row.messageCount,
           status: row.status, // 'paid' = awaiting reply, 'replied' = released
           awaitingReply: row.status === 'paid',
@@ -1764,7 +1772,7 @@ export class PriorityMessageService {
 
     const totalEarnedRow = await db
       .select({
-        total: sql`COALESCE(SUM(${priorityMessagePayments.baseCents} - ROUND(${priorityMessagePayments.baseCents}::numeric * 0.05)::int), 0)::int`,
+        total: sql`COALESCE(SUM(${priorityMessagePayments.baseCents}), 0)::int`,
       })
       .from(priorityMessagePayments)
       .where(
@@ -1780,10 +1788,8 @@ export class PriorityMessageService {
       outstanding: outstanding
         ? {
             paymentId: outstanding.id,
-            amountCents: outstanding.baseCents - Math.round(outstanding.baseCents * 0.05),
-            amount: Math.round(
-              (outstanding.baseCents - Math.round(outstanding.baseCents * 0.05)) / 100
-            ),
+            amountCents: outstanding.baseCents,
+            amount: Math.round(outstanding.baseCents / 100),
             messageCount: outstanding.messageCount,
             paidAt: outstanding.paidAt,
           }
@@ -2327,7 +2333,7 @@ export class PriorityMessageService {
 
     const [result] = await db
       .select({
-        totalEarnedCents: sql`COALESCE(SUM(${priorityMessagePayments.baseCents} - ROUND(${priorityMessagePayments.baseCents}::numeric * 0.05)::int), 0)::int`,
+        totalEarnedCents: sql`COALESCE(SUM(${priorityMessagePayments.baseCents}), 0)::int`,
       })
       .from(priorityMessagePayments)
       .where(and(...conditions));

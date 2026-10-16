@@ -647,9 +647,9 @@ export class StripeConnectService {
           };
         }
         case 'priority_message': {
-          // application_fee = stripeEstimate + 5% platformCommission
-          // Talent gets: chargedCents − appFee ≈ baseCents × 0.95
-          // Platform revenue: appFee − actual Stripe fee ≈ baseCents × 0.05
+          // application_fee = Platform & Service Fee only — no talent
+          // commission on priority messages. Talent gets the full base price.
+          // Platform revenue: appFee − actual Stripe fee
           const platformRevenue = Math.max(0, platformFeeCents - stripeFeeCents);
           return {
             applicationFeeCents: platformFeeCents,

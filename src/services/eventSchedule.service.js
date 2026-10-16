@@ -262,9 +262,13 @@ export class EventScheduleService {
    * @param {string} eventTitle - Event title
    * @param {string} eventDescription - Event description
    * @param {Array} sessions - Array of session objects
+   * @param {object} [dbClient] - Drizzle client to run the reads/writes on. Pass the
+   *   `tx` from an enclosing `db.transaction()` (e.g. EventService.createEvent) so an
+   *   overlap failure rolls back together with the event row instead of leaving it
+   *   behind as an orphaned duplicate. Defaults to the module-level `db`.
    * @returns {Promise<Array>} - Created sessions
    */
-  static async createEventSessions(eventId, eventTitle, eventDescription, sessions) {
+  static async createEventSessions(eventId, eventTitle, eventDescription, sessions, dbClient = db) {
     if (!sessions || sessions.length === 0) {
       return [];
     }
@@ -311,7 +315,7 @@ export class EventScheduleService {
     }
 
     // Check for overlaps with existing schedules
-    const existingSchedules = await db.query.eventSchedules.findMany({
+    const existingSchedules = await dbClient.query.eventSchedules.findMany({
       where: and(eq(eventSchedules.eventId, eventId), isNull(eventSchedules.deletedAt)),
     });
 
@@ -330,17 +334,17 @@ export class EventScheduleService {
     }
 
     // Create all sessions
-    const createdSessions = await db.insert(eventSchedules).values(sessionData).returning();
+    const createdSessions = await dbClient.insert(eventSchedules).values(sessionData).returning();
 
     // Calculate event date range and update parent event
-    const allSchedules = await db.query.eventSchedules.findMany({
+    const allSchedules = await dbClient.query.eventSchedules.findMany({
       where: and(eq(eventSchedules.eventId, eventId), isNull(eventSchedules.deletedAt)),
       orderBy: [eventSchedules.date, eventSchedules.startTime],
     });
 
     const { startDate, endDate } = calculateEventDateRange(allSchedules);
 
-    await db
+    await dbClient
       .update(events)
       .set({
         startDate,

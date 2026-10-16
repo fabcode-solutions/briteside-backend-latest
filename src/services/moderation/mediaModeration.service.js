@@ -79,59 +79,32 @@ export const HELD_FROM_OTHERS = new Set(['pending', 'rejected', 'shadowed', 'ski
 const HELD_STATUSES = sql`('pending', 'rejected', 'shadowed', 'skipped', 'error')`;
 
 /**
- * ACRCloud copyright review cases (`acr_copyright_review_cases`) are a
- * SEPARATE table from `content_moderation` (see copyrightScan.service.js /
- * copyrightReviewCase.service.js) — a match never writes a content_moderation
- * row, flips an S3 ACL, or touches GetStream's own verdict machinery. This is
- * a second, independent visibility rule layered on top: 'pending' (awaiting
- * admin review) and 'confirmed_infringement' (admin-confirmed) are hidden
- * from everyone but the owner, exactly like HELD_FROM_OTHERS above but driven
- * by a different table. 'dismissed' (false positive) and 'reviewed' (no
- * issue) are NOT held — the content is fully visible again.
- */
-export const COPYRIGHT_HELD_FROM_OTHERS = new Set(['pending', 'confirmed_infringement']);
-const COPYRIGHT_HELD_STATUSES = sql`('pending', 'confirmed_infringement')`;
-
-/**
- * Single source of truth for "should this viewer see this item", given both
- * systems' statuses. Owner always sees their own (with the removed/blur/
- * "under review" UI); everyone else is held by either system independently.
+ * Single source of truth for "should this viewer see this item", given the
+ * GetStream moderation status. Owner always sees their own (with the
+ * removed/blur/"under review" UI); everyone else is held per HELD_FROM_OTHERS.
  * Pure function — used by every single-item detail fetch and every
  * share/forward path (post/story/discussion getById, DM share, profile wall
  * status post) so the rule can't drift between call sites, and can be
  * unit-tested without a DB.
+ *
+ * ACRCloud copyright matches (`acr_copyright_review_cases`, a separate table
+ * — see copyrightScan.service.js) never hold content from anyone: a match
+ * only mutes the video's audio client-side (ModeratedMedia.tsx), the same
+ * way Instagram/TikTok handle a detected music match instead of taking the
+ * post down. `copyrightStatus` is still attached to posts/stories/
+ * discussions below purely so the frontend knows to mute.
  */
-export function isHeldFromViewer({ moderationStatus, copyrightStatus, ownerId, viewerId }) {
+export function isHeldFromViewer({ moderationStatus, ownerId, viewerId }) {
   if (ownerId != null && ownerId === viewerId) return false;
-  return HELD_FROM_OTHERS.has(moderationStatus) || COPYRIGHT_HELD_FROM_OTHERS.has(copyrightStatus);
+  return HELD_FROM_OTHERS.has(moderationStatus);
 }
-
-// posts.mediaUrls / discussions.mediaUrls are JSON arrays of URL strings (not
-// media ids) — same ::text LIKE scan already used by propagateMediaVerdict
-// below to go the other direction (media url -> referencing rows).
-const postsCopyrightHeldExists = (urlsColumn, extra = sql``) => sql`EXISTS (
-  SELECT 1 FROM acr_copyright_review_cases cc
-  JOIN media m ON m.id = cc.media_id
-  WHERE cc.status IN ${COPYRIGHT_HELD_STATUSES}
-    AND ${urlsColumn}::text LIKE '%' || m.url || '%'
-    ${extra}
-)`;
-
-// stories.media_url is a single string column, not an array — direct equality.
-const storiesCopyrightHeldExists = (urlColumn, extra = sql``) => sql`EXISTS (
-  SELECT 1 FROM acr_copyright_review_cases cc
-  JOIN media m ON m.id = cc.media_id
-  WHERE cc.status IN ${COPYRIGHT_HELD_STATUSES}
-    AND m.url = ${urlColumn}
-    ${extra}
-)`;
 
 export const postsModerationGate = viewerId => sql`NOT EXISTS (
   SELECT 1 FROM content_moderation cm
   WHERE cm.post_id = ${posts.id}
     AND ${posts.userId} != ${viewerId}
     AND cm.status IN ${HELD_STATUSES}
-) AND NOT ${postsCopyrightHeldExists(posts.mediaUrls, sql`AND ${posts.userId} != ${viewerId}`)}`;
+)`;
 
 // Strict variant: hides held posts from EVERYONE, including the author. Used on
 // another user's profile, where an author must not surface their own removed
@@ -140,14 +113,14 @@ export const postsModerationGateStrict = () => sql`NOT EXISTS (
   SELECT 1 FROM content_moderation cm
   WHERE cm.post_id = ${posts.id}
     AND cm.status IN ${HELD_STATUSES}
-) AND NOT ${postsCopyrightHeldExists(posts.mediaUrls)}`;
+)`;
 
 export const storiesModerationGate = viewerId => sql`NOT EXISTS (
   SELECT 1 FROM content_moderation cm
   WHERE cm.story_id = ${stories.id}
     AND ${stories.userId} != ${viewerId}
     AND cm.status IN ${HELD_STATUSES}
-) AND NOT ${storiesCopyrightHeldExists(stories.mediaUrl, sql`AND ${stories.userId} != ${viewerId}`)}`;
+)`;
 
 // Strict variant: excludes held stories for everyone, author included. Used for
 // the "has an active story" ring — a held (removed/pending) story must not light
@@ -156,14 +129,14 @@ export const storiesModerationGateStrict = () => sql`NOT EXISTS (
   SELECT 1 FROM content_moderation cm
   WHERE cm.story_id = ${stories.id}
     AND cm.status IN ${HELD_STATUSES}
-) AND NOT ${storiesCopyrightHeldExists(stories.mediaUrl)}`;
+)`;
 
 export const discussionsModerationGate = viewerId => sql`NOT EXISTS (
   SELECT 1 FROM content_moderation cm
   WHERE cm.discussion_id = ${discussions.id}
     AND ${discussions.userId} != ${viewerId}
     AND cm.status IN ${HELD_STATUSES}
-) AND NOT ${postsCopyrightHeldExists(discussions.mediaUrls, sql`AND ${discussions.userId} != ${viewerId}`)}`;
+)`;
 
 /**
  * Attach `moderationStatus` to a list of posts or stories (one batched
@@ -295,12 +268,12 @@ export class MediaModerationService {
 
   /**
    * Filter + stamp a list of post objects for a viewer (one query):
-   * drops posts held from non-owners (pending/rejected/shadowed/skipped/error,
-   * or a copyright case pending/confirmed_infringement), keeps the owner's
-   * own, and sets `moderationStatus`/`copyrightStatus` on survivors so the
-   * frontend can blur flagged ones / show "Under review". For relational
-   * listings (saved/liked/reposted/…) where the SQL gate can't be a
-   * top-level WHERE.
+   * drops posts held from non-owners (pending/rejected/shadowed/skipped/
+   * error), keeps the owner's own, and sets `moderationStatus`/
+   * `copyrightStatus` on survivors so the frontend can blur flagged ones /
+   * show "Under review" / mute audio on a copyright match (which never
+   * holds the post itself). For relational listings (saved/liked/
+   * reposted/…) where the SQL gate can't be a top-level WHERE.
    */
   static async applyPostModeration(postObjects, viewerId) {
     const list = (postObjects || []).filter(Boolean);
@@ -317,7 +290,7 @@ export class MediaModerationService {
       const st = statusById.get(p.id) ?? 'approved';
       const copyrightStatus =
         (p.mediaUrls || []).map(u => copyrightByUrl.get(u)).find(Boolean) ?? null;
-      if (isHeldFromViewer({ moderationStatus: st, copyrightStatus, ownerId: p.userId, viewerId })) {
+      if (isHeldFromViewer({ moderationStatus: st, ownerId: p.userId, viewerId })) {
         continue; // held → drop
       }
       p.moderationStatus = st;
