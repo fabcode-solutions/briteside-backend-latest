@@ -256,7 +256,22 @@ export class EventService {
         showLikeCount: rest.showLikeCount !== undefined ? rest.showLikeCount : true,
         showTicketsRemaining:
           rest.showTicketsRemaining !== undefined ? rest.showTicketsRemaining : true,
+        clientRequestId: rest.clientRequestId || null,
       };
+
+      // Idempotent replay: the same submit attempt (network retry, double-click)
+      // resolves to the already-created event instead of making a second one.
+      if (processedEventData.clientRequestId) {
+        const existing = await db.query.events.findFirst({
+          where: and(
+            eq(events.organizerId, organizerId),
+            eq(events.clientRequestId, processedEventData.clientRequestId)
+          ),
+        });
+        if (existing) {
+          return this.getEventById(existing.id);
+        }
+      }
 
       const eventModeration = await TextModerationService.assertAllowed({
         entityType: TEXT_ENTITY.EVENT,
@@ -264,17 +279,79 @@ export class EventService {
         texts: [processedEventData.title, processedEventData.description],
       });
 
-      const [event] = await db
-        .insert(events)
-        .values({
-          ...processedEventData,
-          eventCode,
-          slug,
-          organizerId,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .returning();
+      // Create the event row together with its sessions atomically. Session
+      // creation validates overlaps (EventScheduleService.createEventSessions)
+      // — previously that check ran after the event row was already committed,
+      // so an overlap error left the event behind as an orphaned duplicate once
+      // the user fixed the conflicting session and resubmitted. Running both in
+      // one transaction means an overlap error rolls back the event row too.
+      let event;
+      try {
+        event = await db.transaction(async tx => {
+          const [insertedEvent] = await tx
+            .insert(events)
+            .values({
+              ...processedEventData,
+              eventCode,
+              slug,
+              organizerId,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .returning();
+
+          if (rest.venueId) {
+            await tx.insert(eventVenueProfiles).values({
+              eventId: insertedEvent.id,
+              venueId: rest.venueId,
+              description: venueProfile?.description ?? null,
+              capacity: venueProfile?.capacity ?? null,
+              amenities: venueProfile?.amenities ?? [],
+              additionalInformation: venueProfile?.additionalInformation ?? {},
+              cancellationPolicy: venueProfile?.cancellationPolicy ?? null,
+              accessibility: venueProfile?.accessibility ?? [],
+              contactEmail: venueProfile?.contactEmail ?? null,
+              contactPhone: venueProfile?.contactPhone ?? null,
+              parkingInfo: venueProfile?.parkingInfo ?? null,
+              publicTransportInfo: venueProfile?.publicTransportInfo ?? null,
+              emoji: venueProfile?.emoji ?? null,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
+          }
+
+          // Create sessions - will handle date validation, overlap checks, and update event dates
+          await EventScheduleService.createEventSessions(
+            insertedEvent.id,
+            rest.title,
+            rest.description,
+            resolvedSessions,
+            tx
+          );
+
+          return insertedEvent;
+        });
+      } catch (txError) {
+        // Unique violation on (organizerId, clientRequestId) — a concurrent
+        // duplicate request won the race and already created this event.
+        if (txError.code === '23505' && processedEventData.clientRequestId) {
+          const existing = await db.query.events.findFirst({
+            where: and(
+              eq(events.organizerId, organizerId),
+              eq(events.clientRequestId, processedEventData.clientRequestId)
+            ),
+          });
+          if (existing) {
+            return this.getEventById(existing.id);
+          }
+        }
+        throw txError;
+      }
+
+      // Only runs for an actual new row — the two clientRequestId replay
+      // branches above return before this point, so a request that's
+      // accidentally sent twice doesn't double-count the organizer's total.
+      await OrganizerService.incrementEventCount(organizer.userId);
 
       // Cover images gate sales/publish — inherit their files' verdicts
       await MediaModerationService.adoptMediaVerdicts({
@@ -291,34 +368,6 @@ export class EventService {
         fieldNames: ['title', 'description'],
         texts: [processedEventData.title, processedEventData.description],
       });
-
-      if (rest.venueId) {
-        await db.insert(eventVenueProfiles).values({
-          eventId: event.id,
-          venueId: rest.venueId,
-          description: venueProfile?.description ?? null,
-          capacity: venueProfile?.capacity ?? null,
-          amenities: venueProfile?.amenities ?? [],
-          additionalInformation: venueProfile?.additionalInformation ?? {},
-          cancellationPolicy: venueProfile?.cancellationPolicy ?? null,
-          accessibility: venueProfile?.accessibility ?? [],
-          contactEmail: venueProfile?.contactEmail ?? null,
-          contactPhone: venueProfile?.contactPhone ?? null,
-          parkingInfo: venueProfile?.parkingInfo ?? null,
-          publicTransportInfo: venueProfile?.publicTransportInfo ?? null,
-          emoji: venueProfile?.emoji ?? null,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        });
-      }
-
-      // Create sessions - will handle date validation, overlap checks, and update event dates
-      await EventScheduleService.createEventSessions(
-        event.id,
-        rest.title,
-        rest.description,
-        resolvedSessions
-      );
 
       // Create virtual details if event is virtual and details are provided
       if (rest.eventMode === 'virtual' && virtualDetails) {

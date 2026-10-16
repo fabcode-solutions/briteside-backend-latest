@@ -43,13 +43,7 @@ async function loadOneSource(source) {
   return domains;
 }
 
-/**
- * Fetches + parses every configured source and merges them into a single
- * snapshot. Never throws for an individual source failure — those are
- * recorded in sourceStats and the source is simply left out of this build.
- * Only aborts (returns null) if the aggregate result looks corrupted/empty
- * compared to the last known-good snapshot.
- */
+
 export async function buildSnapshot() {
   const previous = getSnapshot();
   const domainMap = new Map();

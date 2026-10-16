@@ -194,4 +194,10 @@ console.log(
   mask(env.stripe.webhookSecret),
 );
 
+// --- Debug: show ACRCloud config (masked) ---
+console.log('[ACRCloud] configured:', env.acrcloud.configured);
+console.log('[ACRCloud] host:', env.acrcloud.host || 'NOT SET');
+console.log('[ACRCloud] accessKey:', mask(env.acrcloud.accessKey));
+console.log('[ACRCloud] accessSecret:', mask(env.acrcloud.accessSecret));
+
 export default env;

@@ -840,12 +840,12 @@ export class SocialChatService {
     if (post) {
       await attachPostModerationStatuses([post]);
       await attachPostCopyrightStatuses([post]);
-      // Held content (GetStream or a pending/confirmed copyright case) must
-      // never be forwarded into someone else's DM inbox by a non-owner.
+      // Held (GetStream-moderated) content must never be forwarded into
+      // someone else's DM inbox by a non-owner. A copyright match never
+      // holds content — only mutes its audio client-side.
       if (
         isHeldFromViewer({
           moderationStatus: post.moderationStatus,
-          copyrightStatus: post.copyrightStatus,
           ownerId: post.userId,
           viewerId: currentUserId,
         })
@@ -881,7 +881,6 @@ export class SocialChatService {
         if (
           isHeldFromViewer({
             moderationStatus: story.moderationStatus,
-            copyrightStatus: story.copyrightStatus,
             ownerId: story.userId,
             viewerId: currentUserId,
           })
@@ -1085,7 +1084,6 @@ export class SocialChatService {
     if (
       isHeldFromViewer({
         moderationStatus: discussion.moderationStatus,
-        copyrightStatus: discussion.copyrightStatus,
         ownerId: discussion.userId,
         viewerId: currentUserId,
       })

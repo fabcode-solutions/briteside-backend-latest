@@ -286,13 +286,13 @@ export class DiscussionService {
     if (discussion) {
       await attachDiscussionModerationStatuses([discussion]);
       await attachDiscussionCopyrightStatuses([discussion]);
-      // Held content (pending/rejected/shadowed/… OR a pending/confirmed
-      // copyright case) is invisible to non-owners, even by direct id. Owner
-      // still sees their own (with the removed/blur/"under review" UI).
+      // Held content (pending/rejected/shadowed/…) is invisible to
+      // non-owners, even by direct id. Owner still sees their own (with the
+      // removed/blur/"under review" UI). A copyright match never holds
+      // content — only mutes its audio client-side.
       if (
         isHeldFromViewer({
           moderationStatus: discussion.moderationStatus,
-          copyrightStatus: discussion.copyrightStatus,
           ownerId: discussion.userId,
           viewerId: userId,
         })

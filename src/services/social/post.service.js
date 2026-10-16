@@ -1100,13 +1100,13 @@ export class PostService {
     await attachPostModerationStatuses([post]);
     await attachPostCopyrightStatuses([post]);
 
-    // Held content (pending/rejected/shadowed/… OR a pending/confirmed
-    // copyright case) is invisible to non-owners, even by direct id. Owner
-    // still sees their own (with the removed/blur/"under review" UI).
+    // Held content (pending/rejected/shadowed/…) is invisible to
+    // non-owners, even by direct id. Owner still sees their own (with the
+    // removed/blur/"under review" UI). A copyright match never holds
+    // content — only mutes its audio client-side.
     if (
       isHeldFromViewer({
         moderationStatus: post.moderationStatus,
-        copyrightStatus: post.copyrightStatus,
         ownerId: post.userId,
         viewerId,
       })

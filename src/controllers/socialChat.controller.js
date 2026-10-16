@@ -198,7 +198,10 @@ export const sendMessage = catchAsync(async (req, res) => {
         title: 'Priority message replied',
         message: `${replierName} replied to your priority message.`,
         type: 'chat_message',
-        redirectTo: '/messages?tab=priority',
+        // Needs priorityConvId or the frontend's Priority-tab deep link
+        // (Messages.tsx) has nothing to select and just lands on the bare
+        // tab instead of this specific conversation.
+        redirectTo: `/messages?tab=priority&priorityConvId=${conversationId}`,
         relatedId: message.id,
         metadata: { conversationId, messageId: message.id, isPriority: true },
       }).catch(err => console.warn('[sendMessage] reply notify failed:', err.message));

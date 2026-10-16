@@ -384,11 +384,17 @@ export class IapCatalogService {
             price: region.price,
             availability: 'AVAILABLE',
           }));
+          // Create with the SAME regions version the prices were converted
+          // for — Google versions its region/currency list (e.g. Bulgaria moved
+          // from BGN to EUR in 2026/01), so a hard-coded older version rejected
+          // today's converted prices ("Expected BGN but got EUR").
+          const regionsVersion = converted.regionVersion?.version ?? '2022/02';
           await play(
             'PATCH',
             // Google's patch path is lowercase `onetimeproducts` (unlike its
             // other endpoints) — per the API's discovery document.
-            `/onetimeproducts/${productId}?allowMissing=true&regionsVersion.version=2022%2F02` +
+            `/onetimeproducts/${productId}?allowMissing=true` +
+              `&regionsVersion.version=${encodeURIComponent(regionsVersion)}` +
               '&updateMask=listings,purchaseOptions',
             {
               packageName: config.googleIap.packageName,
