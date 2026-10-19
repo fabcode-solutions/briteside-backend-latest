@@ -28,6 +28,25 @@ if (config.stripe?.secretKey) {
   console.warn('Stripe is not configured. STRIPE_SECRET_KEY missing.');
 }
 
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * On this Stripe API version, Invoice no longer carries a `payment_intent`
+ * field directly (and `latest_invoice.payment_intent` can't be expanded off
+ * a Subscription — expand only goes 4 levels deep and this path is 5). The
+ * PaymentIntent for an invoice's first payment attempt now lives under the
+ * invoice's `payments` list instead, so it has to be fetched as a second
+ * call keyed off the invoice id.
+ */
+export async function getInvoicePaymentIntent(invoiceId) {
+  if (!invoiceId) return null;
+  const invoice = await stripe.invoices.retrieve(invoiceId, {
+    expand: ['payments.data.payment.payment_intent'],
+  });
+  const entry = invoice.payments?.data?.find(p => p.payment?.type === 'payment_intent');
+  return entry?.payment?.payment_intent ?? null;
+}
+
 // ─── STATUS CONSTANTS ──────────────────────────────────────────────────────
 const ACTIVE_STATUSES = ['active', 'trialing', 'comped'];
 
@@ -554,19 +573,37 @@ export class SubscriptionService {
 
     const existingStripeSubs = await stripe.subscriptions.list({
       customer: stripeCustomerId,
-      status: 'active',
+      status: 'all',
       limit: 10,
     });
+    const matchesPlan = sub =>
+      sub.metadata?.planId === planId ||
+      sub.items?.data?.some(item => item.price?.id === plan.stripePriceId);
+
     const duplicate = existingStripeSubs.data.find(
-      sub =>
-        sub.metadata?.planId === planId ||
-        sub.items?.data?.some(item => item.price?.id === plan.stripePriceId)
+      sub => matchesPlan(sub) && ['active', 'trialing', 'past_due'].includes(sub.status)
     );
     if (duplicate) {
       throw new ApiError(
         httpStatus.CONFLICT,
         'User already has an active subscription for this plan'
       );
+    }
+
+    // A previous attempt may have left an unpaid 'incomplete' subscription
+    // behind (e.g. the buyer never finished the card confirmation). Reuse it
+    // instead of creating another one each retry, which would otherwise pile
+    // up orphaned subscriptions in Stripe for the same customer/plan.
+    const stale = existingStripeSubs.data.find(sub => matchesPlan(sub) && sub.status === 'incomplete');
+    if (stale) {
+      const paymentIntent = await getInvoicePaymentIntent(stale.latest_invoice);
+      if (paymentIntent?.client_secret) {
+        return { paymentId: stale.id, clientSecret: paymentIntent.client_secret };
+      }
+      // Couldn't recover a usable PaymentIntent from the stale subscription —
+      // cancel it so it doesn't keep shadowing future attempts, then fall
+      // through to create a fresh one.
+      await stripe.subscriptions.cancel(stale.id).catch(() => {});
     }
 
     const user = await db.query.users.findFirst({
@@ -582,7 +619,7 @@ export class SubscriptionService {
         save_default_payment_method: 'on_subscription',
         payment_method_types: ['card'],
       },
-      expand: ['latest_invoice.payment_intent'],
+      expand: ['latest_invoice'],
       metadata: {
         userId,
         planId,
@@ -592,7 +629,17 @@ export class SubscriptionService {
       },
     });
 
-    const paymentIntent = subscription.latest_invoice?.payment_intent;
+    let paymentIntent = await getInvoicePaymentIntent(subscription.latest_invoice?.id);
+
+    // Defensive: the invoice's payment attempt can take a brief moment to
+    // appear after subscription creation. Retry a couple of times before
+    // giving up.
+    const RETRY_DELAYS_MS = [300, 600];
+    for (let attempt = 0; !paymentIntent?.client_secret && attempt < RETRY_DELAYS_MS.length; attempt++) {
+      await sleep(RETRY_DELAYS_MS[attempt]);
+      paymentIntent = await getInvoicePaymentIntent(subscription.latest_invoice?.id);
+    }
+
     if (!paymentIntent?.client_secret) {
       throw new ApiError(
         httpStatus.INTERNAL_SERVER_ERROR,
@@ -614,14 +661,14 @@ export class SubscriptionService {
   static async finalizeNativeSubscription(userId, subscriptionId, paymentIntentId) {
     this.ensureStripe();
     const stripeSubscription = await stripe.subscriptions.retrieve(subscriptionId, {
-      expand: ['latest_invoice.payment_intent'],
+      expand: ['latest_invoice'],
     });
 
     if (stripeSubscription.metadata?.userId !== userId) {
       throw new ApiError(httpStatus.FORBIDDEN, 'This subscription does not belong to you');
     }
 
-    const paymentIntent = stripeSubscription.latest_invoice?.payment_intent;
+    const paymentIntent = await getInvoicePaymentIntent(stripeSubscription.latest_invoice?.id);
     if (
       !paymentIntent ||
       paymentIntent.id !== paymentIntentId ||

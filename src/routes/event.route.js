@@ -32,6 +32,9 @@ import {
   getMarketingSettings,
   updateMarketingSettings,
   getPublicPixelConfig,
+  checkVanitySlugAvailability,
+  updateVanitySlug,
+  resolveVanitySlug,
 } from '../controllers/eventMarketing.controller.js';
 import {
   listTrackingLinks,
@@ -59,6 +62,7 @@ router.get('/:slug/tracking-links/resolve/:code', resolveTrackingLinkCode);
 router.post('/:slug/tracking-links/:linkId/click', optionalAuthMiddleware, recordTrackingClick);
 router.get('/:eventId/tickets', getEventTickets);
 router.get('/:eventId/marketing/public', getPublicPixelConfig);
+router.get('/vanity/:vanitySlug', resolveVanitySlug);
 
 router.use('/:eventId/teams', eventTeamRoute);
 router.use('/:eventId/blasts', blastRoute);
@@ -121,5 +125,7 @@ router.get('/:eventId/invite-followers/stats', getFollowerInviteStats);
 
 router.get('/:eventId/marketing', getMarketingSettings);
 router.put('/:eventId/marketing', updateMarketingSettings);
+router.get('/:eventId/vanity-slug/check', checkVanitySlugAvailability);
+router.put('/:eventId/vanity-slug', updateVanitySlug);
 
 export default router;

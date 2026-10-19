@@ -66,11 +66,6 @@ const EnvVariables = z.object({
   // Google Play In-App Purchase — Play Developer API (service account)
   GOOGLE_PLAY_PACKAGE_NAME: z.string().optional(),
   GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: z.string().optional(),
-
-  // ACRCloud — audio fingerprint matching for copyright scans
-  ACRCLOUD_HOST: z.string().optional(),
-  ACRCLOUD_ACCESS_KEY: z.string().optional(),
-  ACRCLOUD_ACCESS_SECRET: z.string().optional(),
 });
 
 let envVars;
@@ -160,16 +155,28 @@ const env = {
     serviceAccountJson: envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON,
     configured: !!(envVars.GOOGLE_PLAY_PACKAGE_NAME && envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON),
   },
-  acrcloud: {
-    host: envVars.ACRCLOUD_HOST,
-    accessKey: envVars.ACRCLOUD_ACCESS_KEY,
-    accessSecret: envVars.ACRCLOUD_ACCESS_SECRET,
-    configured: !!(
-      envVars.ACRCLOUD_HOST &&
-      envVars.ACRCLOUD_ACCESS_KEY &&
-      envVars.ACRCLOUD_ACCESS_SECRET
-    ),
-  },
 };
+
+// --- Debug: show which Stripe keys are being used (masked) ---
+const mask = k => (k ? `${k.slice(0, 8)}...${k.slice(-4)}` : 'NOT SET');
+
+console.log(
+  '[Stripe] secretKey source:',
+  fileEnv.STRIPE_SECRET_KEY_LOCAL ? '.env LOCAL' : 'OTHER',
+  '→',
+  mask(env.stripe.secretKey),
+);
+console.log(
+  '[Stripe] publishableKey source:',
+  fileEnv.STRIPE_PUBLISHABLE_KEY_LOCAL ? '.env LOCAL' : 'OTHER',
+  '→',
+  mask(env.stripe.publishableKey),
+);
+console.log(
+  '[Stripe] webhookSecret source:',
+  fileEnv.STRIPE_WEBHOOK_SECRET_LOCAL ? '.env LOCAL' : 'OTHER',
+  '→',
+  mask(env.stripe.webhookSecret),
+);
 
 export default env;

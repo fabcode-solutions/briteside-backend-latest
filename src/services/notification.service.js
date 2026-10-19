@@ -9,7 +9,7 @@ import {
   talentSessions,
   userNotificationSettings,
 } from '../db/schema/index.js';
-import { eq, desc, and } from 'drizzle-orm';
+import { eq, desc, and, sql } from 'drizzle-orm';
 import { getIO } from '../utils/io.js';
 import { emitNotification } from '../socket/emitter.js';
 import { getActorProfiles } from '../utils/helper.js';
@@ -272,6 +272,23 @@ export const deleteNotificationByTypeAndRelatedId = async (userId, type, related
     .returning();
 
   return deleted ?? null;
+};
+
+export const markStoryNotificationsRead = async (userId, storyId) => {
+  const updated = await db
+    .update(notifications)
+    .set({ isRead: true })
+    .where(
+      and(
+        eq(notifications.userId, userId),
+        eq(notifications.type, 'social_update'),
+        eq(notifications.isRead, false),
+        sql`${notifications.metadata}->>'storyId' = ${storyId}`
+      )
+    )
+    .returning();
+
+  return updated;
 };
 
 export const getNotificationSettingsByUserId = async userId => {
