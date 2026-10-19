@@ -7,7 +7,7 @@ import { groups, groupMembers, users, groupJoinRequests } from '../db/schema/ind
 import { groupSubscriptionTiers, groupSubscriptions } from '../db/schema/subscriptions.js';
 import { stripeCustomers } from '../db/schema/britesidePlus.js';
 import ApiError from '../utils/api-error.js';
-import { SubscriptionService } from './subscription.service.js';
+import { SubscriptionService, getInvoicePaymentIntent } from './subscription.service.js';
 import { adminService } from './admin.service.js';
 import { GroupDiscussionNotificationService } from './group.service.js';
 import {
@@ -338,7 +338,7 @@ export class GroupSubscriptionService {
         save_default_payment_method: 'on_subscription',
         payment_method_types: ['card'],
       },
-      expand: ['latest_invoice.payment_intent'],
+      expand: ['latest_invoice'],
       metadata: {
         type: 'group_subscription',
         userId,
@@ -355,7 +355,7 @@ export class GroupSubscriptionService {
     }
 
     const subscription = await s.subscriptions.create(subscriptionParams);
-    const paymentIntent = subscription.latest_invoice?.payment_intent;
+    const paymentIntent = await getInvoicePaymentIntent(subscription.latest_invoice?.id);
     if (!paymentIntent?.client_secret) {
       throw new ApiError(500, 'Failed to initialize payment for this subscription');
     }
@@ -374,14 +374,14 @@ export class GroupSubscriptionService {
   static async finalizeNativeSubscription(userId, subscriptionId, paymentIntentId) {
     const s = getStripe();
     const stripeSub = await s.subscriptions.retrieve(subscriptionId, {
-      expand: ['latest_invoice.payment_intent'],
+      expand: ['latest_invoice'],
     });
 
     if (stripeSub.metadata?.userId !== userId) {
       throw new ApiError(403, 'This subscription does not belong to you');
     }
 
-    const paymentIntent = stripeSub.latest_invoice?.payment_intent;
+    const paymentIntent = await getInvoicePaymentIntent(stripeSub.latest_invoice?.id);
     if (
       !paymentIntent ||
       paymentIntent.id !== paymentIntentId ||
@@ -1280,7 +1280,7 @@ static async refundGroupSubscription(userId, groupId) {
     const s = getStripe();
     try {
       const stripeSub = await s.subscriptions.retrieve(subscription.stripeSubscriptionId, {
-        expand: ['latest_invoice.payment_intent', 'latest_invoice.charge'],
+        expand: ['latest_invoice'],
       });
 
       const invoice = stripeSub.latest_invoice;
@@ -1288,14 +1288,10 @@ static async refundGroupSubscription(userId, groupId) {
 
       let refund = null;
       if (invoice.status === 'paid') {
-        if (invoice.payment_intent?.id) {
+        const paymentIntent = await getInvoicePaymentIntent(invoice.id);
+        if (paymentIntent?.id) {
           refund = await s.refunds.create({
-            payment_intent: invoice.payment_intent.id,
-            reason: 'requested_by_customer',
-          });
-        } else if (invoice.charge?.id) {
-          refund = await s.refunds.create({
-            charge: invoice.charge.id,
+            payment_intent: paymentIntent.id,
             reason: 'requested_by_customer',
           });
         } else {

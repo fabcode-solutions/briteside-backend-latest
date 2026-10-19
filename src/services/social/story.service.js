@@ -30,7 +30,7 @@ import {
 import FileManagementService from '../fileManagement.service.js';
 import { BlockService } from './block.service.js';
 import { computePollAnalytics } from './storyPoll.service.js';
-import { createNotification } from '../notification.service.js';
+import { createNotification, markStoryNotificationsRead } from '../notification.service.js';
 
 /**
  * Decorate a story with ALL its polls shaped for the given viewer.
@@ -438,6 +438,10 @@ export class StoryService {
         .set({ viewsCount: sql`${stories.viewsCount} + 1` })
         .where(eq(stories.id, storyId));
     }
+
+    // Clear any "mentioned you in this story" / "mentioned you in a comment
+    // on this story" notifications now that the viewer has seen the story.
+    await markStoryNotificationsRead(userId, storyId).catch(() => {});
 
     const updated = await db.query.stories.findFirst({
       where: eq(stories.id, storyId),
