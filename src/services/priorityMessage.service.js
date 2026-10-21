@@ -37,6 +37,12 @@ import { socialConversations } from '../db/schema/socialChat.js';
 import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
 import { PayoutLedgerService } from './payoutLedger.service.js';
 import { stripeCustomers } from '../db/schema/britesidePlus.js';
+import { PlusTaxLiabilityService } from './tax/plusTaxLiability.service.js';
+import {
+  SERVICE_TAX_CODE,
+  buildServiceAutomaticTax,
+  applyTaxLiabilityToReserve,
+} from '../lib/tax/serviceCheckoutTax.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 
@@ -315,6 +321,18 @@ export class PriorityMessageService {
       columns: { firstName: true, lastName: true, email: true },
     });
 
+    // Tax (priority messages) — TAX_STRATEGY.md §3.1, NOT legally reviewed.
+    // Paid messages are personal/professional services, the same category
+    // as shop's 'service' listing type — tagged with the same services tax
+    // code (serviceCheckoutTax.js) so Stripe Tax's own exemption logic
+    // applies instead of us hard-coding "0%". Liability resolved the exact
+    // same way shop resolves it for its own checkout (reused, not forked):
+    // whichever party (the talent's connected account or Briteside) actually
+    // holds a Stripe Tax registration — see PlusTaxLiabilityService. Absent
+    // one, this fails toward charging no tax, same as shop.
+    const { liability } = await PlusTaxLiabilityService.resolveLiability(profile.userId);
+    const taxLiability = liability ? liability.type : 'none';
+
     // ── Persist payment + items + attachments in one transaction ───────────
     const { payment, items } = await db.transaction(async tx => {
       const [paymentRow] = await tx
@@ -327,6 +345,7 @@ export class PriorityMessageService {
           amountCents: chargedCents,
           baseCents,
           status: 'pending',
+          taxLiability,
           metadata: {
             platformAndServiceFeeCents,
             talentDeductionCents,
@@ -415,6 +434,7 @@ export class PriorityMessageService {
       baseCents,
       platformAndServiceFeeCents,
       chargedCents,
+      tax: { taxCode: SERVICE_TAX_CODE, liability },
     };
   }
 
@@ -422,7 +442,15 @@ export class PriorityMessageService {
    *  message payment — shared by createCheckout() and the quick-pay 3DS
    *  fallback so both ever charge for exactly the same thing. `msgList` only
    *  needs a `.length` (a reconstructed `items` row set works just as well
-   *  as the original in-memory msgList). */
+   *  as the original in-memory msgList).
+   *
+   *  Tax (TAX_STRATEGY.md §3.1, NOT legally reviewed): the three "real"
+   *  content line items below (message, extended content, attachments) are
+   *  all part of the one priority-message service, so all three carry the
+   *  same services tax code (serviceCheckoutTax.js) — tagged unconditionally
+   *  since it's always the same constant for this flow, unlike shop's
+   *  per-listing-type branching. The merged Platform & Service Fee item is
+   *  left untagged, same as ShopOrderService's equivalent fee line item. */
   static _buildLineItems({
     textMessageCount,
     totalExtensionUnits,
@@ -441,12 +469,14 @@ export class PriorityMessageService {
               price_data: {
                 currency: 'usd',
                 unit_amount: profile.priorityMessageFee * textMessageCount,
+                tax_behavior: 'exclusive',
                 product_data: {
                   name:
                     msgList.length > 1
                       ? `${msgList.length} Priority Messages to ${talentName}`
                       : `Priority Message to ${talentName}`,
                   description: 'Guaranteed response within 72 hours',
+                  tax_code: SERVICE_TAX_CODE,
                 },
               },
               quantity: 1,
@@ -461,12 +491,14 @@ export class PriorityMessageService {
               price_data: {
                 currency: 'usd',
                 unit_amount: profile.priorityMessageFee * totalExtensionUnits,
+                tax_behavior: 'exclusive',
                 product_data: {
                   name:
                     totalExtensionUnits > 1
                       ? `Extended message content (${totalExtensionUnits} blocks)`
                       : 'Extended message content',
                   description: `Adds ${totalExtensionUnits * 280} extra characters to your message`,
+                  tax_code: SERVICE_TAX_CODE,
                 },
               },
               quantity: 1,
@@ -481,9 +513,11 @@ export class PriorityMessageService {
               price_data: {
                 currency: 'usd',
                 unit_amount: totalAttachmentCents,
+                tax_behavior: 'exclusive',
                 product_data: {
                   name: totalAttachments > 1 ? `${totalAttachments} Attachments` : '1 Attachment',
                   description: `${totalAttachments} file${totalAttachments > 1 ? 's' : ''} attached — 99¢ each, refunded if not opened within 48h`,
+                  tax_code: SERVICE_TAX_CODE,
                 },
               },
               quantity: 1,
@@ -530,6 +564,7 @@ export class PriorityMessageService {
       platformAndServiceFeeCents,
       applicationFeeCents,
       talentNetCents,
+      tax,
     } = await this._createPendingPayment(senderId, {
       talentProfileId,
       subject,
@@ -567,6 +602,15 @@ export class PriorityMessageService {
         : `/profile/${profile.user.username}`
     );
 
+    // Tax (priority messages) — TAX_STRATEGY.md §3.1, NOT legally reviewed.
+    // Mirrors ShopOrderService._createHostedOrderSession's exact pattern:
+    // automatic_tax is only enabled when PlusTaxLiabilityService actually
+    // found a liable party (see _prepareMessagePayment above) — Checkout's
+    // own live billing-address collection (triggered by automatic_tax.enabled
+    // itself) is what lets Stripe source the rate from the sender's
+    // destination state per TAX_STRATEGY.md §3.4.
+    const automaticTax = buildServiceAutomaticTax(tax?.liability);
+
     // ── Stripe Checkout session ─────────────────────────────────────────────
     // Embedded checkout (web only — it's an iframe, which the native apps'
     // openAuthSessionAsync flow has no way to host) lets the sender pay in a
@@ -587,6 +631,7 @@ export class PriorityMessageService {
             // known here, no {CHECKOUT_SESSION_ID} needed.
             return_url: `${FRONTEND_URL}/payment/success?payment_id=${payment.id}&type=priority_message`,
           }),
+      ...(automaticTax ? { automatic_tax: automaticTax } : {}),
       line_items: this._buildLineItems({
         textMessageCount,
         totalExtensionUnits,
@@ -741,6 +786,13 @@ export class PriorityMessageService {
     const meta = payment.metadata ?? {};
     const textMessageCount = items.filter(i => i.messageContent && i.messageContent.length > 0).length;
 
+    // Tax — re-resolved live rather than cached, same as every other
+    // PlusTaxLiabilityService call site (shop re-asks on every order prep
+    // too, no caching layer). Only the quick-pay 3DS fallback
+    // (_createEmbeddedCheckoutSessionForPayment) actually uses `tax`; the
+    // native/IAP reload paths that also call this just ignore it.
+    const { liability } = await PlusTaxLiabilityService.resolveLiability(profile.userId);
+
     return {
       payment,
       profile,
@@ -755,6 +807,7 @@ export class PriorityMessageService {
       baseCents: payment.baseCents,
       chargedCents: payment.amountCents,
       platformAndServiceFeeCents: meta.platformAndServiceFeeCents ?? 0,
+      tax: { taxCode: SERVICE_TAX_CODE, liability },
     };
   }
 
@@ -781,13 +834,19 @@ export class PriorityMessageService {
     platformAndServiceFeeCents,
     textMessageCount,
     stripeCustomerId,
+    tax,
   }) {
+    // Tax — same gating as createCheckout()'s web branch (TAX_STRATEGY.md
+    // §3.1, NOT legally reviewed).
+    const automaticTax = buildServiceAutomaticTax(tax?.liability);
+
     const checkoutParams = {
       payment_method_types: ['card'],
       mode: 'payment',
       expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
       ui_mode: 'embedded',
       return_url: `${FRONTEND_URL}/payment/success?payment_id=${payment.id}&type=priority_message`,
+      ...(automaticTax ? { automatic_tax: automaticTax } : {}),
       line_items: this._buildLineItems({
         textMessageCount,
         totalExtensionUnits,
@@ -870,6 +929,15 @@ export class PriorityMessageService {
       this._createEmbeddedCheckoutSessionForPayment({ ...ctx, stripeCustomerId });
 
     try {
+      // No automatic_tax/Tax Calculation on this direct-charge PaymentIntent,
+      // deliberately — there is no Checkout-hosted form here to collect the
+      // sender's billing address live, so there's no address to anchor a
+      // Stripe Tax Calculation call to (only the authentication_required
+      // fallback above goes through a real Checkout Session, which is where
+      // tax is actually computed). Same open question flagged for virtual
+      // facilitator events on native checkout (payment.service.js's
+      // allowAutomaticTax) — taxAmountCents correctly stays 0 for a payment
+      // that succeeds via this path rather than guessing.
       const intent = await stripe.paymentIntents.create(
         {
           amount: chargedCents,
@@ -937,6 +1005,11 @@ export class PriorityMessageService {
       throw new ApiError(409, 'This payment is no longer pending');
     }
 
+    // No automatic_tax/Tax Calculation here either, deliberately — same
+    // reasoning as chargeExistingPendingPayment's direct charge above: a raw
+    // PaymentIntent has no Checkout-hosted form to collect the sender's
+    // billing address live, so there is no address to anchor a Stripe Tax
+    // Calculation call to. taxAmountCents correctly stays 0 for this flow.
     const intent = await stripe.paymentIntents.create({
       amount: chargedCents,
       currency: 'usd',
@@ -1014,6 +1087,19 @@ export class PriorityMessageService {
     console.log('[handleWebhook] paymentId:', paymentId, 'status check...');
     if (!paymentId) return;
 
+    // Tax (priority messages) — TAX_STRATEGY.md §3.6, NOT legally reviewed.
+    // Mirrors ShopOrderService.handlePaymentWebhook: the amount actually
+    // calculated/collected by Stripe only exists once the session completes
+    // — payment.taxLiability (set at createCheckout time) only recorded *who*
+    // we asked Stripe to check. `total_details` is absent on the synthetic
+    // "session" object the native/quick-pay PaymentIntent paths pass to
+    // _deliverPaidPayment directly (chargeExistingPendingPayment,
+    // createNativePaymentIntent/finalizeNativePayment) — those never go
+    // through this webhook at all, so taxAmountCents correctly stays 0 for
+    // them rather than guessing (no billing-address collection point to
+    // anchor a tax calculation to).
+    const taxAmountCents = stripeSession.total_details?.amount_tax ?? 0;
+
     await this._deliverPaidPayment(paymentId, {
       senderId,
       talentUserId,
@@ -1023,6 +1109,7 @@ export class PriorityMessageService {
         stripePaymentIntentId: stripeSession.payment_intent ?? null,
         stripeSessionId: stripeSession.id,
       },
+      taxAmountCents,
     });
   }
 
@@ -1038,6 +1125,10 @@ export class PriorityMessageService {
    * @param {boolean} opts.reserveTalentCut  hold talentNetCents for the Stripe
    *   Connect release cron. false for IAP — Apple/Google collect that money,
    *   not Stripe, so there's nothing in Stripe to transfer (same as shop IAP).
+   * @param {number} opts.taxAmountCents  actual tax Stripe calculated/collected
+   *   on this payment's Checkout Session — 0 (the default) for every
+   *   channel/path that never went through automatic_tax (native/quick-pay
+   *   PaymentIntents, IAP), same fail-toward-$0 convention as everywhere else.
    * @returns {{ conversationId, messageIds } | null}
    */
   static async _deliverPaidPayment(
@@ -1049,6 +1140,7 @@ export class PriorityMessageService {
       paidFields = {},
       spendFields = {},
       reserveTalentCut = true,
+      taxAmountCents = 0,
     }
   ) {
     const payment = await db.query.priorityMessagePayments.findFirst({
@@ -1154,8 +1246,17 @@ export class PriorityMessageService {
       // Talent's net cut is held (not transferred at charge time — see
       // createCheckout) until 48h after the talent replies, per the SLA
       // escrow payout rule. talentNetCents was computed and stashed in
-      // metadata at checkout-creation time.
-      const reserveAmountCents = reserveTalentCut ? (payment.metadata?.talentNetCents ?? 0) : 0;
+      // metadata at checkout-creation time. When the talent is the liable
+      // party for tax (payment.taxLiability === 'account'), the collected
+      // tax rides into their reserve alongside their earnings — same rule
+      // ShopOrderService.handlePaymentWebhook applies to sellerReceiveCents
+      // (TAX_STRATEGY.md §3.6, NOT legally reviewed).
+      const baseReserveAmountCents = reserveTalentCut ? (payment.metadata?.talentNetCents ?? 0) : 0;
+      const reserveAmountCents = applyTaxLiabilityToReserve(
+        baseReserveAmountCents,
+        taxAmountCents,
+        payment.taxLiability
+      );
 
       await db
         .update(priorityMessagePayments)
@@ -1165,6 +1266,7 @@ export class PriorityMessageService {
           conversationId: conversation.id,
           paidAt: new Date(),
           reserveAmountCents,
+          taxAmountCents,
           updatedAt: new Date(),
         })
         .where(eq(priorityMessagePayments.id, payment.id));

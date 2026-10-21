@@ -150,6 +150,26 @@ export const talentSessions = pgTable(
     platformShareCents: integer('platform_share_cents').default(0),
     stripeFeeCents: integer('stripe_fee_cents').default(0),
 
+    // ── Tax (1:1 video bookings) — TAX_STRATEGY.md §3.1, NOT legally
+    // reviewed. Same shape/meaning as shopOrders.taxLiability/taxAmountCents
+    // (see src/db/schema/shop.js): taxLiability reflects what this session's
+    // Checkout Session asked Stripe to do (see PlusTaxLiabilityService via
+    // src/lib/tax/serviceCheckoutTax.js) — 'account' means the talent's own
+    // Stripe Tax registrations were used (collected tax rides into their
+    // payout alongside their earnings), 'self' means Briteside's own
+    // registrations were used (tax stays on the platform balance), 'none'
+    // means automatic_tax wasn't even enabled (no known nexus anywhere) and
+    // taxAmountCents will always be 0. taxAmountCents is the actual amount
+    // Stripe calculated/collected, filled in from the completed Checkout
+    // Session in the payment webhook — 0 (not null) whenever no tax was
+    // charged. Only ever populated on the Checkout-Session path
+    // (_createHostedSessionCheckout); the raw-PaymentIntent native path
+    // (createNativePaymentIntent) has no billing-address collection point to
+    // anchor a tax calculation to, so it correctly leaves these at their
+    // 'none'/0 defaults rather than guessing.
+    taxLiability: varchar('tax_liability', { length: 10 }).default('none'),
+    taxAmountCents: integer('tax_amount_cents').notNull().default(0),
+
     // Call quality feedback — submitted by each party after session ends
     bookerCallRating: integer('booker_call_rating'), // 1–5
     bookerCallFeedback: text('booker_call_feedback'),
