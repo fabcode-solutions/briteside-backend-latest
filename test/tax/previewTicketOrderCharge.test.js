@@ -150,4 +150,39 @@ describe('PaymentService.previewTicketOrderCharge', () => {
     expect(result.taxAmountCents).toBe(0);
     expect(result.totalCents).toBe(3675); // $35.00 + $1.75 platform fee only
   });
+
+  it('scales tax correctly with multiple ticket quantities (tax computed once on the combined buyer total, not per-unit)', async () => {
+    eventRowOverride = {
+      ...EVENT_ROW,
+      tax: {
+        collectionEnabled: true,
+        registrationId: '123456789',
+        name: 'State Sales Tax',
+        ratePercent: 7,
+        absorbed: false,
+        appliesToAllTickets: true,
+        country: 'United States',
+      },
+    };
+
+    const result = await PaymentService.previewTicketOrderCharge({
+      eventId: 'event-1',
+      ticketSelections: [{ ticketId: 'ticket-1', quantity: 2 }],
+      merchandiseSelections: [],
+    });
+
+    // $35.00 x 2 = $70.00 subtotal, 5% fee = $3.50, 7% tax on the $73.50
+    // buyer total = $5.145 -> rounds to $5.15 (515 cents). Deliberately NOT
+    // 514 cents, which is what you'd get by computing tax on one ticket
+    // (257 cents, per the single-quantity test above) and doubling it --
+    // rounding happens once, on the combined total, not per line item.
+    expect(result).toEqual({
+      subtotalCents: 7000,
+      platformFeeCents: 350,
+      taxAmountCents: 515,
+      taxName: 'State Sales Tax',
+      taxPending: false,
+      totalCents: 7865,
+    });
+  });
 });

@@ -77,6 +77,16 @@ export const orders = pgTable(
     // added on top of the buyer's total (TAX_STRATEGY.md §2.3). Always false
     // for facilitator-jurisdiction orders, where Briteside collects on top.
     taxAbsorbed: boolean('tax_absorbed').default(false),
+    // True only for a hosted Checkout Session where Stripe's automatic_tax
+    // was enabled (virtual event, Marketplace-Facilitator jurisdiction) —
+    // the real tax amount isn't known until the buyer's billing address is
+    // collected live during checkout, so taxAmountCents/totalAmount are
+    // saved as pre-tax placeholders at session-creation time and MUST be
+    // reconciled from the completed session's total_details once the
+    // webhook fires (see PaymentService.reconcileAutomaticTaxOnOrder).
+    // Flips to false once reconciled — never true for the native/PaymentSheet
+    // flow, which can't use automatic_tax at all (no live address collection).
+    taxPendingAutomatic: boolean('tax_pending_automatic').default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
   },

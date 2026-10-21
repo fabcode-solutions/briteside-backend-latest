@@ -54,6 +54,26 @@ describe('EventTaxService.computeTax', () => {
     expect(result).toMatchObject({ jurisdictionStatus: 'organizer', amountCents: 0 });
   });
 
+  it('charges no tax when collectionEnabled is explicitly false, even if a rate/registration are still on file from when it was previously enabled', async () => {
+    // Guards against stale data: an organizer who enables the Tax Tool,
+    // then turns it back off, might leave ratePercent/registrationId/name
+    // populated in the persisted event rather than cleared. Toggling
+    // collectionEnabled off must always win regardless.
+    const result = await EventTaxService.computeTax({
+      venue: { state: 'CA', address: '123 Main St' },
+      eventMode: 'in_person',
+      subtotalCents: 10_000,
+      organizerTax: {
+        collectionEnabled: false,
+        registrationId: '123456789',
+        ratePercent: 7.5,
+        name: 'CA Sales Tax',
+        absorbed: false,
+      },
+    });
+    expect(result).toMatchObject({ jurisdictionStatus: 'organizer', amountCents: 0 });
+  });
+
   it('applies the organizer manual rate on top of the buyer total when opted in (not absorbed)', async () => {
     const result = await EventTaxService.computeTax({
       venue: { state: 'CA', address: '123 Main St' },

@@ -668,12 +668,10 @@ export class PaymentService {
     // exact for facilitator in-person / organizer Tax Tool orders, but 0
     // for the automaticTax (virtual facilitator) branch, where Stripe only
     // determines the real amount once the buyer's address is collected
-    // during the hosted session. TODO(tax): wire the ticket-order webhook
-    // (handleCheckoutSession in webhook.controller.js) to overwrite
-    // taxAmountCents from the completed session's `total_details.amount_tax`
-    // the same way ShopOrderService.handlePaymentWebhook does for shop
-    // orders — not done here to avoid a larger, riskier change to that
-    // already-complex ticket-issuance webhook in this pass.
+    // during the hosted session. taxPendingAutomatic flags that case so
+    // the webhook (handleCheckoutSession) knows to reconcile these fields
+    // from the completed session's total_details once it fires — see
+    // reconcileAutomaticTaxOnOrder below.
     await db
       .update(orders)
       .set({
@@ -685,10 +683,47 @@ export class PaymentService {
         taxAmountCents,
         taxAbsorbed,
         taxJurisdictionStatus,
+        taxPendingAutomatic: !!automaticTax,
         updatedAt: new Date(),
       })
       .where(eq(orders.id, order.id));
 
     return { clientSecret: session.client_secret, sessionId: session.id };
+  }
+
+  /**
+   * Reconciles an order's tax/total/payout-split fields once a hosted
+   * Checkout Session that used automatic_tax (virtual, Marketplace-
+   * Facilitator jurisdiction) actually completes — see taxPendingAutomatic
+   * on the orders table for why this exists. A no-op (and safe to call
+   * repeatedly — e.g. a retried webhook delivery) for every other order,
+   * since taxPendingAutomatic flips to false after the first reconciliation
+   * and this checks it up front.
+   *
+   * Facilitator tax is always withheld into Briteside's share (§2.1), so
+   * the newly-known tax amount is added onto platformShareCents here the
+   * same way it would have been had it been known at session-creation time.
+   */
+  static async reconcileAutomaticTaxOnOrder(order, session) {
+    if (!order?.taxPendingAutomatic) return;
+
+    const newTaxAmountCents = session.total_details?.amount_tax ?? 0;
+    const newTotalCents = session.amount_total ?? Math.round(Number(order.totalAmount) * 100);
+    const newPlatformShareCents = (order.platformShareCents ?? 0) + newTaxAmountCents;
+    const organizerGrossCents = newTotalCents - newPlatformShareCents;
+    const reserveRate = await getReserveRate();
+    const reserveAmountCents = Math.round(organizerGrossCents * reserveRate);
+
+    await db
+      .update(orders)
+      .set({
+        totalAmount: (newTotalCents / 100).toFixed(2),
+        taxAmountCents: newTaxAmountCents,
+        platformShareCents: newPlatformShareCents,
+        reserveAmountCents,
+        taxPendingAutomatic: false,
+        updatedAt: new Date(),
+      })
+      .where(eq(orders.id, order.id));
   }
 }
