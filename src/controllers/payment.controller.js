@@ -219,6 +219,31 @@ export const prepareNativeTicketOrder = catchAsync(async (req, res) => {
   res.status(201).json({ success: true, data: { paymentId: order.id } });
 });
 
+/**
+ * Read-only price breakdown (subtotal/platform fee/tax/total) for the
+ * ticket purchase UI, before the buyer commits to an order. Mirrors
+ * prepareNativeTicketOrder's selection shape but creates nothing — see
+ * PaymentService.previewTicketOrderCharge for why this exists (the
+ * purchase modal used to compute its own total independently and drifted
+ * out of sync once tax was added to the real checkout path).
+ */
+export const previewTicketOrder = catchAsync(async (req, res) => {
+  const { eventId, ticketSelections = [], merchandiseSelections = [] } = req.body;
+
+  if (!eventId) throw new ApiError(400, 'eventId is required');
+  if (!ticketSelections.length && !merchandiseSelections.length) {
+    throw new ApiError(400, 'At least one ticket or merchandise selection is required');
+  }
+
+  const preview = await PaymentService.previewTicketOrderCharge({
+    eventId,
+    ticketSelections,
+    merchandiseSelections,
+  });
+
+  res.json({ success: true, data: preview });
+});
+
 /** Creates the PaymentIntent for an already-prepared order. */
 export const createNativeTicketPaymentIntent = catchAsync(async (req, res) => {
   const { orderId } = req.params;

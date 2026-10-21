@@ -501,9 +501,49 @@ export class PaymentService {
       estimatedStripeFeeCents,
       taxAmountCents,
       taxAbsorbed,
+      taxName: tax.taxName ?? null,
       taxJurisdictionStatus: tax.jurisdictionStatus,
       taxCode: tax.taxCode,
       automaticTax,
+    };
+  }
+
+  /**
+   * Read-only price breakdown for the ticket purchase UI, computed with the
+   * exact same logic as the real charge (_computeOrderCharge) — this exists
+   * because that UI previously reimplemented its own subtotal/platform-fee
+   * math independently (TicketPurchaseModal.tsx) and never learned about
+   * tax when it was added, so the buyer-facing estimate silently diverged
+   * from what Stripe actually charged. Never create an order or touch
+   * Stripe here; `_computeOrderCharge` only reads ticket/merchandise prices
+   * from the DB (it ignores whatever `price` a client sends), so this is
+   * safe to call pre-auth-of-payment with just a prospective selection.
+   *
+   * `automaticTax` non-null means the real amount depends on the buyer's
+   * billing address, which this preview doesn't have yet (virtual
+   * facilitator-jurisdiction events only) — the caller should render that
+   * as "tax calculated at checkout," not a number, rather than show a
+   * confident $0 that isn't actually final.
+   */
+  static async previewTicketOrderCharge({ eventId, ticketSelections = [], merchandiseSelections = [] }) {
+    const orderItems = [
+      ...ticketSelections.map(t => ({ itemType: 'ticket', itemId: t.ticketId, quantity: t.quantity })),
+      ...merchandiseSelections.map(m => ({
+        itemType: 'merchandise',
+        itemId: m.merchandiseId,
+        quantity: m.quantity,
+      })),
+    ];
+
+    const charge = await this._computeOrderCharge({ eventId, orderItems });
+
+    return {
+      subtotalCents: charge.subtotalCents,
+      platformFeeCents: charge.platformFeeCents,
+      taxAmountCents: charge.taxAmountCents,
+      taxName: charge.taxName ?? null,
+      taxPending: !!charge.automaticTax,
+      totalCents: charge.totalCents,
     };
   }
 
