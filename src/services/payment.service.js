@@ -9,11 +9,13 @@ import {
   events,
   organizers,
   stripeConnectAccounts,
+  venues,
 } from '../db/schema/index.js';
 import { and, eq, isNull } from 'drizzle-orm';
 import ApiError from '../utils/api-error.js';
 import { StripeConnectService, getReserveRate } from './stripeConnect.service.js';
 import { SubscriptionService } from './subscription.service.js';
+import { EventTaxService } from './tax/eventTax.service.js';
 
 let stripe = null;
 if (config.stripe?.secretKey) {
@@ -104,6 +106,14 @@ export class PaymentService {
         reserveAmountCents: charge.reserveAmountCents,
         platformShareCents: charge.platformShareCents,
         stripeFeeCents: charge.estimatedStripeFeeCents,
+        // This flow builds a fixed-amount PaymentIntent (no live address
+        // collection), so only facilitator in-person / organizer Tax Tool
+        // tax is ever included here — see allowAutomaticTax in
+        // _computeOrderCharge. Virtual facilitator-jurisdiction events
+        // correctly charge $0 tax on this path rather than guessing.
+        taxAmountCents: charge.taxAmountCents,
+        taxAbsorbed: charge.taxAbsorbed,
+        taxJurisdictionStatus: charge.taxJurisdictionStatus,
         updatedAt: new Date(),
       })
       .where(eq(orders.id, order.id));
@@ -187,7 +197,13 @@ export class PaymentService {
         throw new ApiError(400, 'Order has no items');
       }
 
-      const charge = await this._computeOrderCharge(order);
+      // allowAutomaticTax: true — this is the hosted/embedded Checkout
+      // Session path, the only ticket-checkout entry point that can collect
+      // the buyer's billing address live and let Stripe calculate tax
+      // dynamically (virtual events in a facilitator jurisdiction — see
+      // EventTaxService). The PaymentSheet/native flows build a fixed-amount
+      // PaymentIntent up front and can't support that.
+      const charge = await this._computeOrderCharge(order, { allowAutomaticTax: true });
 
       return await this._createHostedTicketSession(order, charge, successUrl, cancelUrl, metadata);
     } catch (error) {
@@ -203,199 +219,292 @@ export class PaymentService {
   }
 
   // ── Shared fee/line-item computation for both checkout paths ──────────────
-  static async _computeOrderCharge(order) {
+  static async _computeOrderCharge(order, { allowAutomaticTax = false } = {}) {
     // Fetch organizer userId for Connect lookup
-      const [eventInfo] = await db
+    const [eventInfo] = await db
+      .select({
+        organizerId: events.organizerId,
+        title: events.title,
+        slug: events.slug,
+        description: events.description,
+        platformFeePercentage: events.platformFeePercentage,
+        eventMode: events.eventMode,
+        venueId: events.venueId,
+        tax: events.tax,
+      })
+      .from(events)
+      .where(eq(events.id, order.eventId));
+
+    // Tax (event ticketing) — TAX_STRATEGY.md §2, NOT legally reviewed.
+    // Venue lookup only happens for in-person events with an actual venue
+    // — a virtual event, or one missing a venue row, has no address to
+    // source a facilitator-jurisdiction rate from and instead sources from
+    // the buyer's billing address at checkout (see EventTaxService).
+    let venueInfo = null;
+    if (eventInfo?.venueId) {
+      const [v] = await db
         .select({
-          organizerId: events.organizerId,
-          title: events.title,
-          slug: events.slug,
-          description: events.description,
-          platformFeePercentage: events.platformFeePercentage,
+          address: venues.address,
+          city: venues.city,
+          state: venues.state,
+          country: venues.country,
+          countryCode: venues.countryCode,
+          postalCode: venues.postalCode,
         })
-        .from(events)
-        .where(eq(events.id, order.eventId));
+        .from(venues)
+        .where(eq(venues.id, eventInfo.venueId));
+      venueInfo = v ?? null;
+    }
 
-      // Resolve organizer's userId for Stripe Connect lookup
-      let organizerUserId = null;
-      if (eventInfo?.organizerId) {
-        const [org] = await db
-          .select({ userId: organizers.userId })
-          .from(organizers)
-          .where(eq(organizers.id, eventInfo.organizerId));
-        organizerUserId = org?.userId ?? null;
-      }
+    // Resolve organizer's userId for Stripe Connect lookup
+    let organizerUserId = null;
+    if (eventInfo?.organizerId) {
+      const [org] = await db
+        .select({ userId: organizers.userId })
+        .from(organizers)
+        .where(eq(organizers.id, eventInfo.organizerId));
+      organizerUserId = org?.userId ?? null;
+    }
 
-      let [connectAccount, reserveRate] = await Promise.all([
-        organizerUserId ? StripeConnectService.getForUser(organizerUserId) : Promise.resolve(null),
-        getReserveRate(),
-      ]);
-      // Self-heal: chargesEnabled only updates via webhook or the organizer
-      // visiting their earnings page — if it's stale-false, re-check Stripe
-      // live rather than silently routing this order's full amount to platform.
-      if (connectAccount && !connectAccount.chargesEnabled) {
-        connectAccount = await StripeConnectService.syncStatus(organizerUserId).catch(
-          () => connectAccount
-        );
-      }
+    let [connectAccount, reserveRate] = await Promise.all([
+      organizerUserId ? StripeConnectService.getForUser(organizerUserId) : Promise.resolve(null),
+      getReserveRate(),
+    ]);
+    // Self-heal: chargesEnabled only updates via webhook or the organizer
+    // visiting their earnings page — if it's stale-false, re-check Stripe
+    // live rather than silently routing this order's full amount to platform.
+    if (connectAccount && !connectAccount.chargesEnabled) {
+      connectAccount = await StripeConnectService.syncStatus(organizerUserId).catch(
+        () => connectAccount
+      );
+    }
 
-      // Fetch detailed product information for each item
-      const line_items = [];
+    // Fetch detailed product information for each item
+    const line_items = [];
 
-      for (const item of order.orderItems) {
-        let productInfo;
-        let billedQuantity = item.quantity;
-        let groupDealSize = null;
+    for (const item of order.orderItems) {
+      let productInfo;
+      let billedQuantity = item.quantity;
+      let groupDealSize = null;
 
-        if (item.itemType === 'ticket') {
-          // Fetch ticket tier with sale fields so discount is applied at checkout time
-          const [ticketTier] = await db
-            .select({
-              name: eventTickets.name,
-              description: eventTickets.description,
-              price: eventTickets.price,
-              groupDealSize: eventTickets.groupDealSize,
-              isSaleActive: eventTickets.isSaleActive,
-              saleDiscountPercent: eventTickets.saleDiscountPercent,
-              saleStartDate: eventTickets.saleStartDate,
-              saleEndDate: eventTickets.saleEndDate,
-            })
-            .from(eventTickets)
-            .where(eq(eventTickets.id, item.itemId));
+      if (item.itemType === 'ticket') {
+        // Fetch ticket tier with sale fields so discount is applied at checkout time
+        const [ticketTier] = await db
+          .select({
+            name: eventTickets.name,
+            description: eventTickets.description,
+            price: eventTickets.price,
+            groupDealSize: eventTickets.groupDealSize,
+            isSaleActive: eventTickets.isSaleActive,
+            saleDiscountPercent: eventTickets.saleDiscountPercent,
+            saleStartDate: eventTickets.saleStartDate,
+            saleEndDate: eventTickets.saleEndDate,
+          })
+          .from(eventTickets)
+          .where(eq(eventTickets.id, item.itemId));
 
-          groupDealSize = ticketTier?.groupDealSize
-            ? parseInt(ticketTier.groupDealSize, 10)
-            : null;
+        groupDealSize = ticketTier?.groupDealSize ? parseInt(ticketTier.groupDealSize, 10) : null;
 
-          // Always re-compute effective price at checkout so active discounts are applied
-          const rawPrice = parseFloat(ticketTier?.price || item.price);
-          let effectivePrice = rawPrice;
-          if (ticketTier?.isSaleActive && ticketTier.saleDiscountPercent) {
-            const now = new Date();
-            const inWindow =
-              (!ticketTier.saleStartDate || now >= new Date(ticketTier.saleStartDate)) &&
-              (!ticketTier.saleEndDate || now <= new Date(ticketTier.saleEndDate));
-            if (inWindow) {
-              effectivePrice = parseFloat(
-                (rawPrice * (1 - parseFloat(ticketTier.saleDiscountPercent) / 100)).toFixed(2)
-              );
-            }
+        // Always re-compute effective price at checkout so active discounts are applied
+        const rawPrice = parseFloat(ticketTier?.price || item.price);
+        let effectivePrice = rawPrice;
+        if (ticketTier?.isSaleActive && ticketTier.saleDiscountPercent) {
+          const now = new Date();
+          const inWindow =
+            (!ticketTier.saleStartDate || now >= new Date(ticketTier.saleStartDate)) &&
+            (!ticketTier.saleEndDate || now <= new Date(ticketTier.saleEndDate));
+          if (inWindow) {
+            effectivePrice = parseFloat(
+              (rawPrice * (1 - parseFloat(ticketTier.saleDiscountPercent) / 100)).toFixed(2)
+            );
           }
-
-          // For group deals: charge per group (avoids per-ticket rounding drift)
-          if (groupDealSize) billedQuantity = Math.round(item.quantity / groupDealSize);
-          productInfo = {
-            name: ticketTier?.name || `Ticket - ${item.itemId}`,
-            description: ticketTier?.description || 'Event ticket',
-            price: effectivePrice.toFixed(2),
-          };
-        } else if (item.itemType === 'merchandise') {
-          // Fetch merchandise details
-          const [merchandise] = await db
-            .select({
-              name: eventMerchandise.name,
-              description: eventMerchandise.description,
-              price: eventMerchandise.price,
-            })
-            .from(eventMerchandise)
-            .where(eq(eventMerchandise.id, item.itemId));
-
-          productInfo = {
-            name: merchandise?.name || `Merchandise - ${item.itemId}`,
-            description: merchandise?.description || 'Event merchandise',
-            price: merchandise?.price || item.price,
-          };
-        } else {
-          // Fallback for unknown item types
-          productInfo = {
-            name: `${item.itemType} - ${item.itemId}`,
-            description: `Event ${item.itemType}`,
-            price: item.price,
-          };
         }
 
-        // Stripe's hosted Checkout only shows its native line-item quantity
-        // when it's greater than 1, so a single-ticket purchase would show no
-        // count at all. Spell it out in the description ourselves so the
-        // buyer always sees how many they're buying, 1 included. The
-        // ticket/tier's own description is deliberately left out here — it's
-        // organizer-authored copy meant for the listing page, not the
-        // checkout receipt.
-        const description = groupDealSize
-          ? `Qty: ${item.quantity} (${billedQuantity} × group of ${groupDealSize})`
-          : `Qty: ${billedQuantity}`;
+        // For group deals: charge per group (avoids per-ticket rounding drift)
+        if (groupDealSize) billedQuantity = Math.round(item.quantity / groupDealSize);
+        productInfo = {
+          name: ticketTier?.name || `Ticket - ${item.itemId}`,
+          description: ticketTier?.description || 'Event ticket',
+          price: effectivePrice.toFixed(2),
+        };
+      } else if (item.itemType === 'merchandise') {
+        // Fetch merchandise details
+        const [merchandise] = await db
+          .select({
+            name: eventMerchandise.name,
+            description: eventMerchandise.description,
+            price: eventMerchandise.price,
+          })
+          .from(eventMerchandise)
+          .where(eq(eventMerchandise.id, item.itemId));
 
-        line_items.push({
-          price_data: {
-            currency: 'usd',
-            product_data: {
-              // Without the event title prefixed here, a buyer paying for
-              // e.g. an "Early Bird" tier has no way to tell which event
-              // that's actually for.
-              name: eventInfo?.title ? `${eventInfo.title} — ${productInfo.name}` : productInfo.name,
-              description,
-            },
-            unit_amount: Math.round(parseFloat(productInfo.price) * 100),
-          },
-          quantity: billedQuantity,
-        });
+        productInfo = {
+          name: merchandise?.name || `Merchandise - ${item.itemId}`,
+          description: merchandise?.description || 'Event merchandise',
+          price: merchandise?.price || item.price,
+        };
+      } else {
+        // Fallback for unknown item types
+        productInfo = {
+          name: `${item.itemType} - ${item.itemId}`,
+          description: `Event ${item.itemType}`,
+          price: item.price,
+        };
       }
 
-      // Subtotal = sum of base (fee-exclusive) line items
-      const subtotalCents = line_items.reduce(
-        (sum, item) => sum + item.price_data.unit_amount * item.quantity,
-        0
-      );
+      // Stripe's hosted Checkout only shows its native line-item quantity
+      // when it's greater than 1, so a single-ticket purchase would show no
+      // count at all. Spell it out in the description ourselves so the
+      // buyer always sees how many they're buying, 1 included. The
+      // ticket/tier's own description is deliberately left out here — it's
+      // organizer-authored copy meant for the listing page, not the
+      // checkout receipt.
+      const description = groupDealSize
+        ? `Qty: ${item.quantity} (${billedQuantity} × group of ${groupDealSize})`
+        : `Qty: ${billedQuantity}`;
 
-      // Merged "Platform & Service Fee" — only charged if the organizer set
-      // a rate during event setup (platformFeePercentage defaults to 0
-      // otherwise, see event.service.js). Uses the organizer's own
-      // configured rate, not a fixed percentage — event ticketing has its
-      // own payout/reserve model, distinct from the flat 7.5% used for 1:1
-      // video, paid messages, and shop. Dollar amount only, no % shown.
-      const eventFeeRate = Number(eventInfo?.platformFeePercentage ?? 0) / 100;
-      const platformFeeCents = Math.round(subtotalCents * eventFeeRate);
-      if (platformFeeCents > 0) {
-        line_items.push({
-          price_data: {
-            currency: 'usd',
-            product_data: { name: 'Platform & Service Fee' },
-            unit_amount: platformFeeCents,
+      line_items.push({
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            // Without the event title prefixed here, a buyer paying for
+            // e.g. an "Early Bird" tier has no way to tell which event
+            // that's actually for.
+            name: eventInfo?.title ? `${eventInfo.title} — ${productInfo.name}` : productInfo.name,
+            description,
           },
-          quantity: 1,
-        });
+          unit_amount: Math.round(parseFloat(productInfo.price) * 100),
+        },
+        quantity: billedQuantity,
+      });
+    }
+
+    // Subtotal = sum of base (fee-exclusive) line items
+    const subtotalCents = line_items.reduce(
+      (sum, item) => sum + item.price_data.unit_amount * item.quantity,
+      0
+    );
+
+    // Merged "Platform & Service Fee" — only charged if the organizer set
+    // a rate during event setup (platformFeePercentage defaults to 0
+    // otherwise, see event.service.js). Uses the organizer's own
+    // configured rate, not a fixed percentage — event ticketing has its
+    // own payout/reserve model, distinct from the flat 7.5% used for 1:1
+    // video, paid messages, and shop. Dollar amount only, no % shown.
+    const eventFeeRate = Number(eventInfo?.platformFeePercentage ?? 0) / 100;
+    const platformFeeCents = Math.round(subtotalCents * eventFeeRate);
+    if (platformFeeCents > 0) {
+      line_items.push({
+        price_data: {
+          currency: 'usd',
+          product_data: { name: 'Platform & Service Fee' },
+          unit_amount: platformFeeCents,
+        },
+        quantity: 1,
+      });
+    }
+
+    // ── Tax (event ticketing) — TAX_STRATEGY.md §2, NOT legally reviewed ──
+    // Computed on ticket subtotal + platform fee together — §2.1 defines
+    // the taxable "Buyer Total" as "ticket price + any passed-on platform
+    // fees." Jurisdiction is always re-derived from the venue server-side
+    // (EventTaxService), never trusted from the client.
+    const tax = await EventTaxService.computeTax({
+      venue: venueInfo,
+      eventMode: eventInfo?.eventMode,
+      subtotalCents: subtotalCents + platformFeeCents,
+      organizerTax: eventInfo?.tax || null,
+    });
+
+    // A virtual event in a facilitator jurisdiction needs Stripe to
+    // calculate tax live from the buyer's billing address during hosted
+    // Checkout — not supported on the fixed-amount PaymentSheet/native
+    // PaymentIntent flows (see allowAutomaticTax). Fail toward $0 rather
+    // than guess an amount there instead of silently dropping it.
+    const automaticTax = tax.automaticTax && allowAutomaticTax ? tax.automaticTax : null;
+    const taxAmountCents = tax.automaticTax && !allowAutomaticTax ? 0 : tax.amountCents;
+    const taxAbsorbed = taxAmountCents > 0 && tax.absorbed;
+
+    // Checkout's automatic_tax needs every taxable line item tagged with a
+    // product tax code (ticket price AND the passed-on platform fee, per
+    // the same "Buyer Total" definition used above) — tag them now that
+    // the tax result is known, rather than guessing at line-item build time.
+    if (automaticTax) {
+      for (const item of line_items) {
+        item.price_data.tax_behavior = 'exclusive';
+        item.price_data.product_data.tax_code = tax.taxCode;
       }
+    }
 
-      // Gross = what Stripe actually collects from the customer
-      const totalCents = subtotalCents + platformFeeCents;
+    // Absorbed organizer-state tax is never added to the buyer's charge.
+    // Everything else (facilitator tax, non-absorbed organizer tax) is an
+    // explicit line item on top, same pattern as Platform & Service Fee.
+    const taxChargedToBuyerCents = taxAbsorbed ? 0 : taxAmountCents;
+    if (taxChargedToBuyerCents > 0) {
+      line_items.push({
+        price_data: {
+          currency: 'usd',
+          product_data: { name: tax.taxName || 'Tax' },
+          unit_amount: taxChargedToBuyerCents,
+        },
+        quantity: 1,
+      });
+    }
 
-      // Briteside keeps the platform fee as revenue
-      const platformShareCents = platformFeeCents;
+    // Gross = what Stripe actually collects from the customer
+    const totalCents = subtotalCents + platformFeeCents + taxChargedToBuyerCents;
 
-      // Organizer gross = total − Briteside's processing-fee revenue
-      const organizerGrossCents = totalCents - platformShareCents;
+    // Facilitator-jurisdiction tax is withheld from the organizer's payout
+    // entirely and remitted by Briteside under its own tax ID (§2.1) —
+    // kept out of organizerGrossCents the same way the platform fee is.
+    // Absorbed organizer-state tax is ALSO withheld here per this
+    // feature's product spec ("deducted from the organizer's own revenue
+    // instead of added on top") — TODO(tax): unlike the facilitator case,
+    // Briteside has no registration/remittance pipeline in these states,
+    // so this amount currently just stays on Briteside's platform balance
+    // with no automatic remittance anywhere. That's a real open question
+    // (flagged, not silently resolved) for whoever reviews this feature
+    // next — it may need to become an escrowed/organizer-owed balance
+    // instead of platform float. Non-absorbed organizer-state tax is NOT
+    // withheld — it rides through to the organizer's payout per §2.2
+    // ("passed to the organizer... organizer is solely responsible").
+    const taxWithheldFromOrganizerCents =
+      tax.jurisdictionStatus === 'facilitator' ? taxAmountCents : taxAbsorbed ? taxAmountCents : 0;
 
-      // Reserve = 15% of organizer gross (held for disputes, released after window)
-      const reserveAmountCents = Math.round(organizerGrossCents * reserveRate);
+    // Briteside keeps the platform fee (+ any withheld tax) as its share
+    // of the Connect transfer split — see comment above on what "withheld"
+    // means for each tax branch.
+    const platformShareCents = platformFeeCents + taxWithheldFromOrganizerCents;
 
-      // Stripe's actual processing cost is a separate, Briteside-absorbed expense —
-      // tracked here as an estimate for reporting only. It is never charged to the
-      // organizer via application_fee_amount; the webhook overwrites it with the
-      // real balance_transaction.fee once the charge settles.
-      const estimatedStripeFeeCents = Math.round(totalCents * 0.029) + 30;
+    // Organizer gross = total − Briteside's share
+    const organizerGrossCents = totalCents - platformShareCents;
 
-      return {
-        line_items,
-        eventInfo,
-        connectAccount,
-        subtotalCents,
-        platformFeeCents,
-        totalCents,
-        platformShareCents,
-        organizerGrossCents,
-        reserveAmountCents,
-        estimatedStripeFeeCents,
-      };
+    // Reserve = 15% of organizer gross (held for disputes, released after window)
+    const reserveAmountCents = Math.round(organizerGrossCents * reserveRate);
+
+    // Stripe's actual processing cost is a separate, Briteside-absorbed expense —
+    // tracked here as an estimate for reporting only. It is never charged to the
+    // organizer via application_fee_amount; the webhook overwrites it with the
+    // real balance_transaction.fee once the charge settles.
+    const estimatedStripeFeeCents = Math.round(totalCents * 0.029) + 30;
+
+    return {
+      line_items,
+      eventInfo,
+      connectAccount,
+      subtotalCents,
+      platformFeeCents,
+      totalCents,
+      platformShareCents,
+      organizerGrossCents,
+      reserveAmountCents,
+      estimatedStripeFeeCents,
+      taxAmountCents,
+      taxAbsorbed,
+      taxJurisdictionStatus: tax.jurisdictionStatus,
+      taxCode: tax.taxCode,
+      automaticTax,
+    };
   }
 
   // ── Hosted Stripe Checkout session — shared tail for both entry points ────
@@ -408,114 +517,138 @@ export class PaymentService {
       platformShareCents,
       reserveAmountCents,
       estimatedStripeFeeCents,
+      taxAmountCents,
+      taxAbsorbed,
+      taxJurisdictionStatus,
+      automaticTax,
     } = charge;
 
-      // Ticket checkout has no native-app consumer of this endpoint at all —
-      // the app pays via a wholly separate PaymentSheet flow
-      // (createTicketPaymentSheet) — so this can always use embedded
-      // checkout rather than branching on platform like the other flows.
-      const checkoutParams = {
-        // No payment_method_types on purpose. Pinning the list opts out of dynamic
-        // payment methods, which is what surfaces wallets (Google Pay / Apple Pay)
-        // and keeps the offered methods in step with the Dashboard. It also meant a
-        // method disabled on the account 400'd the whole session instead of simply
-        // not rendering. The Dashboard's enabled list is now the source of truth.
-        expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
-        mode: 'payment',
-        line_items,
-        ui_mode: 'embedded',
-        return_url:
-          successUrl ||
-          `${config.apiHost}/payments/success?session_id={CHECKOUT_SESSION_ID}&eventId=${order.eventId}`,
+    // Ticket checkout has no native-app consumer of this endpoint at all —
+    // the app pays via a wholly separate PaymentSheet flow
+    // (createTicketPaymentSheet) — so this can always use embedded
+    // checkout rather than branching on platform like the other flows.
+    const checkoutParams = {
+      // No payment_method_types on purpose. Pinning the list opts out of dynamic
+      // payment methods, which is what surfaces wallets (Google Pay / Apple Pay)
+      // and keeps the offered methods in step with the Dashboard. It also meant a
+      // method disabled on the account 400'd the whole session instead of simply
+      // not rendering. The Dashboard's enabled list is now the source of truth.
+      expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+      mode: 'payment',
+      line_items,
+      // Virtual event, facilitator jurisdiction — Stripe calculates tax
+      // live from the buyer's billing address, collected by Checkout
+      // itself. No `liability` override: Briteside is always the liable
+      // party here by definition (it IS the required facilitator), using
+      // its own platform Tax Settings/registrations.
+      ...(automaticTax ? { automatic_tax: automaticTax } : {}),
+      ui_mode: 'embedded',
+      return_url:
+        successUrl ||
+        `${config.apiHost}/payments/success?session_id={CHECKOUT_SESSION_ID}&eventId=${order.eventId}`,
+      metadata: {
+        type: 'ticket',
+        feature: 'ticket',
+        orderId: order.id,
+        eventId: order.eventId,
+        organizerId: eventInfo?.organizerId ?? null,
+        userId: order.userId ?? null,
+        eventTitle: eventInfo?.title ?? null,
+        eventSlug: eventInfo?.slug ?? null,
+        eventDescription: eventInfo?.description ? eventInfo.description.slice(0, 500) : null,
+        eventScheduleId: metadata.eventScheduleId ?? null,
+        ...metadata,
+      },
+      // Stripe rejects an empty string with `email_invalid` but accepts the field
+      // being absent, in which case Checkout collects the address itself. Coerce
+      // '' / whitespace / null to undefined so a missing holderEmail can't 400.
+      customer_email: metadata.holderEmail?.trim() || undefined,
+      invoice_creation: {
+        enabled: true,
+        invoice_data: {
+          description: 'Your purchase for Gokyro events tickets is successful.',
+        },
+      },
+    };
+
+    if (connectAccount?.chargesEnabled) {
+      // platformShareCents → the merged Platform & Service Fee, kept by Briteside as revenue
+      // reserveAmountCents → 15% of organizer gross, held for disputes, released after window
+      // Stripe's processing cost is NOT included here — Briteside pays it out of its own revenue.
+      checkoutParams.payment_intent_data = {
+        application_fee_amount: platformShareCents + reserveAmountCents,
+        transfer_data: { destination: connectAccount.stripeAccountId },
         metadata: {
           type: 'ticket',
           feature: 'ticket',
           orderId: order.id,
           eventId: order.eventId,
           organizerId: eventInfo?.organizerId ?? null,
-          userId: order.userId ?? null,
           eventTitle: eventInfo?.title ?? null,
           eventSlug: eventInfo?.slug ?? null,
           eventDescription: eventInfo?.description ? eventInfo.description.slice(0, 500) : null,
           eventScheduleId: metadata.eventScheduleId ?? null,
-          ...metadata,
-        },
-        // Stripe rejects an empty string with `email_invalid` but accepts the field
-        // being absent, in which case Checkout collects the address itself. Coerce
-        // '' / whitespace / null to undefined so a missing holderEmail can't 400.
-        customer_email: metadata.holderEmail?.trim() || undefined,
-        invoice_creation: {
-          enabled: true,
-          invoice_data: {
-            description: 'Your purchase for Gokyro events tickets is successful.',
-          },
         },
       };
+    }
 
-      if (connectAccount?.chargesEnabled) {
-        // platformShareCents → the merged Platform & Service Fee, kept by Briteside as revenue
-        // reserveAmountCents → 15% of organizer gross, held for disputes, released after window
-        // Stripe's processing cost is NOT included here — Briteside pays it out of its own revenue.
-        checkoutParams.payment_intent_data = {
-          application_fee_amount: platformShareCents + reserveAmountCents,
-          transfer_data: { destination: connectAccount.stripeAccountId },
-          metadata: {
-            type: 'ticket',
-            feature: 'ticket',
-            orderId: order.id,
-            eventId: order.eventId,
-            organizerId: eventInfo?.organizerId ?? null,
-            eventTitle: eventInfo?.title ?? null,
-            eventSlug: eventInfo?.slug ?? null,
-            eventDescription: eventInfo?.description ? eventInfo.description.slice(0, 500) : null,
-            eventScheduleId: metadata.eventScheduleId ?? null,
-          },
-        };
+    let session;
+    try {
+      session = await stripe.checkout.sessions.create(checkoutParams);
+    } catch (err) {
+      // The organizer's Connect account reference is stale (e.g. deleted,
+      // or left over from a Stripe environment/key switch) — Stripe
+      // rejects the payout destination outright. Self-heal so the NEXT
+      // attempt short-circuits via the chargesEnabled self-heal above
+      // instead of failing the exact same way indefinitely, and surface
+      // a clear reason instead of a bare 500.
+      if (
+        err?.raw?.code === 'resource_missing' &&
+        err?.raw?.param?.includes('transfer_data][destination') &&
+        connectAccount
+      ) {
+        await db
+          .update(stripeConnectAccounts)
+          .set({ chargesEnabled: false, updatedAt: new Date() })
+          .where(eq(stripeConnectAccounts.stripeAccountId, connectAccount.stripeAccountId))
+          .catch(() => {});
+        throw new ApiError(
+          503,
+          "This event's payment setup needs attention — please try again shortly or contact the organizer."
+        );
       }
+      throw err;
+    }
 
-      let session;
-      try {
-        session = await stripe.checkout.sessions.create(checkoutParams);
-      } catch (err) {
-        // The organizer's Connect account reference is stale (e.g. deleted,
-        // or left over from a Stripe environment/key switch) — Stripe
-        // rejects the payout destination outright. Self-heal so the NEXT
-        // attempt short-circuits via the chargesEnabled self-heal above
-        // instead of failing the exact same way indefinitely, and surface
-        // a clear reason instead of a bare 500.
-        if (
-          err?.raw?.code === 'resource_missing' &&
-          err?.raw?.param?.includes('transfer_data][destination') &&
-          connectAccount
-        ) {
-          await db
-            .update(stripeConnectAccounts)
-            .set({ chargesEnabled: false, updatedAt: new Date() })
-            .where(eq(stripeConnectAccounts.stripeAccountId, connectAccount.stripeAccountId))
-            .catch(() => {});
-          throw new ApiError(
-            503,
-            "This event's payment setup needs attention — please try again shortly or contact the organizer."
-          );
-        }
-        throw err;
-      }
+    // Save session id, payment intent, reserve amount, and gross total to order.
+    // stripeFeeCents is saved as an estimate (2.9% + $0.30) now; the webhook
+    // overwrites it with the real balance_transaction.fee on payment success.
+    //
+    // taxAmountCents here is the amount known AT SESSION CREATION TIME —
+    // exact for facilitator in-person / organizer Tax Tool orders, but 0
+    // for the automaticTax (virtual facilitator) branch, where Stripe only
+    // determines the real amount once the buyer's address is collected
+    // during the hosted session. TODO(tax): wire the ticket-order webhook
+    // (handleCheckoutSession in webhook.controller.js) to overwrite
+    // taxAmountCents from the completed session's `total_details.amount_tax`
+    // the same way ShopOrderService.handlePaymentWebhook does for shop
+    // orders — not done here to avoid a larger, riskier change to that
+    // already-complex ticket-issuance webhook in this pass.
+    await db
+      .update(orders)
+      .set({
+        totalAmount: (totalCents / 100).toFixed(2),
+        paymentIntentId: session.payment_intent || session.id,
+        reserveAmountCents,
+        platformShareCents,
+        stripeFeeCents: estimatedStripeFeeCents,
+        taxAmountCents,
+        taxAbsorbed,
+        taxJurisdictionStatus,
+        updatedAt: new Date(),
+      })
+      .where(eq(orders.id, order.id));
 
-      // Save session id, payment intent, reserve amount, and gross total to order.
-      // stripeFeeCents is saved as an estimate (2.9% + $0.30) now; the webhook
-      // overwrites it with the real balance_transaction.fee on payment success.
-      await db
-        .update(orders)
-        .set({
-          totalAmount: (totalCents / 100).toFixed(2),
-          paymentIntentId: session.payment_intent || session.id,
-          reserveAmountCents,
-          platformShareCents,
-          stripeFeeCents: estimatedStripeFeeCents,
-          updatedAt: new Date(),
-        })
-        .where(eq(orders.id, order.id));
-
-      return { clientSecret: session.client_secret, sessionId: session.id };
+    return { clientSecret: session.client_secret, sessionId: session.id };
   }
 }

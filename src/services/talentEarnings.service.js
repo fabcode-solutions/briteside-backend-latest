@@ -182,6 +182,8 @@ export class TalentEarningsService {
           sellerReceiveCents: shopOrders.sellerReceiveCents,
           paidAt: shopOrders.paidAt,
           stripePaymentIntentId: shopOrders.stripePaymentIntentId,
+          taxAmountCents: shopOrders.taxAmountCents,
+          taxLiability: shopOrders.taxLiability,
         })
         .from(shopOrders)
         .where(
@@ -251,6 +253,23 @@ export class TalentEarningsService {
 
     const totalEarningsCents = videoEarningsCents + messageEarningsCents + shopEarningsCents;
 
+    // Tax collected on this creator's behalf (Briteside Plus / shop orders
+    // only — TAX_STRATEGY.md §3, NOT legally reviewed). Only counts orders
+    // where `taxLiability === 'account'`: that's the only case where the
+    // collected tax actually rode into this creator's own payout alongside
+    // their earnings (see ShopOrderService.handlePaymentWebhook) and is
+    // therefore money they, not Briteside, are responsible for remitting.
+    // `shopEarningsCents`/`sellerReceiveCents` above already INCLUDE this
+    // amount in both the Stripe-transfer path and the DB-estimate path (the
+    // transfer net amount and sellerReceiveCents both already carry it) — so
+    // this is purely an additive breakdown figure, not a new pool of money.
+    // Video-session and priority-message tax collection isn't implemented
+    // yet (those checkout flows don't call Stripe Tax), so this is shop-only
+    // for now rather than guessing a number for the other two.
+    const taxCollectedCents = shopOrderRows
+      .filter(o => o.taxLiability === 'account')
+      .reduce((sum, o) => sum + (o.taxAmountCents || 0), 0);
+
     return {
       summary: {
         totalEarnings: Math.round(totalEarningsCents / 100),
@@ -263,6 +282,11 @@ export class TalentEarningsService {
         shopEarningsCents,
         refunded: Math.round(refundedCents / 100),
         refundedCents,
+        // Additive — see comment above. Gross earnings minus this is NOT a
+        // meaningful "net of tax" figure since the tax portion is already
+        // folded into shopEarnings*, not layered on top of it.
+        taxCollected: Math.round(taxCollectedCents / 100),
+        taxCollectedCents,
         source: useStripe ? 'stripe' : 'db_estimate',
       },
       chart: buildChart(sessions, msgPayments, shopOrderRows, startDate, endDate, groupBy),

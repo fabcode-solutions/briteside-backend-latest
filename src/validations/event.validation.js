@@ -96,6 +96,21 @@ export const eventFiltersSchema = z.object({
 });
 
 // Create event validation schema
+// Organizer "Tax Tool" opt-in — TAX_STRATEGY.md §2.2/§2.3. Only meaningful
+// (and only shown by the frontend) in non-Marketplace-Facilitator states;
+// the backend re-derives the event's actual jurisdiction status itself at
+// checkout time rather than trusting this object's presence as proof the
+// event is in a non-facilitator state (see src/lib/tax/eventTaxJurisdictions.js).
+const eventTaxSchema = z.object({
+  collectionEnabled: z.boolean(),
+  country: z.string().max(100).optional(),
+  registrationId: z.string().max(200).optional(),
+  name: z.string().max(100).optional(),
+  ratePercent: z.number().min(0).max(100),
+  appliesToAllTickets: z.boolean().optional(),
+  absorbed: z.boolean().optional(),
+});
+
 export const createEventSchema = z.object({
   body: z
     .object({
@@ -203,6 +218,9 @@ export const createEventSchema = z.object({
         .optional(),
       // Recurring schedule rule — alternative to a manual sessions array
       recurrenceRule: recurrenceRuleSchema.optional(),
+      // Organizer "Tax Tool" opt-in (non-facilitator states only) — omitted
+      // entirely when the organizer hasn't opted in. See eventTaxSchema.
+      tax: eventTaxSchema.optional(),
     })
     .refine(
       data => {
@@ -292,6 +310,10 @@ export const updateEventSchema = z.object({
         password: z.string().max(100).optional(),
       })
       .optional(),
+    // Organizer "Tax Tool" opt-in (non-facilitator states only). Sending
+    // `tax: null` clears a previously-saved opt-in (e.g. organizer toggles
+    // "I don't need to collect tax" back off).
+    tax: eventTaxSchema.nullable().optional(),
   }),
 });
 

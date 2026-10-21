@@ -2,7 +2,7 @@ import Stripe from 'stripe';
 import { db } from '../../db/index.js';
 import { shopOrders, shopProducts, users, notifications } from '../../db/schema/index.js';
 import { shopCustomServiceOffers, talentReviews, talentProfiles } from '../../db/schema/index.js';
-import { eq, and, desc, sql, count, isNull, gte ,inArray} from 'drizzle-orm';
+import { eq, and, desc, sql, count, isNull, gte, inArray } from 'drizzle-orm';
 import ApiError from '../../utils/api-error.js';
 import config from '../../config/config.js';
 import logger from '../../config/logger.js';
@@ -15,6 +15,8 @@ import { ShopProductService } from './shopProduct.service.js';
 import { ShopDeliverableService } from './shopDeliverable.service.js';
 import { calculatePlatformAndServiceFeeCents } from '../../utils/orderProcessingFee.js';
 import { PayoutLedgerService } from '../payoutLedger.service.js';
+import { resolvePlusTaxCode } from '../../lib/tax/plusProductTaxCodes.js';
+import { PlusTaxLiabilityService } from '../tax/plusTaxLiability.service.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://briteside.app';
@@ -86,7 +88,13 @@ export class ShopOrderService {
   }
 
   // ── Shared validation + DB persistence for both checkout paths ────────────
-  static async _prepareOrder(buyerId, productId, platform, customerInfo = {}, { native = false } = {}) {
+  static async _prepareOrder(
+    buyerId,
+    productId,
+    platform,
+    customerInfo = {},
+    { native = false } = {}
+  ) {
     const product = await db.query.shopProducts.findFirst({
       where: eq(shopProducts.id, productId),
     });
@@ -195,6 +203,17 @@ export class ShopOrderService {
     const sellerPriceCents = product.priceCents;
     const platformAndServiceFeeCents = fees.platformAndServiceFeeCents;
 
+    // ── Tax (Briteside Plus) — TAX_STRATEGY.md §3, NOT legally reviewed ────
+    // taxCode/taxable come from the product type alone (plusProductTaxCodes.js);
+    // liability comes from who (creator vs Briteside) actually holds a Stripe
+    // Tax registration (plusTaxLiability.service.js). Both must say "go" for
+    // automatic_tax to be enabled at all — see _createHostedOrderSession.
+    const { taxCode, taxable } = resolvePlusTaxCode(product);
+    const { liability } = taxCode
+      ? await PlusTaxLiabilityService.resolveLiability(product.userId)
+      : { liability: null };
+    const taxLiability = taxCode && liability ? liability.type : 'none';
+
     const [order] = await db
       .insert(shopOrders)
       .values({
@@ -207,6 +226,7 @@ export class ShopOrderService {
         chargedCents: fees.chargedCents,
         sellerReceiveCents: fees.sellerReceiveCents,
         platformShareCents: fees.platformShareCents,
+        taxLiability,
         ...policySnapshot,
         customerName,
         customerEmail,
@@ -233,13 +253,22 @@ export class ShopOrderService {
       platformAndServiceFeeCents,
       fees,
       metadata,
+      tax: { taxCode, taxable, liability },
     };
   }
 
   // ── Hosted Stripe Checkout session — shared tail for both entry points ────
   static async _createHostedOrderSession(prep, platform) {
-    const { product, buyer, customerEmail, order, sellerPriceCents, platformAndServiceFeeCents, metadata } =
-      prep;
+    const {
+      product,
+      buyer,
+      customerEmail,
+      order,
+      sellerPriceCents,
+      platformAndServiceFeeCents,
+      metadata,
+      tax,
+    } = prep;
 
     const redirectUrls = getRedirectUrls(
       platform,
@@ -249,6 +278,16 @@ export class ShopOrderService {
     );
     const nativeRedirect = isNativePlatform(platform);
 
+    // Tax (Briteside Plus) — TAX_STRATEGY.md §3, NOT legally reviewed.
+    // automatic_tax is only enabled when this product type has a mapped tax
+    // code AND someone (creator or Briteside) actually holds a registration
+    // — see resolvePlusTaxCode / PlusTaxLiabilityService. Buyer billing
+    // address is collected live by Checkout (automatic_tax.enabled triggers
+    // that collection itself), which is what lets Stripe source the rate
+    // from the buyer's destination state per TAX_STRATEGY.md §3.4.
+    const automaticTax =
+      tax?.taxCode && tax?.liability ? { enabled: true, liability: tax.liability } : undefined;
+
     const stripeSession = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
@@ -256,14 +295,17 @@ export class ShopOrderService {
       ...(nativeRedirect
         ? { success_url: redirectUrls.successUrl, cancel_url: redirectUrls.cancelUrl }
         : { ui_mode: 'embedded', return_url: redirectUrls.successUrl }),
+      ...(automaticTax ? { automatic_tax: automaticTax } : {}),
       line_items: [
         {
           price_data: {
             currency: 'usd',
             unit_amount: sellerPriceCents,
+            ...(tax?.taxCode ? { tax_behavior: 'exclusive' } : {}),
             product_data: {
               name: product.title,
               ...(product.coverUrl ? { images: [product.coverUrl] } : {}),
+              ...(tax?.taxCode ? { tax_code: tax.taxCode } : {}),
             },
           },
           quantity: 1,
@@ -410,16 +452,40 @@ export class ShopOrderService {
         ? stripeSession.payment_intent
         : (stripeSession.payment_intent?.id ?? null);
 
+    // Tax (Briteside Plus) — TAX_STRATEGY.md §3.6, NOT legally reviewed. The
+    // amount actually calculated/collected by Stripe (buyer's real billing
+    // state, checked live during Checkout) only exists once the session
+    // completes — order.taxLiability only recorded *who* we asked Stripe to
+    // check at session-creation time (see ShopOrderService._prepareOrder).
+    // `total_details` is absent on the synthetic "session" object the native
+    // PaymentIntent flow passes in (finalizeNativePayment) — that flow has
+    // no automatic_tax support yet (see createNativePaymentIntent), so
+    // taxAmountCents correctly stays 0 for it rather than guessing.
+    const taxAmountCents = stripeSession.total_details?.amount_tax ?? 0;
+    // When the CREATOR is the liable party, TAX_STRATEGY.md §3.6 requires the
+    // collected tax to flow into the creator's own payout alongside their
+    // earnings ("Briteside never holds the $7.50") — add it to what this
+    // order releases to them. When Briteside itself is liable (or no tax was
+    // collected), leave their share untouched; the tax portion of the charge
+    // is already sitting in Briteside's own platform balance for Briteside
+    // to remit.
+    const sellerReceiveCents =
+      order.taxLiability === 'account'
+        ? order.sellerReceiveCents + taxAmountCents
+        : order.sellerReceiveCents;
+
     const [updated] = await db
       .update(shopOrders)
       .set({
         status: 'paid',
         paidAt,
         stripePaymentIntentId: paymentIntentId,
+        taxAmountCents,
+        sellerReceiveCents,
         // Held for 7 days from paidAt, then released to the seller's Connect
         // account by the reserve-release cron — see reserveAmountCents comment
         // on the shopOrders schema.
-        reserveAmountCents: order.sellerReceiveCents,
+        reserveAmountCents: sellerReceiveCents,
         updatedAt: paidAt,
       })
       // Re-assert pending so two concurrent deliveries can't both proceed.
@@ -439,7 +505,9 @@ export class ShopOrderService {
     await PayoutLedgerService.creditHold(updated.sellerId, updated.reserveAmountCents, {
       sourceType: 'shop_order',
       sourceId: updated.id,
-    }).catch(err => logger.error(`[Shop] ledger creditHold failed for order ${updated.id}: ${err.message}`));
+    }).catch(err =>
+      logger.error(`[Shop] ledger creditHold failed for order ${updated.id}: ${err.message}`)
+    );
 
     await UserSpendService.recordSpend({
       userId: updated.buyerId,
@@ -695,10 +763,7 @@ export class ShopOrderService {
       .from(shopOrders)
       .innerJoin(users, eq(users.id, shopOrders.buyerId))
       .where(
-        and(
-          eq(shopOrders.productId, productId),
-          sql`${shopOrders.status} IN ('paid', 'refunded')`
-        )
+        and(eq(shopOrders.productId, productId), sql`${shopOrders.status} IN ('paid', 'refunded')`)
       )
       .orderBy(desc(shopOrders.paidAt));
 
@@ -723,301 +788,304 @@ export class ShopOrderService {
    * shop_product_views, so conversion is orders ÷ distinct viewers.
    */
   static async getStats(sellerId) {
-  const paidOnly = and(eq(shopOrders.sellerId, sellerId), eq(shopOrders.status, 'paid'));
+    const paidOnly = and(eq(shopOrders.sellerId, sellerId), eq(shopOrders.status, 'paid'));
 
-  // Custom offers count as revenue once money has actually moved — 'accepted'
-  // (first installment charged) and 'completed' (fully paid out) both qualify.
-  const customOfferPaid = and(
-    eq(shopCustomServiceOffers.sellerId, sellerId),
-    inArray(shopCustomServiceOffers.status, ['accepted', 'completed'])
-  );
+    // Custom offers count as revenue once money has actually moved — 'accepted'
+    // (first installment charged) and 'completed' (fully paid out) both qualify.
+    const customOfferPaid = and(
+      eq(shopCustomServiceOffers.sellerId, sellerId),
+      inArray(shopCustomServiceOffers.status, ['accepted', 'completed'])
+    );
 
-  const sellerTalentProfile = await db.query.talentProfiles.findFirst({
-    where: eq(talentProfiles.userId, sellerId),
-    columns: { id: true },
-  });
+    const sellerTalentProfile = await db.query.talentProfiles.findFirst({
+      where: eq(talentProfiles.userId, sellerId),
+      columns: { id: true },
+    });
 
-  const [
-    [totals],
-    [refunded],
-    products,
-    monthly,
-    transactions,
-    [customOfferTotals],
-    [customOfferRefunded],
-    customOfferMonthly,
-    customOfferTransactions,
-    customOfferReviews,
-    [customOfferReviewAgg],
-  ] = await Promise.all([
-    db
-      .select({
-        orders: count(),
-        revenueCents: sql`COALESCE(SUM(${shopOrders.sellerReceiveCents}), 0)`,
-        grossCents: sql`COALESCE(SUM(${shopOrders.chargedCents}), 0)`,
-      })
-      .from(shopOrders)
-      .where(paidOnly),
-    db
-      .select({
-        count: count(),
-        amountCents: sql`COALESCE(SUM(${shopOrders.refundAmountCents}), 0)`,
-      })
-      .from(shopOrders)
-      .where(and(eq(shopOrders.sellerId, sellerId), eq(shopOrders.status, 'refunded'))),
-    db
-      .select({
-        id: shopProducts.id,
-        title: shopProducts.title,
-        priceCents: shopProducts.priceCents,
-        coverUrl: shopProducts.coverUrl,
-        buttonAction: shopProducts.buttonAction,
-        listingType: shopProducts.listingType,
-        viewsCount: shopProducts.viewsCount,
-        orders: sql`COUNT(${shopOrders.id})`,
-        revenueCents: sql`COALESCE(SUM(${shopOrders.sellerReceiveCents}), 0)`,
-      })
-      .from(shopProducts)
-      .leftJoin(
-        shopOrders,
-        and(eq(shopOrders.productId, shopProducts.id), eq(shopOrders.status, 'paid'))
-      )
-      .where(and(eq(shopProducts.userId, sellerId), isNull(shopProducts.deletedAt)))
-      .groupBy(shopProducts.id),
-    db
-      .select({
-        month: sql`TO_CHAR(${shopOrders.paidAt}, 'Mon')`,
-        monthNum: sql`EXTRACT(MONTH FROM ${shopOrders.paidAt})`,
-        revenueCents: sql`COALESCE(SUM(${shopOrders.sellerReceiveCents}), 0)`,
-      })
-      .from(shopOrders)
-      .where(and(paidOnly, sql`${shopOrders.paidAt} >= NOW() - INTERVAL '6 months'`))
-      .groupBy(
-        sql`TO_CHAR(${shopOrders.paidAt}, 'Mon')`,
-        sql`EXTRACT(MONTH FROM ${shopOrders.paidAt})`
-      )
-      .orderBy(sql`EXTRACT(MONTH FROM ${shopOrders.paidAt})`),
-    db
-      .select({
-        id: shopOrders.id,
-        productTitle: shopOrders.productTitleSnapshot,
-        status: shopOrders.status,
-        chargedCents: shopOrders.chargedCents,
-        sellerReceiveCents: shopOrders.sellerReceiveCents,
-        paidAt: shopOrders.paidAt,
-        refundedAt: shopOrders.refundedAt,
-        buyerUsername: users.username,
-        buyerFirstName: users.firstName,
-        buyerLastName: users.lastName,
-      })
-      .from(shopOrders)
-      .innerJoin(users, eq(users.id, shopOrders.buyerId))
-      .where(
-        and(eq(shopOrders.sellerId, sellerId), sql`${shopOrders.status} IN ('paid', 'refunded')`)
-      )
-      .orderBy(desc(shopOrders.paidAt))
-      .limit(50),
-
-    // ── Custom offers (services) ─────────────────────────────────────────
-    db
-      .select({
-        orders: count(),
-        revenueCents: sql`COALESCE(SUM(${shopCustomServiceOffers.sellerReceiveCents}), 0)`,
-        grossCents: sql`COALESCE(SUM(${shopCustomServiceOffers.chargedCents}), 0)`,
-      })
-      .from(shopCustomServiceOffers)
-      .where(customOfferPaid),
-    db
-      .select({
-        count: count(),
-        amountCents: sql`COALESCE(SUM(${shopCustomServiceOffers.chargedCents}), 0)`,
-      })
-      .from(shopCustomServiceOffers)
-      .where(
-        and(
-          eq(shopCustomServiceOffers.sellerId, sellerId),
-          eq(shopCustomServiceOffers.status, 'cancelled'),
-          sql`${shopCustomServiceOffers.chargedCents} > 0`
-        )
-      ),
-    db
-      .select({
-        month: sql`TO_CHAR(${shopCustomServiceOffers.resolvedAt}, 'Mon')`,
-        monthNum: sql`EXTRACT(MONTH FROM ${shopCustomServiceOffers.resolvedAt})`,
-        revenueCents: sql`COALESCE(SUM(${shopCustomServiceOffers.sellerReceiveCents}), 0)`,
-      })
-      .from(shopCustomServiceOffers)
-      .where(
-        and(customOfferPaid, sql`${shopCustomServiceOffers.resolvedAt} >= NOW() - INTERVAL '6 months'`)
-      )
-      .groupBy(
-        sql`TO_CHAR(${shopCustomServiceOffers.resolvedAt}, 'Mon')`,
-        sql`EXTRACT(MONTH FROM ${shopCustomServiceOffers.resolvedAt})`
-      )
-      .orderBy(sql`EXTRACT(MONTH FROM ${shopCustomServiceOffers.resolvedAt})`),
-    db
-      .select({
-        id: shopCustomServiceOffers.id,
-        productTitle: shopCustomServiceOffers.title,
-        status: shopCustomServiceOffers.status,
-        chargedCents: shopCustomServiceOffers.chargedCents,
-        sellerReceiveCents: shopCustomServiceOffers.sellerReceiveCents,
-        paidAt: shopCustomServiceOffers.resolvedAt,
-        buyerUsername: users.username,
-        buyerFirstName: users.firstName,
-        buyerLastName: users.lastName,
-      })
-      .from(shopCustomServiceOffers)
-      .innerJoin(users, eq(users.id, shopCustomServiceOffers.buyerId))
-      .where(
-        and(
-          eq(shopCustomServiceOffers.sellerId, sellerId),
-          inArray(shopCustomServiceOffers.status, ['accepted', 'completed', 'cancelled'])
-        )
-      )
-      .orderBy(desc(shopCustomServiceOffers.resolvedAt))
-      .limit(50),
-
-    // ── Reviews left on completed custom offers ─────────────────────────
-    sellerTalentProfile
-      ? db.query.talentReviews.findMany({
-          where: and(
-            eq(talentReviews.talentProfileId, sellerTalentProfile.id),
-            eq(talentReviews.sourceType, 'shop_custom_offer'),
-            eq(talentReviews.isVisible, true)
-          ),
-          with: {
-            reviewer: {
-              columns: { id: true, firstName: true, lastName: true, username: true, image: true },
-            },
-          },
-          orderBy: (r, { desc }) => [desc(r.createdAt)],
-          limit: 50,
+    const [
+      [totals],
+      [refunded],
+      products,
+      monthly,
+      transactions,
+      [customOfferTotals],
+      [customOfferRefunded],
+      customOfferMonthly,
+      customOfferTransactions,
+      customOfferReviews,
+      [customOfferReviewAgg],
+    ] = await Promise.all([
+      db
+        .select({
+          orders: count(),
+          revenueCents: sql`COALESCE(SUM(${shopOrders.sellerReceiveCents}), 0)`,
+          grossCents: sql`COALESCE(SUM(${shopOrders.chargedCents}), 0)`,
         })
-      : Promise.resolve([]),
-    sellerTalentProfile
-      ? db
-          .select({
-            avgRating: sql`round(avg(${talentReviews.rating})::numeric, 2)`,
-            avgCommunicationRating: sql`round(avg(${talentReviews.communicationRating})::numeric, 2)`,
-            avgValueRating: sql`round(avg(${talentReviews.valueRating})::numeric, 2)`,
-            totalReviews: sql`count(*)::int`,
-          })
-          .from(talentReviews)
-          .where(
-            and(
+        .from(shopOrders)
+        .where(paidOnly),
+      db
+        .select({
+          count: count(),
+          amountCents: sql`COALESCE(SUM(${shopOrders.refundAmountCents}), 0)`,
+        })
+        .from(shopOrders)
+        .where(and(eq(shopOrders.sellerId, sellerId), eq(shopOrders.status, 'refunded'))),
+      db
+        .select({
+          id: shopProducts.id,
+          title: shopProducts.title,
+          priceCents: shopProducts.priceCents,
+          coverUrl: shopProducts.coverUrl,
+          buttonAction: shopProducts.buttonAction,
+          listingType: shopProducts.listingType,
+          viewsCount: shopProducts.viewsCount,
+          orders: sql`COUNT(${shopOrders.id})`,
+          revenueCents: sql`COALESCE(SUM(${shopOrders.sellerReceiveCents}), 0)`,
+        })
+        .from(shopProducts)
+        .leftJoin(
+          shopOrders,
+          and(eq(shopOrders.productId, shopProducts.id), eq(shopOrders.status, 'paid'))
+        )
+        .where(and(eq(shopProducts.userId, sellerId), isNull(shopProducts.deletedAt)))
+        .groupBy(shopProducts.id),
+      db
+        .select({
+          month: sql`TO_CHAR(${shopOrders.paidAt}, 'Mon')`,
+          monthNum: sql`EXTRACT(MONTH FROM ${shopOrders.paidAt})`,
+          revenueCents: sql`COALESCE(SUM(${shopOrders.sellerReceiveCents}), 0)`,
+        })
+        .from(shopOrders)
+        .where(and(paidOnly, sql`${shopOrders.paidAt} >= NOW() - INTERVAL '6 months'`))
+        .groupBy(
+          sql`TO_CHAR(${shopOrders.paidAt}, 'Mon')`,
+          sql`EXTRACT(MONTH FROM ${shopOrders.paidAt})`
+        )
+        .orderBy(sql`EXTRACT(MONTH FROM ${shopOrders.paidAt})`),
+      db
+        .select({
+          id: shopOrders.id,
+          productTitle: shopOrders.productTitleSnapshot,
+          status: shopOrders.status,
+          chargedCents: shopOrders.chargedCents,
+          sellerReceiveCents: shopOrders.sellerReceiveCents,
+          paidAt: shopOrders.paidAt,
+          refundedAt: shopOrders.refundedAt,
+          buyerUsername: users.username,
+          buyerFirstName: users.firstName,
+          buyerLastName: users.lastName,
+        })
+        .from(shopOrders)
+        .innerJoin(users, eq(users.id, shopOrders.buyerId))
+        .where(
+          and(eq(shopOrders.sellerId, sellerId), sql`${shopOrders.status} IN ('paid', 'refunded')`)
+        )
+        .orderBy(desc(shopOrders.paidAt))
+        .limit(50),
+
+      // ── Custom offers (services) ─────────────────────────────────────────
+      db
+        .select({
+          orders: count(),
+          revenueCents: sql`COALESCE(SUM(${shopCustomServiceOffers.sellerReceiveCents}), 0)`,
+          grossCents: sql`COALESCE(SUM(${shopCustomServiceOffers.chargedCents}), 0)`,
+        })
+        .from(shopCustomServiceOffers)
+        .where(customOfferPaid),
+      db
+        .select({
+          count: count(),
+          amountCents: sql`COALESCE(SUM(${shopCustomServiceOffers.chargedCents}), 0)`,
+        })
+        .from(shopCustomServiceOffers)
+        .where(
+          and(
+            eq(shopCustomServiceOffers.sellerId, sellerId),
+            eq(shopCustomServiceOffers.status, 'cancelled'),
+            sql`${shopCustomServiceOffers.chargedCents} > 0`
+          )
+        ),
+      db
+        .select({
+          month: sql`TO_CHAR(${shopCustomServiceOffers.resolvedAt}, 'Mon')`,
+          monthNum: sql`EXTRACT(MONTH FROM ${shopCustomServiceOffers.resolvedAt})`,
+          revenueCents: sql`COALESCE(SUM(${shopCustomServiceOffers.sellerReceiveCents}), 0)`,
+        })
+        .from(shopCustomServiceOffers)
+        .where(
+          and(
+            customOfferPaid,
+            sql`${shopCustomServiceOffers.resolvedAt} >= NOW() - INTERVAL '6 months'`
+          )
+        )
+        .groupBy(
+          sql`TO_CHAR(${shopCustomServiceOffers.resolvedAt}, 'Mon')`,
+          sql`EXTRACT(MONTH FROM ${shopCustomServiceOffers.resolvedAt})`
+        )
+        .orderBy(sql`EXTRACT(MONTH FROM ${shopCustomServiceOffers.resolvedAt})`),
+      db
+        .select({
+          id: shopCustomServiceOffers.id,
+          productTitle: shopCustomServiceOffers.title,
+          status: shopCustomServiceOffers.status,
+          chargedCents: shopCustomServiceOffers.chargedCents,
+          sellerReceiveCents: shopCustomServiceOffers.sellerReceiveCents,
+          paidAt: shopCustomServiceOffers.resolvedAt,
+          buyerUsername: users.username,
+          buyerFirstName: users.firstName,
+          buyerLastName: users.lastName,
+        })
+        .from(shopCustomServiceOffers)
+        .innerJoin(users, eq(users.id, shopCustomServiceOffers.buyerId))
+        .where(
+          and(
+            eq(shopCustomServiceOffers.sellerId, sellerId),
+            inArray(shopCustomServiceOffers.status, ['accepted', 'completed', 'cancelled'])
+          )
+        )
+        .orderBy(desc(shopCustomServiceOffers.resolvedAt))
+        .limit(50),
+
+      // ── Reviews left on completed custom offers ─────────────────────────
+      sellerTalentProfile
+        ? db.query.talentReviews.findMany({
+            where: and(
               eq(talentReviews.talentProfileId, sellerTalentProfile.id),
               eq(talentReviews.sourceType, 'shop_custom_offer'),
               eq(talentReviews.isVisible, true)
+            ),
+            with: {
+              reviewer: {
+                columns: { id: true, firstName: true, lastName: true, username: true, image: true },
+              },
+            },
+            orderBy: (r, { desc }) => [desc(r.createdAt)],
+            limit: 50,
+          })
+        : Promise.resolve([]),
+      sellerTalentProfile
+        ? db
+            .select({
+              avgRating: sql`round(avg(${talentReviews.rating})::numeric, 2)`,
+              avgCommunicationRating: sql`round(avg(${talentReviews.communicationRating})::numeric, 2)`,
+              avgValueRating: sql`round(avg(${talentReviews.valueRating})::numeric, 2)`,
+              totalReviews: sql`count(*)::int`,
+            })
+            .from(talentReviews)
+            .where(
+              and(
+                eq(talentReviews.talentProfileId, sellerTalentProfile.id),
+                eq(talentReviews.sourceType, 'shop_custom_offer'),
+                eq(talentReviews.isVisible, true)
+              )
             )
-          )
-      : Promise.resolve([
-          { avgRating: 0, avgCommunicationRating: 0, avgValueRating: 0, totalReviews: 0 },
-        ]),
-  ]);
+        : Promise.resolve([
+            { avgRating: 0, avgCommunicationRating: 0, avgValueRating: 0, totalReviews: 0 },
+          ]),
+    ]);
 
-  const orders = Number(totals?.orders ?? 0);
-  const revenueCents = Number(totals?.revenueCents ?? 0);
-  const totalViews = products.reduce((sum, p) => sum + Number(p.viewsCount ?? 0), 0);
+    const orders = Number(totals?.orders ?? 0);
+    const revenueCents = Number(totals?.revenueCents ?? 0);
+    const totalViews = products.reduce((sum, p) => sum + Number(p.viewsCount ?? 0), 0);
 
-  const enrichedProducts = products
-    .map(p => {
-      const productOrders = Number(p.orders ?? 0);
-      const views = Number(p.viewsCount ?? 0);
-      return {
-        id: p.id,
-        title: p.title,
-        priceCents: p.priceCents,
-        coverUrl: p.coverUrl,
-        buttonAction: p.buttonAction,
-        listingType: p.listingType,
-        views,
-        orders: productOrders,
-        revenueCents: Number(p.revenueCents ?? 0),
-        conversion: views > 0 ? (productOrders / views) * 100 : 0,
-      };
-    })
-    .sort((a, b) => b.revenueCents - a.revenueCents);
+    const enrichedProducts = products
+      .map(p => {
+        const productOrders = Number(p.orders ?? 0);
+        const views = Number(p.viewsCount ?? 0);
+        return {
+          id: p.id,
+          title: p.title,
+          priceCents: p.priceCents,
+          coverUrl: p.coverUrl,
+          buttonAction: p.buttonAction,
+          listingType: p.listingType,
+          views,
+          orders: productOrders,
+          revenueCents: Number(p.revenueCents ?? 0),
+          conversion: views > 0 ? (productOrders / views) * 100 : 0,
+        };
+      })
+      .sort((a, b) => b.revenueCents - a.revenueCents);
 
-  // ── Custom offer numbers ────────────────────────────────────────────────
-  const customOfferOrders = Number(customOfferTotals?.orders ?? 0);
-  const customOfferRevenueCents = Number(customOfferTotals?.revenueCents ?? 0);
+    // ── Custom offer numbers ────────────────────────────────────────────────
+    const customOfferOrders = Number(customOfferTotals?.orders ?? 0);
+    const customOfferRevenueCents = Number(customOfferTotals?.revenueCents ?? 0);
 
-  // ── Merge product + service monthly revenue into one 6-month chart ─────
-  const chartByMonth = new Map();
-  for (const row of monthly) {
-    chartByMonth.set(String(row.month).trim(), {
-      month: String(row.month).trim(),
-      revenue: Math.round(Number(row.revenueCents ?? 0) / 100),
-      serviceRevenue: 0,
-    });
+    // ── Merge product + service monthly revenue into one 6-month chart ─────
+    const chartByMonth = new Map();
+    for (const row of monthly) {
+      chartByMonth.set(String(row.month).trim(), {
+        month: String(row.month).trim(),
+        revenue: Math.round(Number(row.revenueCents ?? 0) / 100),
+        serviceRevenue: 0,
+      });
+    }
+    for (const row of customOfferMonthly) {
+      const key = String(row.month).trim();
+      const existing = chartByMonth.get(key) ?? { month: key, revenue: 0, serviceRevenue: 0 };
+      existing.serviceRevenue = Math.round(Number(row.revenueCents ?? 0) / 100);
+      chartByMonth.set(key, existing);
+    }
+
+    // ── Fill in the full 6-month window so the chart shows real trend context
+    // instead of only the sparse months that happened to have a sale — a
+    // single isolated bar with everything else missing looked empty/broken.
+    const now = new Date();
+    const chart = [];
+    for (let i = 5; i >= 0; i--) {
+      const monthDate = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = monthDate.toLocaleString('en-US', { month: 'short' });
+      const existing = chartByMonth.get(key);
+      chart.push({
+        month: key,
+        revenue: existing?.revenue ?? 0,
+        serviceRevenue: existing?.serviceRevenue ?? 0,
+      });
+    }
+
+    // ── Merge transactions (products + services), newest first ─────────────
+    const combinedTransactions = [
+      ...transactions.map(t => ({ ...t, type: 'product' })),
+      ...customOfferTransactions.map(t => ({ ...t, type: 'service' })),
+    ]
+      .sort((a, b) => new Date(b.paidAt ?? 0) - new Date(a.paidAt ?? 0))
+      .slice(0, 50);
+
+    return {
+      summary: {
+        revenueCents,
+        orders,
+        products: products.length,
+        avgOrderCents: orders > 0 ? Math.round(revenueCents / orders) : 0,
+        views: totalViews,
+        conversion: totalViews > 0 ? (orders / totalViews) * 100 : 0,
+        refundedCount: Number(refunded?.count ?? 0),
+        refundedCents: Number(refunded?.amountCents ?? 0),
+        // Combined across products + services, for a single top-line number
+        combinedRevenueCents: revenueCents + customOfferRevenueCents,
+        combinedOrders: orders + customOfferOrders,
+      },
+      customOffers: {
+        revenueCents: customOfferRevenueCents,
+        orders: customOfferOrders,
+        avgOrderCents:
+          customOfferOrders > 0 ? Math.round(customOfferRevenueCents / customOfferOrders) : 0,
+        refundedCount: Number(customOfferRefunded?.count ?? 0),
+        refundedCents: Number(customOfferRefunded?.amountCents ?? 0),
+      },
+      reviews: {
+        avgRating: parseFloat(customOfferReviewAgg?.avgRating) || 0,
+        avgCommunicationRating: parseFloat(customOfferReviewAgg?.avgCommunicationRating) || 0,
+        avgValueRating: parseFloat(customOfferReviewAgg?.avgValueRating) || 0,
+        totalReviews: Number(customOfferReviewAgg?.totalReviews ?? 0),
+        items: customOfferReviews,
+      },
+      chart,
+      topProducts: enrichedProducts.slice(0, 5),
+      allProducts: enrichedProducts,
+      transactions: combinedTransactions,
+    };
   }
-  for (const row of customOfferMonthly) {
-    const key = String(row.month).trim();
-    const existing = chartByMonth.get(key) ?? { month: key, revenue: 0, serviceRevenue: 0 };
-    existing.serviceRevenue = Math.round(Number(row.revenueCents ?? 0) / 100);
-    chartByMonth.set(key, existing);
-  }
-
-  // ── Fill in the full 6-month window so the chart shows real trend context
-  // instead of only the sparse months that happened to have a sale — a
-  // single isolated bar with everything else missing looked empty/broken.
-  const now = new Date();
-  const chart = [];
-  for (let i = 5; i >= 0; i--) {
-    const monthDate = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const key = monthDate.toLocaleString('en-US', { month: 'short' });
-    const existing = chartByMonth.get(key);
-    chart.push({
-      month: key,
-      revenue: existing?.revenue ?? 0,
-      serviceRevenue: existing?.serviceRevenue ?? 0,
-    });
-  }
-
-  // ── Merge transactions (products + services), newest first ─────────────
-  const combinedTransactions = [
-    ...transactions.map(t => ({ ...t, type: 'product' })),
-    ...customOfferTransactions.map(t => ({ ...t, type: 'service' })),
-  ]
-    .sort((a, b) => new Date(b.paidAt ?? 0) - new Date(a.paidAt ?? 0))
-    .slice(0, 50);
-
-  return {
-    summary: {
-      revenueCents,
-      orders,
-      products: products.length,
-      avgOrderCents: orders > 0 ? Math.round(revenueCents / orders) : 0,
-      views: totalViews,
-      conversion: totalViews > 0 ? (orders / totalViews) * 100 : 0,
-      refundedCount: Number(refunded?.count ?? 0),
-      refundedCents: Number(refunded?.amountCents ?? 0),
-      // Combined across products + services, for a single top-line number
-      combinedRevenueCents: revenueCents + customOfferRevenueCents,
-      combinedOrders: orders + customOfferOrders,
-    },
-    customOffers: {
-      revenueCents: customOfferRevenueCents,
-      orders: customOfferOrders,
-      avgOrderCents:
-        customOfferOrders > 0 ? Math.round(customOfferRevenueCents / customOfferOrders) : 0,
-      refundedCount: Number(customOfferRefunded?.count ?? 0),
-      refundedCents: Number(customOfferRefunded?.amountCents ?? 0),
-    },
-    reviews: {
-      avgRating: parseFloat(customOfferReviewAgg?.avgRating) || 0,
-      avgCommunicationRating: parseFloat(customOfferReviewAgg?.avgCommunicationRating) || 0,
-      avgValueRating: parseFloat(customOfferReviewAgg?.avgValueRating) || 0,
-      totalReviews: Number(customOfferReviewAgg?.totalReviews ?? 0),
-      items: customOfferReviews,
-    },
-    chart,
-    topProducts: enrichedProducts.slice(0, 5),
-    allProducts: enrichedProducts,
-    transactions: combinedTransactions,
-  };
-}
 
   /**
    * Whether a buyer may still request a refund, judged entirely against the

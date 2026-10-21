@@ -57,6 +57,26 @@ export const orders = pgTable(
     // (e.g. organizer's connect account wasn't chargesEnabled yet at charge time).
     transferId: varchar('transfer_id', { length: 255 }),
     transferredAt: timestamp('transferred_at', { withTimezone: true }),
+    // ── Tax (event ticketing) — TAX_STRATEGY.md §2, NOT legally reviewed ──
+    // jurisdictionStatus is the server-derived result (never client-supplied)
+    // of src/lib/tax/eventTaxJurisdictions.js#getEventTaxStatus against the
+    // event's venue at the moment this order was charged — kept for audit
+    // even if the venue or jurisdiction lists change later.
+    //   'facilitator'   — Briteside calculated/collects via Stripe Tax
+    //   'organizer'     — organizer's own manual Tax Tool rate was applied (if opted in)
+    //   'no-sales-tax'  — NOMAD state, never taxed
+    //   'unknown'       — unresolved venue/state; always untaxed (fail toward $0)
+    taxJurisdictionStatus: varchar('tax_jurisdiction_status', { length: 20 }),
+    // Amount actually added as a distinct tax line (or, when the
+    // organizer's "absorb tax" toggle is on, the amount carved out of the
+    // organizer's own cut instead of charged on top — see taxAbsorbed). 0
+    // when no tax applies, same convention as the other *Cents columns here.
+    taxAmountCents: integer('tax_amount_cents').default(0),
+    // True when the organizer's Tax Tool "Absorb tax" toggle was on for this
+    // order — tax came out of the organizer's own revenue rather than being
+    // added on top of the buyer's total (TAX_STRATEGY.md §2.3). Always false
+    // for facilitator-jurisdiction orders, where Briteside collects on top.
+    taxAbsorbed: boolean('tax_absorbed').default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
   },

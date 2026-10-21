@@ -39,10 +39,13 @@ import { groups } from './groups.js';
 // second 'video_source_type' enum with an identical set of values.
 import { videoSourceTypeEnum } from './groupCourses.js';
 
-
-export const shopListingTypeEnum = pgEnum('shop_listing_type', ['product', 'course', 'service' , 'link',]);
+export const shopListingTypeEnum = pgEnum('shop_listing_type', [
+  'product',
+  'course',
+  'service',
+  'link',
+]);
 export const shopPaymentModeEnum = pgEnum('shop_payment_mode', ['full', 'deposit', 'milestones']);
-
 
 export const shopProducts = pgTable(
   'shop_products',
@@ -124,7 +127,9 @@ export const shopProducts = pgTable(
     // not_registered | pending | registered | failed
     appleIapRegisteredAt: timestamp('apple_iap_registered_at', { withTimezone: true }),
     appleIapError: text('apple_iap_error'),
-    googleIapStatus: varchar('google_iap_status', { length: 20 }).notNull().default('not_registered'),
+    googleIapStatus: varchar('google_iap_status', { length: 20 })
+      .notNull()
+      .default('not_registered'),
     googleIapRegisteredAt: timestamp('google_iap_registered_at', { withTimezone: true }),
     googleIapError: text('google_iap_error'),
 
@@ -244,6 +249,22 @@ export const shopOrders = pgTable(
     // auto-refunds the buyer — set once ShopIapService.acknowledgeGooglePurchase
     // succeeds. Always true/irrelevant for 'web' and 'apple_iap' orders.
     iapAcknowledged: boolean('iap_acknowledged').notNull().default(false),
+
+    // ── Tax (Briteside Plus) — TAX_STRATEGY.md §3, NOT legally reviewed ────
+    // taxLiability reflects what this order's Checkout Session asked Stripe
+    // to do (see PlusTaxLiabilityService.resolveLiability): 'account' means
+    // the creator's own Stripe Tax registrations/nexus were used (and the
+    // collected tax rides into the creator's payout alongside their
+    // earnings), 'self' means Briteside's own registrations were used
+    // (Briteside collects/remits directly, tax stays on the platform
+    // balance), 'none' means automatic_tax wasn't even enabled for this
+    // order (no known nexus anywhere) and taxAmountCents will always be 0.
+    // taxAmountCents is the actual amount Stripe calculated and collected,
+    // filled in from the completed Checkout Session in the payment webhook
+    // — it is 0 (not null) whenever no tax was charged, same convention as
+    // the other *Cents columns on this table.
+    taxLiability: varchar('tax_liability', { length: 10 }).default('none'),
+    taxAmountCents: integer('tax_amount_cents').notNull().default(0),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -467,9 +488,7 @@ export const shopCourseLessonAttachments = pgTable(
     sortOrder: integer('sort_order').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  table => [
-    index('idx_shop_course_lesson_attachments_lesson').on(table.lessonId, table.sortOrder),
-  ]
+  table => [index('idx_shop_course_lesson_attachments_lesson').on(table.lessonId, table.sortOrder)]
 );
 
 // Per-viewer watch progress. Keyed by (productId, lessonId, userId) rather than
@@ -514,11 +533,10 @@ export const shopCustomOfferStatusEnum = pgEnum('shop_custom_offer_status', [
   'completed',
 ]);
 
-
 export const shopCustomOfferDeliveryStateEnum = pgEnum('shop_custom_offer_delivery_state', [
-  'awaiting_delivery',   // accepted, seller hasn't submitted work yet
-  'delivered',           // seller submitted work, waiting on buyer
-  'revision_requested',  // buyer asked for changes, waiting on seller
+  'awaiting_delivery', // accepted, seller hasn't submitted work yet
+  'delivered', // seller submitted work, waiting on buyer
+  'revision_requested', // buyer asked for changes, waiting on seller
 ]);
 /**
  * A one-off service offer a seller negotiates with a specific buyer, outside
@@ -558,7 +576,7 @@ export const shopCustomServiceOffers = pgTable(
     description: text('description').notNull(),
     priceCents: integer('price_cents').notNull(),
     revisionsUsedCount: integer('revisions_used_count').notNull().default(0),
-     turnaround: varchar('turnaround', { length: 100 }),
+    turnaround: varchar('turnaround', { length: 100 }),
     turnaroundMinutes: integer('turnaround_minutes'),
     dueDate: timestamp('due_date', { withTimezone: true }),
     // Set whenever a date extension is applied (requestDateExtension), so the
@@ -567,7 +585,7 @@ export const shopCustomServiceOffers = pgTable(
     // delivered — the delivered-state countdown takes over at that point.
     dueDateExtendedAt: timestamp('due_date_extended_at', { withTimezone: true }),
     deliverables: text('deliverables'),
-deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
     revisionsIncluded: boolean('revisions_included').notNull().default(false),
     revisionsCount: integer('revisions_count'),
 
@@ -619,7 +637,6 @@ deliveredAt: timestamp('delivered_at', { withTimezone: true }),
     uniqueIndex('idx_custom_offers_stripe_session').on(table.stripeSessionId),
   ]
 );
-
 
 /**
  * LIVE per-milestone state for a `paymentMode: 'milestones'` offer.
@@ -713,17 +730,14 @@ export const shopCustomOfferDeliverables = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     fileKey: varchar('file_key', { length: 500 }).notNull(),
-     roundNumber: integer('round_number').notNull().default(1),
+    roundNumber: integer('round_number').notNull().default(1),
     fileName: varchar('file_name', { length: 255 }).notNull(),
     fileType: varchar('file_type', { length: 10 }).notNull(), // 'image' | 'video' | 'document'
     note: text('note'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  table => [
-    index('idx_custom_offer_deliverables_offer').on(table.offerId, table.createdAt),
-  ]
+  table => [index('idx_custom_offer_deliverables_offer').on(table.offerId, table.createdAt)]
 );
-
 
 /**
  * The single append-only timeline for a custom offer — every action taken

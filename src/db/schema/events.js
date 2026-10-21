@@ -105,6 +105,17 @@ export const events = pgTable(
     // that's accidentally sent twice (network retry, double-click) resolve to
     // the same event instead of creating a duplicate — see EventService.createEvent.
     clientRequestId: varchar('client_request_id', { length: 100 }),
+    // Organizer "Tax Tool" opt-in (TAX_STRATEGY.md §2.2/§2.3) — only
+    // meaningful/shown by the frontend in states where Briteside is NOT the
+    // required Marketplace Facilitator. Null when the organizer hasn't
+    // opted in (or the event is in a facilitator jurisdiction, where this
+    // is never collected). Shape, exactly as sent by the frontend:
+    //   { collectionEnabled, country, registrationId, name, ratePercent,
+    //     appliesToAllTickets, absorbed }
+    // NOT legally reviewed — see src/lib/tax/eventTaxJurisdictions.js. The
+    // checkout path re-derives the event's actual jurisdiction status from
+    // the venue rather than trusting this object's mere presence.
+    tax: jsonb('tax'),
   },
   table => [
     check('end_date_check', sql`${table.endDate} > ${table.startDate}`),

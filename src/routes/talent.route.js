@@ -55,6 +55,7 @@ import {
   getConnectStatus,
   getOnboardingLink,
   getStripeDashboardLink,
+  getTaxAccountSession,
   getEarnings,
   getWallet,
   requestCashout,
@@ -130,6 +131,7 @@ router.post('/me/stripe/connect', authMiddleware, createConnectAccount);
 router.get('/me/stripe/connect/status', authMiddleware, getConnectStatus);
 router.get('/me/stripe/connect/link', authMiddleware, getOnboardingLink);
 router.get('/me/stripe/connect/dashboard', authMiddleware, getStripeDashboardLink);
+router.get('/me/stripe/tax/account-session', authMiddleware, getTaxAccountSession);
 
 router.get('/me/earnings', authMiddleware, requireActiveSubscription, getEarnings);
 
@@ -174,11 +176,7 @@ router.put(
 );
 router.put('/sessions/:sessionId/cancel', authMiddleware, cancelSession);
 router.post('/sessions/:sessionId/join', authMiddleware, recordJoin);
-router.post(
-  '/sessions/:sessionId/acknowledge-recording',
-  authMiddleware,
-  acknowledgeRecording
-);
+router.post('/sessions/:sessionId/acknowledge-recording', authMiddleware, acknowledgeRecording);
 router.post('/sessions/:sessionId/end', authMiddleware, endSession);
 router.post('/sessions/:sessionId/reschedule', authMiddleware, rescheduleSession);
 router.post('/sessions/:sessionId/review', authMiddleware, submitReview);

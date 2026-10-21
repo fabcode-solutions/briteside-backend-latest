@@ -177,6 +177,28 @@ export class StripeConnectService {
     return { url: link.url };
   }
 
+  // Creates an Account Session client secret for Stripe Connect's embedded
+  // `ConnectTaxRegistrations` component — lets a talent/creator enter their
+  // own state tax permit numbers from the Taxes settings page (see
+  // TAX_STRATEGY.md §5 "Talent Dashboard: add a Taxes button"). Same
+  // auth/lookup pattern as getDashboardLink/getOnboardingLink above: the
+  // caller resolves req.user.id to this user's connected account, never a
+  // client-supplied account id.
+  static async getTaxAccountSession(userId) {
+    ensureStripe();
+    const record = await StripeConnectService.getForUser(userId);
+    if (!record) throw new ApiError(404, 'No Stripe Connect account found');
+
+    const accountSession = await stripe.accountSessions.create({
+      account: record.stripeAccountId,
+      components: {
+        tax_registrations: { enabled: true },
+      },
+    });
+
+    return { clientSecret: accountSession.client_secret };
+  }
+
   // ─── WALLET ───────────────────────────────────────────────────────────────
 
   static async getBalance(userId) {
@@ -469,7 +491,10 @@ export class StripeConnectService {
       shop_order: { table: shopOrders, piColumn: 'stripePaymentIntentId' },
       priority_message: { table: priorityMessagePayments, piColumn: 'stripePaymentIntent' },
       shop_custom_offer: { table: shopCustomServiceOffers, piColumn: 'stripePaymentIntentId' },
-      shop_custom_offer_milestone: { table: shopOfferMilestones, piColumn: 'stripePaymentIntentId' },
+      shop_custom_offer_milestone: {
+        table: shopOfferMilestones,
+        piColumn: 'stripePaymentIntentId',
+      },
       shop_offer_milestone: { table: shopOfferMilestones, piColumn: 'stripePaymentIntentId' },
     };
 

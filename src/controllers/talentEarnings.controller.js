@@ -35,6 +35,13 @@ export const getStripeDashboardLink = catchAsync(async (req, res) => {
   res.json({ success: true, data: link });
 });
 
+// Powers the Taxes settings page's embedded ConnectTaxRegistrations
+// component — see TaxRegistrationsPanel.tsx on the frontend.
+export const getTaxAccountSession = catchAsync(async (req, res) => {
+  const session = await StripeConnectService.getTaxAccountSession(req.user.id);
+  res.json({ success: true, data: session });
+});
+
 // ─── EARNINGS ─────────────────────────────────────────────────────────────────
 
 export const getEarnings = catchAsync(async (req, res) => {
