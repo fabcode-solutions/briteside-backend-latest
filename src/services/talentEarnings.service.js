@@ -141,6 +141,8 @@ export class TalentEarningsService {
           scheduledAt: talentSessions.scheduledAt,
           refundIssuedAt: talentSessions.refundIssuedAt,
           stripePaymentIntentId: talentSessions.stripePaymentIntentId,
+          taxAmountCents: talentSessions.taxAmountCents,
+          taxLiability: talentSessions.taxLiability,
         })
         .from(talentSessions)
         .where(
@@ -164,6 +166,8 @@ export class TalentEarningsService {
           paidAt: priorityMessagePayments.paidAt,
           createdAt: priorityMessagePayments.createdAt,
           stripePaymentIntent: priorityMessagePayments.stripePaymentIntent,
+          taxAmountCents: priorityMessagePayments.taxAmountCents,
+          taxLiability: priorityMessagePayments.taxLiability,
         })
         .from(priorityMessagePayments)
         .where(
@@ -182,6 +186,8 @@ export class TalentEarningsService {
           sellerReceiveCents: shopOrders.sellerReceiveCents,
           paidAt: shopOrders.paidAt,
           stripePaymentIntentId: shopOrders.stripePaymentIntentId,
+          taxAmountCents: shopOrders.taxAmountCents,
+          taxLiability: shopOrders.taxLiability,
         })
         .from(shopOrders)
         .where(
@@ -251,6 +257,46 @@ export class TalentEarningsService {
 
     const totalEarningsCents = videoEarningsCents + messageEarningsCents + shopEarningsCents;
 
+    // Tax collected on this creator's behalf — shop orders, video sessions,
+    // and priority messages (TAX_STRATEGY.md §3, NOT legally reviewed). Only
+    // counts rows where `taxLiability === 'account'`: that's the only case
+    // where the collected tax actually rode into this creator's own payout
+    // alongside their earnings (see ShopOrderService.handlePaymentWebhook /
+    // TalentSessionService.handlePaymentWebhook /
+    // PriorityMessageService._deliverPaidPayment, all via
+    // applyTaxLiabilityToReserve) and is therefore money they, not Briteside,
+    // are responsible for remitting. Sessions are filtered to 'completed' +
+    // not refunded, matching videoEarningsCents' own filter above — a
+    // cancelled/refunded session's taxAmountCents would be stale
+    // (webhook-populated at payment time, never cleared on refund) if
+    // counted here.
+    //
+    // Whether this is "already folded into" the totals above (purely an
+    // additive breakdown, not a new pool of money) depends on which branch
+    // ran: in the `useStripe` branch all three totals are real Connect
+    // transfer amounts, which DO already carry the tax bump once a transfer
+    // has actually posted. In the `db_estimate` fallback (no transfer yet),
+    // shopEarningsCents is built from sellerReceiveCents — already
+    // tax-inclusive, same as shop's own checkout webhook — but
+    // videoEarningsCents/messageEarningsCents are built from the plain
+    // priceCents/baseCents base price (a pre-existing simplification,
+    // unrelated to tax), which never included the tax bump even before this
+    // change. So in that fallback case only, the session/message portion of
+    // taxCollectedCents can be money not yet reflected in the totals above —
+    // flagged here rather than silently glossed over; fixing that would mean
+    // changing what videoEarningsCents/messageEarningsCents mean for every
+    // existing creator, which is out of scope for adding tax support.
+    const taxCollectedCents =
+      shopOrderRows
+        .filter(o => o.taxLiability === 'account')
+        .reduce((sum, o) => sum + (o.taxAmountCents || 0), 0) +
+      sessions
+        .filter(s => s.status === 'completed' && !s.refundIssuedAt && s.taxLiability === 'account')
+        .reduce((sum, s) => sum + (s.taxAmountCents || 0), 0) +
+      msgPayments
+        .filter(m => m.taxLiability === 'account')
+        .reduce((sum, m) => sum + (m.taxAmountCents || 0), 0);
+
     return {
       summary: {
         totalEarnings: Math.round(totalEarningsCents / 100),
@@ -263,6 +309,11 @@ export class TalentEarningsService {
         shopEarningsCents,
         refunded: Math.round(refundedCents / 100),
         refundedCents,
+        // Additive — see comment above. Gross earnings minus this is NOT a
+        // meaningful "net of tax" figure since the tax portion is already
+        // folded into shopEarnings*, not layered on top of it.
+        taxCollected: Math.round(taxCollectedCents / 100),
+        taxCollectedCents,
         source: useStripe ? 'stripe' : 'db_estimate',
       },
       chart: buildChart(sessions, msgPayments, shopOrderRows, startDate, endDate, groupBy),

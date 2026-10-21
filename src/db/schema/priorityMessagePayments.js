@@ -99,6 +99,24 @@ export const priorityMessagePayments = pgTable(
     iapOrderId: varchar('iap_order_id', { length: 64 }),
     iapVerifiedAt: timestamp('iap_verified_at', { withTimezone: true }),
 
+    // ── Tax (priority messages) — TAX_STRATEGY.md §3.1, NOT legally
+    // reviewed. Same shape/meaning as shopOrders.taxLiability/taxAmountCents
+    // (see src/db/schema/shop.js) and talentSessions' equivalent columns:
+    // taxLiability reflects what this payment's Checkout Session asked
+    // Stripe to do (see PlusTaxLiabilityService via
+    // src/lib/tax/serviceCheckoutTax.js) — 'account' means the talent's own
+    // Stripe Tax registrations were used (collected tax rides into their
+    // payout alongside their earnings), 'self' means Briteside's own
+    // registrations were used, 'none' means automatic_tax wasn't enabled at
+    // all. taxAmountCents is the actual amount Stripe calculated/collected,
+    // filled in once the Checkout Session completes — 0 (not null) whenever
+    // no tax was charged, including for the quick-pay/native raw-PaymentIntent
+    // paths (chargeExistingPendingPayment/createNativePaymentIntent), which
+    // have no billing-address collection point to anchor a tax calculation
+    // to and so correctly never populate this.
+    taxLiability: varchar('tax_liability', { length: 10 }).default('none'),
+    taxAmountCents: integer('tax_amount_cents').notNull().default(0),
+
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }),
   },

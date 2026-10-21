@@ -11,6 +11,7 @@ import {
   createTicketPaymentSheet,
   completeTicketPaymentSheet,
   prepareNativeTicketOrder,
+  previewTicketOrder,
   createNativeTicketPaymentIntent,
   finalizeNativeTicketPayment,
   getPublishableKey,
@@ -42,6 +43,10 @@ router.post('/ticket-payment-sheet/complete', authMiddleware, completeTicketPaym
 // Native WEB checkout (Briteside-themed card form) — same order/payment
 // primitives as the PaymentSheet flow above, split into prepare/intent/finalize.
 router.post('/tickets/prepare', authMiddleware, prepareNativeTicketOrder);
+// Read-only price breakdown (ticket/merch subtotal + platform fee + tax),
+// shown before the buyer commits — no auth required, same as browsing the
+// event page itself. Creates nothing; never trusts client-supplied prices.
+router.post('/tickets/preview', optionalAuthMiddleware, previewTicketOrder);
 router.post('/tickets/:orderId/native-intent', authMiddleware, createNativeTicketPaymentIntent);
 router.post('/tickets/:orderId/native-finalize', authMiddleware, finalizeNativeTicketPayment);
 // Generic "pay a saved card directly" — currently only wired up for

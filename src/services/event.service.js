@@ -257,6 +257,13 @@ export class EventService {
         showTicketsRemaining:
           rest.showTicketsRemaining !== undefined ? rest.showTicketsRemaining : true,
         clientRequestId: rest.clientRequestId || null,
+        // Organizer "Tax Tool" opt-in — TAX_STRATEGY.md §2.2/§2.3, NOT
+        // legally reviewed. Only meaningful in non-Marketplace-Facilitator
+        // states; stored as-is (jsonb, same pattern as recurrenceRule above)
+        // and re-validated against the event's actual venue jurisdiction at
+        // checkout time rather than trusted blindly — see
+        // PaymentService._computeOrderCharge / src/lib/tax/eventTaxJurisdictions.js.
+        tax: rest.tax || null,
       };
 
       // Idempotent replay: the same submit attempt (network retry, double-click)
@@ -1785,8 +1792,7 @@ export class EventService {
       // those links 404'd. Comparing a non-UUID string against the uuid `id`
       // column throws in Postgres, so only add that branch when the param is
       // actually UUID-shaped.
-      const isUuid =
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(slug);
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(slug);
 
       const event = await db.query.events.findFirst({
         where: isUuid ? or(eq(events.slug, slug), eq(events.id, slug)) : eq(events.slug, slug),
@@ -1807,7 +1813,7 @@ export class EventService {
     }
   }
 
-static async updateEvent(eventId, eventData, { isAdmin = false } = {}) {
+  static async updateEvent(eventId, eventData, { isAdmin = false } = {}) {
     try {
       const {
         organizerId,
@@ -1915,6 +1921,12 @@ static async updateEvent(eventId, eventData, { isAdmin = false } = {}) {
       }
       if (updateData.showTicketsRemaining !== undefined)
         processedEventData.showTicketsRemaining = updateData.showTicketsRemaining;
+      // Organizer "Tax Tool" opt-in — TAX_STRATEGY.md §2.2/§2.3, NOT legally
+      // reviewed. `tax: null` explicitly clears a previous opt-in (organizer
+      // toggling self-collection back off); `tax` simply absent from the
+      // request leaves whatever was already saved untouched, same as every
+      // other optional field here.
+      if (updateData.tax !== undefined) processedEventData.tax = updateData.tax;
       // Note: startDate and endDate are managed by event sessions, not manually updated
 
       processedEventData.updatedAt = new Date();
@@ -2029,7 +2041,7 @@ static async updateEvent(eventId, eventData, { isAdmin = false } = {}) {
         const existingTicketMap = new Map(existingTickets.map(t => [t.id, t]));
         const newTicketIds = new Set();
 
-               for (const ticket of tickets) {
+        for (const ticket of tickets) {
           if (ticket.id && existingTicketMap.has(ticket.id)) {
             const existingTicket = existingTicketMap.get(ticket.id);
             const {
@@ -3339,19 +3351,25 @@ static async updateEvent(eventId, eventData, { isAdmin = false } = {}) {
     });
   }
 
-  static async updateSessionInventory(organizerId, eventId, ticketTierId, rows, { isAdmin = false } = {}) {
-  const event = await db.query.events.findFirst({
-    where: isAdmin
-      ? eq(events.id, eventId)
-      : and(eq(events.id, eventId), eq(events.organizerId, organizerId)),
-    columns: { id: true },
-  });
-  if (!event) throw new ApiError(404, 'Event not found or not owned by this organizer');
+  static async updateSessionInventory(
+    organizerId,
+    eventId,
+    ticketTierId,
+    rows,
+    { isAdmin = false } = {}
+  ) {
+    const event = await db.query.events.findFirst({
+      where: isAdmin
+        ? eq(events.id, eventId)
+        : and(eq(events.id, eventId), eq(events.organizerId, organizerId)),
+      columns: { id: true },
+    });
+    if (!event) throw new ApiError(404, 'Event not found or not owned by this organizer');
 
-  const tier = await db.query.eventTickets.findFirst({
-    where: and(eq(eventTickets.id, ticketTierId), eq(eventTickets.eventId, eventId)),
-  });
-  if (!tier) throw new ApiError(404, 'Ticket tier not found');
+    const tier = await db.query.eventTickets.findFirst({
+      where: and(eq(eventTickets.id, ticketTierId), eq(eventTickets.eventId, eventId)),
+    });
+    if (!tier) throw new ApiError(404, 'Ticket tier not found');
 
     const existingRows = await db.query.eventTicketScheduleInventory.findMany({
       where: eq(eventTicketScheduleInventory.ticketTierId, ticketTierId),

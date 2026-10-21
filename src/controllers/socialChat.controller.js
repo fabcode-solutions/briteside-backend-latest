@@ -103,16 +103,6 @@ export const getMessages = catchAsync(async (req, res) => {
 });
 
 export const sendMessage = catchAsync(async (req, res) => {
-  console.log(
-    '[DEBUG]',
-    req.method,
-    req.originalUrl,
-    '| io:',
-    !!req.app.get('io'),
-    '| settings:',
-    Object.keys(req.app.settings || {})
-  ); // ← ADD THIS LINE
-
   // Whitelist client-facing fields only — `skipModeration` is internal-only
   // (set by trusted server-to-server callers) and must never be settable
   // from a request body, or a client could grant themselves a bypass.
@@ -124,9 +114,13 @@ export const sendMessage = catchAsync(async (req, res) => {
     replyToId,
     isPriority,
   });
-  res.status(201).json({ success: true, message: 'Message sent', data: { message } });
 
   // ── Release priority payment per-item when talent replies ──────────────────
+  // Awaited BEFORE responding: the frontend calls GET /priority-messages/
+  // earnings/total right after this request resolves, to refresh "Total
+  // earned" without a page reload. That used to race ahead of this (which ran
+  // after res.json() had already gone out), so the new total wasn't committed
+  // yet and the banner stayed stale until a later manual refresh caught it.
   let releaseResult = null;
   try {
     const { PriorityMessageService } = await import('../services/priorityMessage.service.js');
@@ -139,6 +133,8 @@ export const sendMessage = catchAsync(async (req, res) => {
   } catch (err) {
     console.warn('[sendMessage] releaseOnReply failed (non-fatal):', err.message);
   }
+
+  res.status(201).json({ success: true, message: 'Message sent', data: { message } });
 
   // Real-time broadcast to conversation room and recipient via /chat namespace
   const io = req.app.get('io');

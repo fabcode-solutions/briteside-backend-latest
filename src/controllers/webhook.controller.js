@@ -16,6 +16,7 @@ import { eq, and } from 'drizzle-orm';
 import { UserSpendService } from '../services/userSpend.service.js';
 import ApiError from '../utils/api-error.js';
 import { OrderService } from '../services/order.service.js';
+import { PaymentService } from '../services/payment.service.js';
 import { buildTicketBundleUrl } from '../utils/helper.js';
 import { generateTicketCode } from '../utils/code-generator.js';
 import QRCode from 'qrcode';
@@ -341,6 +342,18 @@ export async function handleCheckoutSession(session) {
   if (!order && !guestOrder) {
     console.warn('Order not found for session:', session.id);
     return;
+  }
+
+  // Virtual Marketplace-Facilitator events only: the real tax amount wasn't
+  // known at session-creation time (Stripe's automatic_tax resolves it live
+  // from the buyer's billing address) — reconcile now that the session has
+  // actually completed. Safe to run even on an already-paid order or a
+  // retried webhook delivery: reconcileAutomaticTaxOnOrder no-ops unless
+  // taxPendingAutomatic is still true, and flips it false after reconciling.
+  if (order) {
+    await PaymentService.reconcileAutomaticTaxOnOrder(order, session).catch(err =>
+      console.error('[EventTax] failed to reconcile automatic tax for order', order.id, err)
+    );
   }
 
   if (order && order.status === 'paid') {

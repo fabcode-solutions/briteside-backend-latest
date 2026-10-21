@@ -54,6 +54,12 @@ import { emitSocialChat } from '../socket/emitter.js';
 import { organizerSocialLinks } from '../db/schema/index.js';
 import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
 import { PayoutLedgerService } from './payoutLedger.service.js';
+import { PlusTaxLiabilityService } from './tax/plusTaxLiability.service.js';
+import {
+  SERVICE_TAX_CODE,
+  buildServiceAutomaticTax,
+  applyTaxLiabilityToReserve,
+} from '../lib/tax/serviceCheckoutTax.js';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
@@ -1344,6 +1350,18 @@ export class TalentSessionService {
       custom: { isTalentSession: true, talentProfileId, bookerId, subject, durationMins },
     });
 
+    // Tax (1:1 video bookings) — TAX_STRATEGY.md §3.1, NOT legally reviewed.
+    // Video bookings are personal/professional services, the same category
+    // as shop's 'service' listing type — tagged with the same services tax
+    // code (serviceCheckoutTax.js) so Stripe Tax's own exemption logic
+    // applies instead of us hard-coding "0%". Liability resolved the exact
+    // same way shop resolves it for its own checkout (reused, not forked):
+    // whichever party (the talent's connected account or Briteside) actually
+    // holds a Stripe Tax registration — see PlusTaxLiabilityService. Absent
+    // one, this fails toward charging no tax, same as shop.
+    const { liability } = await PlusTaxLiabilityService.resolveLiability(profile.userId);
+    const taxLiability = liability ? liability.type : 'none';
+
     const [session] = await db
       .insert(talentSessions)
       .values({
@@ -1360,6 +1378,7 @@ export class TalentSessionService {
         giftDetails: giftDetails || {},
         giftCode: giftCode || null,
         streamCallCid: streamCall.cid || callId,
+        taxLiability,
       })
       .returning();
 
@@ -1396,6 +1415,7 @@ export class TalentSessionService {
       chargedCents,
       applicationFeeCents,
       estimatedStripeFeeCents,
+      tax: { taxCode: SERVICE_TAX_CODE, liability },
     };
   }
 
@@ -1415,6 +1435,7 @@ export class TalentSessionService {
       platformAndServiceFeeCents,
       applicationFeeCents,
       estimatedStripeFeeCents,
+      tax,
     } = prep;
 
     const nativeRedirect = isNativePlatform(platform);
@@ -1429,6 +1450,15 @@ export class TalentSessionService {
     );
     const webReturnUrl = `${FRONTEND_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}&type=session`;
 
+    // Tax (1:1 video bookings) — TAX_STRATEGY.md §3.1, NOT legally reviewed.
+    // Mirrors ShopOrderService._createHostedOrderSession's exact pattern:
+    // automatic_tax is only enabled when PlusTaxLiabilityService actually
+    // found a liable party (see _prepareSessionBooking above) — Checkout's
+    // own live billing-address collection (triggered by automatic_tax.enabled
+    // itself) is what lets Stripe source the rate from the booker's
+    // destination state per TAX_STRATEGY.md §3.4.
+    const automaticTax = buildServiceAutomaticTax(tax?.liability);
+
     const checkoutParams = {
       payment_method_types: ['card'],
       mode: 'payment',
@@ -1436,14 +1466,17 @@ export class TalentSessionService {
       ...(nativeRedirect
         ? { success_url: redirectUrls.successUrl, cancel_url: redirectUrls.cancelUrl }
         : { ui_mode: 'embedded', return_url: webReturnUrl }),
+      ...(automaticTax ? { automatic_tax: automaticTax } : {}),
       line_items: [
         {
           price_data: {
             currency: 'usd',
             unit_amount: talentPriceCents,
+            tax_behavior: 'exclusive',
             product_data: {
               name: `${durationMins}-min session with ${talentName}`,
               description: subject || `Booked for ${date} at ${time}`,
+              tax_code: tax?.taxCode,
             },
           },
           quantity: 1,
@@ -1555,6 +1588,13 @@ export class TalentSessionService {
       // No transfer_data/application_fee_amount — same deliver-first escrow
       // rule as _createHostedSessionCheckout: the talent's cut is held and
       // paid out later, not split at charge time.
+      // No automatic_tax/Tax Calculation here either, deliberately — a raw
+      // PaymentIntent has no Checkout-hosted form to collect the booker's
+      // billing address live, so there is no address to anchor a Stripe Tax
+      // Calculation call to. Same open question flagged for virtual
+      // facilitator events on native checkout (payment.service.js's
+      // allowAutomaticTax) — this session's taxAmountCents correctly stays 0
+      // rather than guessing a jurisdiction.
     });
 
     return { clientSecret: intent.client_secret, paymentId: session.id };
@@ -1650,7 +1690,26 @@ export class TalentSessionService {
     // the deliver-first escrow payout rule. Recomputed from priceCents rather
     // than persisted at booking time, since nothing should reserve anything
     // before payment is actually confirmed.
-    const talentNetCents = existing.priceCents - Math.round(existing.priceCents * 0.05);
+    const baseTalentNetCents = existing.priceCents - Math.round(existing.priceCents * 0.05);
+
+    // Tax (1:1 video bookings) — TAX_STRATEGY.md §3.6, NOT legally reviewed.
+    // Mirrors ShopOrderService.handlePaymentWebhook: the amount actually
+    // calculated/collected by Stripe (booker's real billing state, checked
+    // live during Checkout) only exists once the session completes —
+    // existing.taxLiability only recorded *who* we asked Stripe to check at
+    // booking time (see _prepareSessionBooking). `total_details` is absent on
+    // the synthetic "session" object the native PaymentIntent flow passes in
+    // (finalizeNativePayment/createNativePaymentIntent) and on the
+    // payment_intent.succeeded safety-net webhook — those flows have no
+    // automatic_tax support (no billing-address collection point to anchor a
+    // tax calculation to), so taxAmountCents correctly stays 0 for them
+    // rather than guessing.
+    const taxAmountCents = stripeSession.total_details?.amount_tax ?? 0;
+    const talentNetCents = applyTaxLiabilityToReserve(
+      baseTalentNetCents,
+      taxAmountCents,
+      existing.taxLiability
+    );
 
     await db
       .update(talentSessions)
@@ -1659,6 +1718,7 @@ export class TalentSessionService {
         stripePaymentIntentId: stripeSession.payment_intent ?? null,
         stripeFeeCents,
         reserveAmountCents: talentNetCents,
+        taxAmountCents,
       })
       .where(eq(talentSessions.id, sessionId));
 
