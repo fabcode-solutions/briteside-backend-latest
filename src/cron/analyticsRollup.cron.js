@@ -7,6 +7,7 @@ import {
   groupAnalyticsDaily,
   productAnalyticsDaily,
   serviceAnalyticsDaily,
+  talentProfiles,
 } from '../db/schema/index.js';
 import { cronLogger as logger } from '../config/logger.js';
 
@@ -146,7 +147,31 @@ export async function runAnalyticsRollup() {
   if (rows.length === 0) return;
 
   const buckets = aggregate(rows);
+
+  // A talent profile referenced by a logged 'service' event can be deleted
+  // (or never existed, e.g. a stale/replayed event) by the time this cron
+  // runs — service_analytics_daily.talent_profile_id is a FOREIGN KEY, so
+  // upserting against a missing one throws and aborts the whole batch.
+  // Skip those buckets rather than let one dangling id fail every other
+  // rollup in the run.
+  const serviceIds = [...new Set(buckets.filter(b => b.entityType === 'service').map(b => b.entityId))];
+  let existingTalentProfileIds = new Set();
+  if (serviceIds.length > 0) {
+    const existing = await db
+      .select({ id: talentProfiles.id })
+      .from(talentProfiles)
+      .where(inArray(talentProfiles.id, serviceIds));
+    existingTalentProfileIds = new Set(existing.map(row => row.id));
+  }
+
   for (const bucket of buckets) {
+    if (bucket.entityType === 'service' && !existingTalentProfileIds.has(bucket.entityId)) {
+      logger.warn('[Cron] AnalyticsRollup: skipping service event for missing talent profile', {
+        talentProfileId: bucket.entityId,
+        date: bucket.date,
+      });
+      continue;
+    }
     await upsertBucket(bucket);
   }
 
