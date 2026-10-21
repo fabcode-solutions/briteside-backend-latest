@@ -178,12 +178,19 @@ export class StripeConnectService {
   }
 
   // Creates an Account Session client secret for Stripe Connect's embedded
-  // `ConnectTaxRegistrations` component — lets a talent/creator enter their
-  // own state tax permit numbers from the Taxes settings page (see
-  // TAX_STRATEGY.md §5 "Talent Dashboard: add a Taxes button"). Same
-  // auth/lookup pattern as getDashboardLink/getOnboardingLink above: the
-  // caller resolves req.user.id to this user's connected account, never a
-  // client-supplied account id.
+  // `ConnectTaxRegistrations` + `ConnectTaxSettings` components — lets a
+  // talent/creator enter their own state tax permit numbers from the Taxes
+  // settings page (see TAX_STRATEGY.md §5 "Talent Dashboard: add a Taxes
+  // button"). Same auth/lookup pattern as getDashboardLink/getOnboardingLink
+  // above: the caller resolves req.user.id to this user's connected
+  // account, never a client-supplied account id.
+  //
+  // tax_settings MUST be enabled alongside tax_registrations: Stripe's Tax
+  // Registrations API rejects any registration until the connected account
+  // has a "head office" address on file (invalid_request_error otherwise),
+  // and the Tax Settings component is what actually lets the creator set
+  // that address in the embedded UI — Stripe's own docs describe this as a
+  // required two-component sequence, not an optional add-on.
   static async getTaxAccountSession(userId) {
     ensureStripe();
     const record = await StripeConnectService.getForUser(userId);
@@ -193,6 +200,7 @@ export class StripeConnectService {
       account: record.stripeAccountId,
       components: {
         tax_registrations: { enabled: true },
+        tax_settings: { enabled: true },
       },
     });
 
