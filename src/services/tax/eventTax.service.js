@@ -43,7 +43,7 @@ export class EventTaxService {
    * @param {object} params
    * @param {{address?: string, city?: string|null, state?: string|null, country?: string|null, countryCode?: string|null, postalCode?: string|null}|null} params.venue
    * @param {string} params.eventMode - 'in_person' | 'virtual'
-   * @param {number} params.subtotalCents - ticket subtotal BEFORE the platform fee, the base tax is calculated against.
+   * @param {number} params.subtotalCents - the taxable "Buyer Total" (ticket subtotal + any passed-on platform fee — see TAX_STRATEGY.md §2.1; the caller in payment.service.js already adds the platform fee in before passing this).
    * @param {object|null} params.organizerTax - the event's persisted `tax` opt-in object, or null.
    * @returns {Promise<{
    *   jurisdictionStatus: 'facilitator'|'organizer'|'no-sales-tax'|'unknown',
@@ -62,7 +62,11 @@ export class EventTaxService {
    */
   static async computeTax({ venue, eventMode, subtotalCents, organizerTax }) {
     const taxCode = EVENT_TAX_CODES.SPECTATOR_ADMISSIONS;
-    const { status: jurisdictionStatus } = getEventTaxStatus(venue?.state, venue?.city);
+    const { status: jurisdictionStatus } = getEventTaxStatus(
+      venue?.state,
+      venue?.city,
+      venue?.country || venue?.countryCode
+    );
 
     const none = {
       jurisdictionStatus,
@@ -96,6 +100,15 @@ export class EventTaxService {
     // jurisdictionStatus === 'organizer' — only taxed if the organizer
     // explicitly opted in via the Tax Tool (TAX_STRATEGY.md §2.2).
     if (!organizerTax?.collectionEnabled) return none;
+
+    // Mirrors Eventbrite's own hard requirement (TAX_STRATEGY.md §2.3/source
+    // doc p.5): without a registration/TIN on file, "Eventbrite will not add
+    // any tax line item... tickets will sell as tax-free." The frontend's
+    // zod schema already blocks saving an event in this state, but checkout
+    // must not rely on that alone — a stale event saved before this
+    // validation existed, or any other write path, could still have
+    // collectionEnabled:true with no registrationId.
+    if (!organizerTax.registrationId?.trim()) return none;
 
     const ratePercent = Number(organizerTax.ratePercent);
     if (!Number.isFinite(ratePercent) || ratePercent <= 0) return none;

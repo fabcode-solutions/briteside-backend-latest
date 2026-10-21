@@ -69,6 +69,14 @@ export const EVENT_NON_FACILITATOR_STATES = new Set([
 /** States with no statewide sales tax (NOMAD). Alaska still allows local borough taxes, not modeled here since none appear in the source doc's municipality list. */
 export const EVENT_NOMAD_STATES = new Set(['AK', 'DE', 'MT', 'NH', 'OR']);
 
+/** Both source docs are US-sales-tax-only (no VAT/GST or international mention anywhere — confirmed, not assumed). A non-US country must never fall through to a state-name coincidence. */
+const US_COUNTRY_NAMES = new Set(['US', 'USA', 'UNITED STATES', 'UNITED STATES OF AMERICA']);
+
+function isUsCountry(country) {
+  if (!country) return true; // no country supplied — caller didn't have one to check; fall back to state-only matching
+  return US_COUNTRY_NAMES.has(String(country).trim().toUpperCase());
+}
+
 /** Municipalities where Briteside is the facilitator for a local excise even though the state itself isn't. */
 export const EVENT_MPF_MUNICIPALITIES = [
   { state: 'IL', city: 'Chicago', taxName: 'Chicago Amusement Tax' },
@@ -86,9 +94,12 @@ export const EVENT_MPF_MUNICIPALITIES = [
  *
  * @param {string|null|undefined} state
  * @param {string|null|undefined} [city]
+ * @param {string|null|undefined} [country] - full name or code; non-US short-circuits to 'unknown' regardless of state
  * @returns {{ status: 'facilitator'|'organizer'|'no-sales-tax'|'unknown', municipality?: { state: string, city: string, taxName: string } }}
  */
-export function getEventTaxStatus(state, city) {
+export function getEventTaxStatus(state, city, country) {
+  if (!isUsCountry(country)) return { status: 'unknown' };
+
   const abbr = normalizeStateToAbbr(state);
   if (!abbr) return { status: 'unknown' };
 

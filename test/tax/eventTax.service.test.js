@@ -61,6 +61,7 @@ describe('EventTaxService.computeTax', () => {
       subtotalCents: 10_000,
       organizerTax: {
         collectionEnabled: true,
+        registrationId: 'CA-SALES-TAX-12345',
         ratePercent: 7.5,
         absorbed: false,
         name: 'CA Sales Tax',
@@ -80,9 +81,42 @@ describe('EventTaxService.computeTax', () => {
       venue: { state: 'CA', address: '123 Main St' },
       eventMode: 'in_person',
       subtotalCents: 10_000,
-      organizerTax: { collectionEnabled: true, ratePercent: 10, absorbed: true },
+      organizerTax: {
+        collectionEnabled: true,
+        registrationId: 'CA-SALES-TAX-12345',
+        ratePercent: 10,
+        absorbed: true,
+      },
     });
     expect(result).toMatchObject({ amountCents: 1000, absorbed: true });
+  });
+
+  it('charges no tax when the organizer opted in but never entered a TIN/registration ID', async () => {
+    // Mirrors Eventbrite's own hard requirement: without a registration on
+    // file, no tax line item is ever added, regardless of the rate entered.
+    const result = await EventTaxService.computeTax({
+      venue: { state: 'CA', address: '123 Main St' },
+      eventMode: 'in_person',
+      subtotalCents: 10_000,
+      organizerTax: { collectionEnabled: true, ratePercent: 7.5, name: 'CA Sales Tax' },
+    });
+    expect(result).toMatchObject({ jurisdictionStatus: 'organizer', amountCents: 0 });
+    expect(calculationsCreate).not.toHaveBeenCalled();
+  });
+
+  it('charges no tax when the registration ID is only whitespace', async () => {
+    const result = await EventTaxService.computeTax({
+      venue: { state: 'CA', address: '123 Main St' },
+      eventMode: 'in_person',
+      subtotalCents: 10_000,
+      organizerTax: {
+        collectionEnabled: true,
+        registrationId: '   ',
+        ratePercent: 7.5,
+        name: 'CA Sales Tax',
+      },
+    });
+    expect(result).toMatchObject({ jurisdictionStatus: 'organizer', amountCents: 0 });
   });
 
   it('ignores a non-finite or zero organizer rate rather than charging $0.00-rounds-to-nonzero', async () => {

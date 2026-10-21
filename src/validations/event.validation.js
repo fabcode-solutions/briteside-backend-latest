@@ -101,15 +101,45 @@ export const eventFiltersSchema = z.object({
 // the backend re-derives the event's actual jurisdiction status itself at
 // checkout time rather than trusting this object's presence as proof the
 // event is in a non-facilitator state (see src/lib/tax/eventTaxJurisdictions.js).
-const eventTaxSchema = z.object({
-  collectionEnabled: z.boolean(),
-  country: z.string().max(100).optional(),
-  registrationId: z.string().max(200).optional(),
-  name: z.string().max(100).optional(),
-  ratePercent: z.number().min(0).max(100),
-  appliesToAllTickets: z.boolean().optional(),
-  absorbed: z.boolean().optional(),
-});
+const eventTaxSchema = z
+  .object({
+    collectionEnabled: z.boolean(),
+    country: z.string().max(100).optional(),
+    registrationId: z.string().max(200).optional(),
+    name: z.string().max(100).optional(),
+    ratePercent: z.number().min(0).max(100).optional(),
+    appliesToAllTickets: z.boolean().optional(),
+    absorbed: z.boolean().optional(),
+  })
+  .superRefine((data, ctx) => {
+    // Mirrors Eventbrite's own hard requirement (TAX_STRATEGY.md §2.3): an
+    // organizer can't complete Tax Tool setup without a TIN/registration ID —
+    // without one, no tax line item is ever added (see EventTaxService,
+    // which independently re-checks this at checkout time regardless of
+    // whether this validation ever ran for a given event).
+    if (!data.collectionEnabled) return;
+    if (!data.registrationId?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'A state tax ID is required to charge tax for this event',
+        path: ['registrationId'],
+      });
+    }
+    if (!data.name?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Tax name is required',
+        path: ['name'],
+      });
+    }
+    if (data.ratePercent === undefined || data.ratePercent <= 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Tax rate must be greater than 0',
+        path: ['ratePercent'],
+      });
+    }
+  });
 
 export const createEventSchema = z.object({
   body: z

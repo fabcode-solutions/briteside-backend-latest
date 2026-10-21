@@ -69,4 +69,21 @@ describe('getEventTaxStatus', () => {
       expect(EVENT_NOMAD_STATES.has(s)).toBe(false);
     }
   });
+
+  it('is US-only — a non-US country short-circuits to unknown regardless of a matching state name', () => {
+    // Both source docs are entirely US-sales-tax-focused (confirmed, not
+    // assumed — see TAX_STRATEGY.md). A non-US venue must never be taxed
+    // just because its state/province string happens to match a US state.
+    expect(getEventTaxStatus('Texas', null, 'Canada')).toEqual({ status: 'unknown' });
+    expect(getEventTaxStatus('TX', null, 'CA')).toEqual({ status: 'unknown' }); // 'CA' as a country code (Canada), not the state
+  });
+
+  it('treats a missing country as US, same as before this parameter existed', () => {
+    expect(getEventTaxStatus('Florida')).toEqual({ status: 'facilitator' });
+    expect(getEventTaxStatus('Florida', null, 'US')).toEqual({ status: 'facilitator' });
+    expect(getEventTaxStatus('Florida', null, 'United States')).toEqual({ status: 'facilitator' });
+    expect(getEventTaxStatus('Florida', null, '  united states of america  ')).toEqual({
+      status: 'facilitator',
+    });
+  });
 });
