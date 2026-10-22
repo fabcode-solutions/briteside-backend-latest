@@ -12,6 +12,8 @@ import { eq, and, isNull, inArray, sql, asc, desc, count, max, gte, lte } from '
 import ApiError from '../../utils/api-error.js';
 import { ProfileService } from '../social/profile.service.js';
 import { StripeConnectService } from '../stripeConnect.service.js';
+import { resolvePlusTaxCode } from '../../lib/tax/plusProductTaxCodes.js';
+import { PlusTaxLiabilityService } from '../tax/plusTaxLiability.service.js';
 import { inspect } from 'util';
 
 const MAX_GALLERY = 6;
@@ -403,9 +405,16 @@ export class ShopProductService {
       .filter(row => row.isPinned)
       .sort((a, b) => (a.pinOrder ?? 0) - (b.pinOrder ?? 0));
 
+    const taxPendingById = await this.resolveTaxPending(sellerId, withModules);
+
     return {
-      products: withModules.filter(row => !row.isPinned).map(row => this.sanitize(row, isOwner)),
-      pinnedProducts: pinnedRows.map(row => this.sanitize(row, isOwner)),
+      products: withModules
+        .filter(row => !row.isPinned)
+        .map(row => ({ ...this.sanitize(row, isOwner), taxPending: taxPendingById.get(row.id) ?? false })),
+      pinnedProducts: pinnedRows.map(row => ({
+        ...this.sanitize(row, isOwner),
+        taxPending: taxPendingById.get(row.id) ?? false,
+      })),
       settings,
       canSell,
       payoutsReady: !!connectAccount?.chargesEnabled,
@@ -427,7 +436,45 @@ export class ShopProductService {
     if (!isOwner && !settings.shopVisible) throw new ApiError(404, 'Product not found');
 
     const [withModules] = await this.attachCourseModules([product]);
-    return { product: this.sanitize(withModules, isOwner), settings };
+    const taxPendingById = await this.resolveTaxPending(product.userId, [withModules]);
+    return {
+      product: {
+        ...this.sanitize(withModules, isOwner),
+        taxPending: taxPendingById.get(withModules.id) ?? false,
+      },
+      settings,
+    };
+  }
+
+  /**
+   * Whether tax *could* apply to each product, without knowing the buyer yet
+   * (Plus/shop tax is destination-sourced from the buyer's billing address,
+   * only collected live during Stripe Checkout — TAX_STRATEGY.md §3.4 — so
+   * there is no real dollar amount to preview ahead of time, only whether
+   * it's even possible). True only when the listing's product type is
+   * taxable (resolvePlusTaxCode) AND a liable party was actually resolved
+   * (PlusTaxLiabilityService) — both must hold, same gate checkout itself
+   * uses, so this can never say "pending" for a purchase that checkout would
+   * then charge $0 tax on.
+   *
+   * The nexus lookup is a live Stripe API call, so it's made at most once per
+   * call (seller-level, not per-product) and skipped entirely when nothing in
+   * the given product set is even a taxable type.
+   *
+   * @param {string} sellerId
+   * @param {Array<{id: string, listingType: string, isPhysical?: boolean}>} products
+   * @returns {Promise<Map<string, boolean>>} productId -> taxPending
+   */
+  static async resolveTaxPending(sellerId, products) {
+    const taxableIds = products
+      .filter(p => resolvePlusTaxCode(p).taxable)
+      .map(p => p.id);
+    if (taxableIds.length === 0) return new Map();
+
+    const { liability } = await PlusTaxLiabilityService.resolveLiability(sellerId);
+    if (!liability) return new Map();
+
+    return new Map(taxableIds.map(id => [id, true]));
   }
 
   static async createProduct(userId, data) {

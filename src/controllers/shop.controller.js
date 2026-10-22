@@ -175,7 +175,23 @@ export const prepareShopNativeCheckout = catchAsync(async (req, res) => {
 });
 
 export const createShopNativePaymentIntent = catchAsync(async (req, res) => {
-  const result = await ShopOrderService.createNativePaymentIntent(req.params.orderId, req.user.id);
+  const result = await ShopOrderService.createNativePaymentIntent(req.params.orderId, req.user.id, {
+    country: req.body?.country,
+    postalCode: req.body?.postalCode,
+    state: req.body?.state,
+  });
+  res.json({ success: true, data: result });
+});
+
+// Preview-only — no PaymentIntent, no DB write. Lets NativeCheckoutForm show
+// the real tax amount before the buyer submits payment (same country/ZIP/
+// state fields it already collects for billing_details).
+export const previewShopNativeTax = catchAsync(async (req, res) => {
+  const result = await ShopOrderService.previewNativeTax(req.params.orderId, req.user.id, {
+    country: req.body?.country,
+    postalCode: req.body?.postalCode,
+    state: req.body?.state,
+  });
   res.json({ success: true, data: result });
 });
 

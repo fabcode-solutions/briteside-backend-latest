@@ -10,8 +10,9 @@ import {
   organizers,
   stripeConnectAccounts,
   venues,
+  categories,
 } from '../db/schema/index.js';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import ApiError from '../utils/api-error.js';
 import { StripeConnectService, getReserveRate } from './stripeConnect.service.js';
 import { SubscriptionService } from './subscription.service.js';
@@ -231,9 +232,28 @@ export class PaymentService {
         eventMode: events.eventMode,
         venueId: events.venueId,
         tax: events.tax,
+        categoryIds: events.categoryIds,
       })
       .from(events)
       .where(eq(events.id, order.eventId));
+
+    // Tax (event ticketing) — Eventtax.pdf calls out two distinct Stripe
+    // product tax codes (txcd_50010003 spectator admissions vs
+    // txcd_50013001 business conferences) and says "we need to make sure we
+    // apply the right product code." The seeded "Business" category
+    // ("Conferences, networking events, and professional meetups" —
+    // scripts/seed-categories.js) is the only signal this app models for
+    // that distinction, so an event tagged with it is treated as a business
+    // conference for tax-code purposes; everything else defaults to
+    // spectator admissions, same as before.
+    let isBusinessConference = false;
+    if (Array.isArray(eventInfo?.categoryIds) && eventInfo.categoryIds.length > 0) {
+      const [businessCategory] = await db
+        .select({ id: categories.id })
+        .from(categories)
+        .where(and(inArray(categories.id, eventInfo.categoryIds), eq(categories.name, 'Business')));
+      isBusinessConference = !!businessCategory;
+    }
 
     // Tax (event ticketing) — TAX_STRATEGY.md §2, NOT legally reviewed.
     // Venue lookup only happens for in-person events with an actual venue
@@ -414,6 +434,7 @@ export class PaymentService {
       eventMode: eventInfo?.eventMode,
       subtotalCents: subtotalCents + platformFeeCents,
       organizerTax: eventInfo?.tax || null,
+      isBusinessConference,
     });
 
     // A virtual event in a facilitator jurisdiction needs Stripe to

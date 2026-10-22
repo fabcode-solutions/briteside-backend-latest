@@ -25,6 +25,7 @@ import {
   createShopCheckout,
   prepareShopNativeCheckout,
   createShopNativePaymentIntent,
+  previewShopNativeTax,
   finalizeShopNativePayment,
   getShopIapBuyOptions,
   finalizeShopIapPurchase,
@@ -282,6 +283,7 @@ router.post('/products/:productId/checkout', createShopCheckout);
 // Native Briteside checkout (NativeCheckoutModal) — prepare/intent/finalize split.
 router.post('/products/:productId/checkout/prepare', prepareShopNativeCheckout);
 router.post('/orders/:orderId/native-intent', createShopNativePaymentIntent);
+router.post('/orders/:orderId/native-tax-preview', previewShopNativeTax);
 router.post('/orders/:orderId/native-finalize', finalizeShopNativePayment);
 // App-only — the web checkout above is untouched by these two.
 router.get('/products/:productId/iap/buy-options', getShopIapBuyOptions);

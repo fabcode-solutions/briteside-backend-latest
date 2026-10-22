@@ -187,6 +187,40 @@ describe('EventTaxService.computeTax', () => {
     });
   });
 
+  it('defaults to the spectator-admissions tax code when the event is not a business conference', async () => {
+    const result = await EventTaxService.computeTax({
+      venue: { state: 'CA', address: '123 Main St' },
+      eventMode: 'in_person',
+      subtotalCents: 10_000,
+      organizerTax: null,
+    });
+    expect(result.taxCode).toBe('txcd_50010003');
+  });
+
+  it('uses the business-conference tax code when the event is tagged as one', async () => {
+    const result = await EventTaxService.computeTax({
+      venue: { state: 'CA', address: '123 Main St' },
+      eventMode: 'in_person',
+      subtotalCents: 10_000,
+      organizerTax: null,
+      isBusinessConference: true,
+    });
+    expect(result.taxCode).toBe('txcd_50013001');
+  });
+
+  it('tags the Stripe Tax Calculation line item with the business-conference code for an in-person facilitator event', async () => {
+    calculationsCreate.mockResolvedValue({ tax_amount_exclusive: 500 });
+    await EventTaxService.computeTax({
+      venue: { state: 'TX', address: '123 Main St', countryCode: 'US' },
+      eventMode: 'in_person',
+      subtotalCents: 10_000,
+      organizerTax: null,
+      isBusinessConference: true,
+    });
+    const callArgs = calculationsCreate.mock.calls[0][0];
+    expect(callArgs.line_items[0].tax_code).toBe('txcd_50013001');
+  });
+
   it('fails toward $0 tax if the Stripe Tax Calculation call errors', async () => {
     calculationsCreate.mockRejectedValue(new Error('Stripe is down'));
     const result = await EventTaxService.computeTax({

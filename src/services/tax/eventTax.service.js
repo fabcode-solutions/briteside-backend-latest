@@ -45,6 +45,13 @@ export class EventTaxService {
    * @param {string} params.eventMode - 'in_person' | 'virtual'
    * @param {number} params.subtotalCents - the taxable "Buyer Total" (ticket subtotal + any passed-on platform fee — see TAX_STRATEGY.md §2.1; the caller in payment.service.js already adds the platform fee in before passing this).
    * @param {object|null} params.organizerTax - the event's persisted `tax` opt-in object, or null.
+   * @param {boolean} [params.isBusinessConference] - Eventtax.pdf calls out
+   *   two distinct Stripe product tax codes and warns "we need to make sure
+   *   we apply the right product code" — applying the wrong one risks
+   *   Stripe treating a taxable entertainment ticket as exempt, or vice
+   *   versa. True selects the business-conference code; the caller (see
+   *   payment.service.js) derives this from the event's seeded "Business"
+   *   category, the only signal this app models for the distinction.
    * @returns {Promise<{
    *   jurisdictionStatus: 'facilitator'|'organizer'|'no-sales-tax'|'unknown',
    *   amountCents: number,
@@ -60,8 +67,10 @@ export class EventTaxService {
    *   is the exact amount to add as an explicit line item (0 means no tax
    *   line at all).
    */
-  static async computeTax({ venue, eventMode, subtotalCents, organizerTax }) {
-    const taxCode = EVENT_TAX_CODES.SPECTATOR_ADMISSIONS;
+  static async computeTax({ venue, eventMode, subtotalCents, organizerTax, isBusinessConference = false }) {
+    const taxCode = isBusinessConference
+      ? EVENT_TAX_CODES.BUSINESS_CONFERENCE
+      : EVENT_TAX_CODES.SPECTATOR_ADMISSIONS;
     const { status: jurisdictionStatus } = getEventTaxStatus(
       venue?.state,
       venue?.city,
