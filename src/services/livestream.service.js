@@ -193,6 +193,65 @@ export class LivestreamService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // RECORDINGS — host's own streams that have GetStream recordings.
+  // Recording URLs are signed + expiring, so they are fetched fresh per request
+  // and never stored.
+  // ─────────────────────────────────────────────────────────────────────────
+  static async getRecordingsForCall(stream) {
+    const call = streamClient.video.call(LIVESTREAM_CALL_TYPE, stream.streamCallId);
+    const { recordings } = await call.listRecordings();
+    return (recordings ?? []).map(r => ({
+      filename: r.filename,
+      url: r.url,
+      sessionId: r.session_id,
+      startTime: r.start_time,
+      endTime: r.end_time,
+    }));
+  }
+
+  static async deleteRecording({ livestreamId, userId, sessionId, filename }) {
+    const stream = await db.query.livestreams.findFirst({
+      where: eq(livestreams.id, livestreamId),
+    });
+    if (!stream) throw new ApiError(404, 'Livestream not found.');
+    if (stream.userId !== userId) throw new ApiError(403, 'Not authorised.');
+
+    // Only delete a recording that actually belongs to this call, so a caller
+    // can't pass an arbitrary session/filename pair.
+    const recordings = await LivestreamService.getRecordingsForCall(stream);
+    const match = recordings.find(r => r.sessionId === sessionId && r.filename === filename);
+    if (!match) throw new ApiError(404, 'Recording not found.');
+
+    const call = streamClient.video.call(LIVESTREAM_CALL_TYPE, stream.streamCallId);
+    await call.deleteRecording({ session: sessionId, filename });
+  }
+
+  static async getMyRecordings({ userId, limit = 20 }) {
+    const rows = await db.query.livestreams.findMany({
+      where: eq(livestreams.userId, userId),
+      orderBy: desc(livestreams.createdAt),
+      limit,
+    });
+
+    const results = await Promise.allSettled(
+      rows.map(async stream => ({
+        stream,
+        recordings: await LivestreamService.getRecordingsForCall(stream),
+      }))
+    );
+
+    return results
+      .filter(r => {
+        if (r.status === 'rejected') {
+          console.warn('[livestream] listRecordings failed:', r.reason?.message);
+          return false;
+        }
+        return r.value.recordings.length > 0;
+      })
+      .map(r => r.value);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // GET all currently LIVE streams (for Spotlight in social tab)
   // ─────────────────────────────────────────────────────────────────────────
   static async getActiveLivestreams({ page = 1, limit = 20, viewerId } = {}) {

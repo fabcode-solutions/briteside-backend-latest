@@ -15,6 +15,8 @@ import {
   getComments,
   deleteComment,
   generateToken,
+  getMyRecordings,
+  deleteRecording,
 } from '../controllers/livestream.controller.js';
 
 const router = express.Router();
@@ -33,6 +35,9 @@ router.get('/active', getActiveLivestreams);
 // GET /livestream/following        – live streams from followed users
 router.get('/following', getFollowingLivestreams);
 
+// GET /livestream/recordings       – host's own recordings (must stay above /:id)
+router.get('/recordings', getMyRecordings);
+
 // ─── Stream lifecycle ─────────────────────────────────────────────────────
 // POST /livestream/start
 router.post('/start', startLivestream);
@@ -42,6 +47,9 @@ router.get('/:id', getLivestream);
 
 // POST /livestream/:id/end
 router.post('/:id/end', endLivestream);
+
+// DELETE /livestream/:id/recordings – body: { sessionId, filename }
+router.delete('/:id/recordings', deleteRecording);
 
 // ─── Viewer tracking ──────────────────────────────────────────────────────
 // POST /livestream/:id/join
