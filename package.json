@@ -18,6 +18,7 @@
     "seed:interests": "node scripts/seed-interests.js",
     "seed:admin": "node scripts/seed-admin-user.js",
     "seed:events": "node scripts/seed-events.js",
+    "seed:groups": "node scripts/seed-groups.js",
     "seed:venues": "node scripts/seed-venues.js",
     "seed:tags": "node scripts/seed-tags.js",
     "seed:users": "node scripts/seed-users.js",
