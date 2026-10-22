@@ -32,7 +32,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "seed:popular-covers": "node scripts/seed-popular-covers.js ./logos ",
-    "seed:popular-covers:prod": "cross-env NODE_ENV=production USE_AWS_SECRETS=true node scripts/seed-popular-covers.js ./logos"
+    "seed:popular-covers:prod": "cross-env NODE_ENV=production USE_AWS_SECRETS=true node scripts/seed-popular-covers.js ./logos",
+    "seed:admin-account": "node scripts/seed-admin-account.js"
   },
   "dependencies": {
     "@apple/app-store-server-library": "^3.1.0",

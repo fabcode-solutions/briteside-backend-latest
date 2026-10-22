@@ -6,6 +6,10 @@ import { eq } from 'drizzle-orm';
 const DEFAULT_ROLES = [
   { name: 'authenticated', description: 'Default role for all authenticated users.' },
   { name: 'admin', description: 'Administrator with full platform access.' },
+  {
+    name: 'support',
+    description: 'Support agent: can use the support dashboard (chats, knowledge base) only.',
+  },
 ];
 
 async function seedRoles() {
