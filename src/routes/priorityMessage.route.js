@@ -14,6 +14,7 @@ import {
   prepareCheckout,
   createNativePaymentIntent,
   finalizeNativePayment,
+  previewNativeTax,
   prepareIapPurchase,
   getIapTiers,
   finalizeIapPurchase,
@@ -59,6 +60,7 @@ router.get('/:paymentId/status', getPaymentStatus);
 // collects the card itself with Stripe Elements instead of embedding Stripe's own.
 router.post('/:paymentId/native-intent', createNativePaymentIntent);
 router.post('/:paymentId/native-finalize', finalizeNativePayment);
+router.post('/:paymentId/native-tax-preview', previewNativeTax);
 // Talent reads received messages — requires priority_messaging feature
 router.get('/received', requireFeature(FEATURES.PRIORITY_MESSAGING), getReceivedMessages);
 router.get('/conversations', requireFeature(FEATURES.PRIORITY_MESSAGING), getPriorityConversations);

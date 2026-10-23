@@ -90,6 +90,12 @@ export const checkProfileUsernameAvailability = catchAsync(async (req, res) => {
   res.json({ success: true, data: result });
 });
 
+export const getUsersSitemap = catchAsync(async (req, res) => {
+  const { page, limit } = req.query;
+  const result = await SocialService.listPublicUsersForSitemap(page, limit);
+  res.json({ success: true, data: result });
+});
+
 export const getSocialProfile = catchAsync(async (req, res) => {
   const { username } = req.params;
   const currentUserId = req.user.id;

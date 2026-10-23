@@ -86,9 +86,25 @@ export const prepareCheckout = catchAsync(async (req, res) => {
 export const createNativePaymentIntent = catchAsync(async (req, res) => {
   const result = await PriorityMessageService.createNativePaymentIntent(
     req.params.paymentId,
-    req.user.id
+    req.user.id,
+    { country: req.body?.country, postalCode: req.body?.postalCode, state: req.body?.state }
   );
   res.status(201).json({ success: true, data: result });
+});
+
+/**
+ * POST /priority-messages/:paymentId/native-tax-preview
+ * Lets NativeCheckoutForm show the real tax amount (and total) as the
+ * sender types their ZIP/state, before they submit payment — mirrors
+ * Shop's own native-tax-preview endpoint.
+ */
+export const previewNativeTax = catchAsync(async (req, res) => {
+  const result = await PriorityMessageService.previewNativeTax(req.params.paymentId, req.user.id, {
+    country: req.body?.country,
+    postalCode: req.body?.postalCode,
+    state: req.body?.state,
+  });
+  res.json({ success: true, data: result });
 });
 
 /**

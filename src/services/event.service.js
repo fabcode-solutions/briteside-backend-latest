@@ -1922,11 +1922,10 @@ export class EventService {
       if (updateData.showTicketsRemaining !== undefined)
         processedEventData.showTicketsRemaining = updateData.showTicketsRemaining;
       // Organizer "Tax Tool" opt-in — TAX_STRATEGY.md §2.2/§2.3, NOT legally
-      // reviewed. `tax: null` explicitly clears a previous opt-in (organizer
-      // toggling self-collection back off); `tax` simply absent from the
-      // request leaves whatever was already saved untouched, same as every
-      // other optional field here.
-      if (updateData.tax !== undefined) processedEventData.tax = updateData.tax;
+      // reviewed. A one-time choice made at creation: updateEventSchema no
+      // longer accepts `tax` at all, and this deliberately never writes it,
+      // so whatever was saved at creation stays untouched for the life of
+      // the event.
       // Note: startDate and endDate are managed by event sessions, not manually updated
 
       processedEventData.updatedAt = new Date();

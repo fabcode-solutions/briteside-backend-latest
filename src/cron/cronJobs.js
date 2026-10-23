@@ -14,6 +14,7 @@ import {
   processAutoEndSessions,
   processReviewReminders,
   processExpiredPendingSessions,
+  processStaleNativeSessionHolds,
   processCustomOfferReviewReminders,
 } from './sessionReminders.js';
 import { runReserveRelease } from './reserveRelease.js';
@@ -87,6 +88,9 @@ export const initializeCronJobs = () => {
 
   // Auto-cancel pending sessions whose scheduled time has passed — runs every 5 minutes
   cron.schedule('*/5 * * * *', runCron('expiredPendingSessions', processExpiredPendingSessions));
+
+  // Release slots held by unpaid in-app (native card) 1:1 bookings — every 5 minutes
+  cron.schedule('*/5 * * * *', runCron('staleNativeSessionHolds', processStaleNativeSessionHolds));
 
   // Auto-end live sessions that have exceeded their booked duration
   cron.schedule('*/5 * * * *', runCron('autoEndSessions', processAutoEndSessions));

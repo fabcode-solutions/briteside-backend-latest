@@ -68,14 +68,19 @@ export const orders = pgTable(
     //   'unknown'       — unresolved venue/state; always untaxed (fail toward $0)
     taxJurisdictionStatus: varchar('tax_jurisdiction_status', { length: 20 }),
     // Amount actually added as a distinct tax line (or, when the
-    // organizer's "absorb tax" toggle is on, the amount carved out of the
-    // organizer's own cut instead of charged on top — see taxAbsorbed). 0
-    // when no tax applies, same convention as the other *Cents columns here.
+    // organizer's "absorb tax" toggle is on, the amount the buyer was NOT
+    // charged on top — see taxAbsorbed). 0 when no tax applies, same
+    // convention as the other *Cents columns here.
     taxAmountCents: integer('tax_amount_cents').default(0),
     // True when the organizer's Tax Tool "Absorb tax" toggle was on for this
-    // order — tax came out of the organizer's own revenue rather than being
-    // added on top of the buyer's total (TAX_STRATEGY.md §2.3). Always false
-    // for facilitator-jurisdiction orders, where Briteside collects on top.
+    // order — the buyer's total excludes this tax amount rather than it
+    // being added on top (TAX_STRATEGY.md §2.3). Either way the full
+    // taxAmountCents still rides through to the organizer's payout
+    // (platformShareCents is never increased by it, absorbed or not) — per
+    // the source doc's unconditional "tax funds pass to the organizer"
+    // rule, the organizer is solely responsible for remitting it, same as
+    // the non-absorbed case. Always false for facilitator-jurisdiction
+    // orders, where Briteside collects on top and withholds it instead.
     taxAbsorbed: boolean('tax_absorbed').default(false),
     // True only for a hosted Checkout Session where Stripe's automatic_tax
     // was enabled (virtual event, Marketplace-Facilitator jurisdiction) —

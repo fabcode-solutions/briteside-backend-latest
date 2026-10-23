@@ -416,6 +416,18 @@ export const processExpiredPendingSessions = async () => {
 };
 
 /**
+ * Frees slots held by native (in-app card) bookings that were never paid —
+ * see TalentSessionService.releaseStaleNativeHolds.
+ */
+export const processStaleNativeSessionHolds = async () => {
+  try {
+    await TalentSessionService.releaseStaleNativeHolds();
+  } catch (err) {
+    logger.error('[SessionReminder] Stale native hold release failed', { error: err.message });
+  }
+};
+
+/**
  * Send a review reminder email to the booker 24h after session completion.
  * Skips if the booker has already submitted a review for that session.
  */

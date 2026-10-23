@@ -22,6 +22,7 @@ import {
   prepareSessionBooking,
   createSessionNativePaymentIntent,
   finalizeSessionNativePayment,
+  previewSessionNativeTax,
   bookSession,
   confirmSession,
   declineSession,
@@ -158,6 +159,7 @@ router.post('/sessions/checkout', authMiddleware, createSessionCheckout);
 router.post('/sessions/checkout/prepare', authMiddleware, prepareSessionBooking);
 router.post('/sessions/:sessionId/native-intent', authMiddleware, createSessionNativePaymentIntent);
 router.post('/sessions/:sessionId/native-finalize', authMiddleware, finalizeSessionNativePayment);
+router.post('/sessions/:sessionId/native-tax-preview', authMiddleware, previewSessionNativeTax);
 router.post('/sessions/book', authMiddleware, bookSession);
 router.post('/sessions/:sessionId/tip/checkout', authMiddleware, createSessionTipCheckout);
 

@@ -109,9 +109,14 @@ export const events = pgTable(
     // meaningful/shown by the frontend in states where Briteside is NOT the
     // required Marketplace Facilitator. Null when the organizer hasn't
     // opted in (or the event is in a facilitator jurisdiction, where this
-    // is never collected). Shape, exactly as sent by the frontend:
+    // is never collected). Set only at creation — updateEventSchema doesn't
+    // accept this field, so it can't be changed afterward. Shape, exactly
+    // as sent by the frontend:
     //   { collectionEnabled, country, registrationId, name, ratePercent,
-    //     appliesToAllTickets, absorbed }
+    //     appliesToAllTickets }
+    // Older rows may still carry a legacy `absorbed` key from before that
+    // sub-toggle was removed — eventTax.service.js reads it defensively for
+    // backward compatibility only; it can no longer be set.
     // NOT legally reviewed — see src/lib/tax/eventTaxJurisdictions.js. The
     // checkout path re-derives the event's actual jurisdiction status from
     // the venue rather than trusting this object's mere presence.

@@ -20,6 +20,7 @@ import {
   postTabLinks,
   events,
   organizers,
+  eventTickets,
 } from '../../db/schema/index.js';
 import { SocialAnalyticsService } from './socialAnalytics.service.js';
 import {
@@ -259,6 +260,46 @@ export class PostService {
   }
 
   /**
+   * Optional deep-link metadata on a URL-type linkButton — distinct from
+   * linkedEventId/_resolveLinkedEvent above, which is a separate, mutually
+   * exclusive way to attach an event (and its full ticket list) to a post.
+   * Here, eventId/ticketId just ride along on an ordinary { label, url }
+   * button so the app can open the event/ticket screen natively instead of
+   * a browser, when the organizer picked one of their own events as the
+   * link target. Both are optional and independently validated: an invalid
+   * or not-owned eventId/ticketId throws rather than silently stripping it,
+   * since the frontend is expected to only ever send IDs it resolved from
+   * the user's own events list — a mismatch here means a real bug, not a
+   * free-text edge case.
+   */
+  static async _resolveLinkButtonEventRef(userId, sanitizedLinkButton, { eventId, ticketId } = {}) {
+    if (!sanitizedLinkButton || !eventId) return sanitizedLinkButton;
+
+    const [owned] = await db
+      .select({ id: events.id })
+      .from(events)
+      .innerJoin(organizers, eq(organizers.id, events.organizerId))
+      .where(and(eq(events.id, eventId), eq(organizers.userId, userId), isNull(events.deletedAt)));
+
+    if (!owned) {
+      throw new ApiError(400, "Link button's eventId must be one of your own events");
+    }
+
+    if (ticketId) {
+      const [ticket] = await db
+        .select({ id: eventTickets.id })
+        .from(eventTickets)
+        .where(and(eq(eventTickets.id, ticketId), eq(eventTickets.eventId, eventId)));
+
+      if (!ticket) {
+        throw new ApiError(400, "Link button's ticketId must belong to its eventId");
+      }
+    }
+
+    return { ...sanitizedLinkButton, eventId, ticketId: ticketId || null };
+  }
+
+  /**
    * Linked event for a page of posts, keyed by postId — display-only fields
    * plus a trimmed ticket list, just enough for the post card to compute the
    * identical "Get Tickets — From $X" CTA the Event Detail page shows,
@@ -366,6 +407,11 @@ export class PostService {
       ...settings,
       linkButton: PostService._sanitizeLinkButton(settings?.linkButton, isPlus),
     };
+    mergedSettings.linkButton = await PostService._resolveLinkButtonEventRef(
+      userId,
+      mergedSettings.linkButton,
+      settings?.linkButton
+    );
 
     // Validated before the insert so an invalid product list fails the whole
     // create instead of leaving a post whose links silently went missing.
@@ -1232,6 +1278,11 @@ export class PostService {
         ...settings,
         linkButton: PostService._sanitizeLinkButton(settings?.linkButton, isPlus),
       };
+      setData.settings.linkButton = await PostService._resolveLinkButtonEventRef(
+        userId,
+        setData.settings.linkButton,
+        settings?.linkButton
+      );
     }
     if (aspectRatios !== undefined) setData.aspectRatios = aspectRatios;
 

@@ -16,6 +16,7 @@ import { ShopDeliverableService } from './shopDeliverable.service.js';
 import { calculatePlatformAndServiceFeeCents } from '../../utils/orderProcessingFee.js';
 import { PayoutLedgerService } from '../payoutLedger.service.js';
 import { resolvePlusTaxCode } from '../../lib/tax/plusProductTaxCodes.js';
+import { normalizeStateToAbbr } from '../../lib/tax/usStates.js';
 import { PlusTaxLiabilityService } from '../tax/plusTaxLiability.service.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
@@ -288,6 +289,44 @@ export class ShopOrderService {
     const automaticTax =
       tax?.taxCode && tax?.liability ? { enabled: true, liability: tax.liability } : undefined;
 
+    const line_items = [
+      {
+        price_data: {
+          currency: 'usd',
+          unit_amount: sellerPriceCents,
+          product_data: {
+            name: product.title,
+            ...(product.coverUrl ? { images: [product.coverUrl] } : {}),
+          },
+        },
+        quantity: 1,
+      },
+      {
+        price_data: {
+          currency: 'usd',
+          unit_amount: platformAndServiceFeeCents,
+          product_data: {
+            name: 'Platform & Service Fee',
+          },
+        },
+        quantity: 1,
+      },
+    ];
+
+    // Checkout's automatic_tax requires EVERY price_data line item to carry
+    // a tax_behavior, not just the taxable one — Stripe rejects session
+    // creation outright otherwise ("One or more provided prices do not have
+    // a tax behavior set"). Tag all of them uniformly once tax is known,
+    // same pattern as payment.service.js's event-ticket Checkout build,
+    // rather than conditionally per-item at line-item-build time (which is
+    // what missed the Platform & Service Fee item before).
+    if (automaticTax) {
+      for (const item of line_items) {
+        item.price_data.tax_behavior = 'exclusive';
+        item.price_data.product_data.tax_code = tax.taxCode;
+      }
+    }
+
     const stripeSession = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
@@ -296,31 +335,7 @@ export class ShopOrderService {
         ? { success_url: redirectUrls.successUrl, cancel_url: redirectUrls.cancelUrl }
         : { ui_mode: 'embedded', return_url: redirectUrls.successUrl }),
       ...(automaticTax ? { automatic_tax: automaticTax } : {}),
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: sellerPriceCents,
-            ...(tax?.taxCode ? { tax_behavior: 'exclusive' } : {}),
-            product_data: {
-              name: product.title,
-              ...(product.coverUrl ? { images: [product.coverUrl] } : {}),
-              ...(tax?.taxCode ? { tax_code: tax.taxCode } : {}),
-            },
-          },
-          quantity: 1,
-        },
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: platformAndServiceFeeCents,
-            product_data: {
-              name: 'Platform & Service Fee',
-            },
-          },
-          quantity: 1,
-        },
-      ],
+      line_items,
       ...((customerEmail || buyer?.email)?.trim()
         ? { customer_email: (customerEmail || buyer.email).trim() }
         : {}),
@@ -364,14 +379,127 @@ export class ShopOrderService {
     return { paymentId: prep.order.id };
   }
 
-  static async createNativePaymentIntent(orderId, buyerId) {
-    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+  /**
+   * A raw PaymentIntent (unlike a Checkout Session) has no automatic_tax —
+   * Stripe never collects a billing address for it, so there's nothing to
+   * source destination-based tax from unless we ask for one ourselves.
+   * NativeCheckoutForm already collects country/ZIP for `billing_details`
+   * before confirming the card — this reuses that same data to run a
+   * standalone Stripe Tax Calculation, mirroring EventTaxService's
+   * venue-anchored calculation (TAX_STRATEGY.md §2.4) but anchored to the
+   * buyer's own address instead (§3.4, destination-based for Plus).
+   *
+   * Scoped to the liable party's own Stripe context (`stripeAccount` when
+   * the creator is liable) so the calculation only sees THEIR registrations,
+   * exactly like PlusTaxLiabilityService's own nexus check.
+   *
+   * Fails toward $0 — same "never guess a nonzero amount, never block the
+   * sale" rule as every other tax call in this codebase — on missing
+   * config, a non-taxable listing type, no liable party, no postal code, or
+   * any Stripe error.
+   *
+   * `state` is optional (Stripe can usually resolve a US state from the ZIP
+   * alone) but index.pdf's own example Tax Calculation payload (§3.5 in
+   * TAX_STRATEGY.md) sends both `postal_code` and `state` together — passed
+   * through when the buyer's form included one, normalized to the USPS
+   * abbreviation Stripe expects.
+   *
+   * @returns {Promise<{ amountCents: number, taxLabel: string|null }>}
+   */
+  static async _calculateNativeTax({ product, chargedCents, country, postalCode, state, liability }) {
+    const none = { amountCents: 0, taxLabel: null };
+    if (!stripe || !liability || !postalCode?.trim()) return none;
 
+    const { taxCode, taxable } = resolvePlusTaxCode(product);
+    if (!taxable || !taxCode) return none;
+
+    const stateAbbr = normalizeStateToAbbr(state);
+
+    try {
+      const calculation = await stripe.tax.calculations.create(
+        {
+          currency: 'usd',
+          line_items: [
+            {
+              amount: chargedCents,
+              reference: 'shop_order',
+              tax_code: taxCode,
+              tax_behavior: 'exclusive',
+            },
+          ],
+          customer_details: {
+            address: {
+              country: country || 'US',
+              postal_code: postalCode.trim(),
+              ...(stateAbbr ? { state: stateAbbr } : {}),
+            },
+            address_source: 'billing',
+          },
+        },
+        liability.type === 'account' ? { stripeAccount: liability.account } : undefined
+      );
+      return { amountCents: calculation.tax_amount_exclusive ?? 0, taxLabel: 'Tax' };
+    } catch (err) {
+      logger.error(`[ShopTax] native tax calculation failed, charging $0 tax: ${err.message}`);
+      return none;
+    }
+  }
+
+  /** Loads the order + product and re-resolves liability fresh (no caching,
+   *  same as every other PlusTaxLiabilityService call site) — shared by
+   *  previewNativeTax and createNativePaymentIntent so both ever compute the
+   *  exact same thing for the exact same order. */
+  static async _loadOrderForNativeTax(orderId, buyerId) {
     const order = await db.query.shopOrders.findFirst({ where: eq(shopOrders.id, orderId) });
     if (!order) throw new ApiError(404, 'Order not found');
     if (order.buyerId !== buyerId) throw new ApiError(403, 'This order is not yours');
     if (order.status !== 'pending') {
       throw new ApiError(409, `This order is already ${order.status}`);
+    }
+    const product = await db.query.shopProducts.findFirst({ where: eq(shopProducts.id, order.productId) });
+    const { liability } = await PlusTaxLiabilityService.resolveLiability(order.sellerId);
+    return { order, product, liability };
+  }
+
+  /** Preview-only — no Stripe PaymentIntent, no DB write. Lets
+   *  NativeCheckoutForm show the real tax amount (and total) BEFORE the
+   *  buyer submits payment, same "never charge more than what was shown"
+   *  rule the ticket-purchase preview already established for events. */
+  static async previewNativeTax(orderId, buyerId, { country, postalCode, state } = {}) {
+    const { order, product, liability } = await this._loadOrderForNativeTax(orderId, buyerId);
+    const { amountCents, taxLabel } = await this._calculateNativeTax({
+      product,
+      chargedCents: order.chargedCents,
+      country,
+      postalCode,
+      state,
+      liability,
+    });
+    return {
+      taxAmountCents: amountCents,
+      taxLabel,
+      totalCents: order.chargedCents + amountCents,
+    };
+  }
+
+  static async createNativePaymentIntent(orderId, buyerId, { country, postalCode, state } = {}) {
+    if (!stripe) throw new ApiError(503, 'Payments are not configured');
+
+    const { order, product, liability } = await this._loadOrderForNativeTax(orderId, buyerId);
+    const { amountCents: taxAmountCents, taxLabel } = await this._calculateNativeTax({
+      product,
+      chargedCents: order.chargedCents,
+      country,
+      postalCode,
+      state,
+      liability,
+    });
+
+    // Persisted now (not just returned) so the payment webhook — which has
+    // no automatic_tax/total_details to read from on this raw-PaymentIntent
+    // path — can pick up the exact same amount that was actually charged.
+    if (taxAmountCents > 0) {
+      await db.update(shopOrders).set({ taxAmountCents }).where(eq(shopOrders.id, order.id));
     }
 
     const buyer = await db.query.users.findFirst({
@@ -380,7 +508,7 @@ export class ShopOrderService {
     });
 
     const intent = await stripe.paymentIntents.create({
-      amount: order.chargedCents,
+      amount: order.chargedCents + taxAmountCents,
       currency: 'usd',
       ...((order.customerEmail || buyer?.email)?.trim()
         ? { receipt_email: (order.customerEmail || buyer.email).trim() }
@@ -397,7 +525,7 @@ export class ShopOrderService {
       // ledger and paid out later, not split at charge time.
     });
 
-    return { clientSecret: intent.client_secret, paymentId: order.id };
+    return { clientSecret: intent.client_secret, paymentId: order.id, taxAmountCents, taxLabel };
   }
 
   static async finalizeNativePayment(orderId, buyerId, paymentIntentId) {
@@ -458,10 +586,13 @@ export class ShopOrderService {
     // completes — order.taxLiability only recorded *who* we asked Stripe to
     // check at session-creation time (see ShopOrderService._prepareOrder).
     // `total_details` is absent on the synthetic "session" object the native
-    // PaymentIntent flow passes in (finalizeNativePayment) — that flow has
-    // no automatic_tax support yet (see createNativePaymentIntent), so
-    // taxAmountCents correctly stays 0 for it rather than guessing.
-    const taxAmountCents = stripeSession.total_details?.amount_tax ?? 0;
+    // PaymentIntent flow passes in (finalizeNativePayment) — that flow runs
+    // its own standalone Tax Calculation instead (createNativePaymentIntent's
+    // _calculateNativeTax) and persists the result onto order.taxAmountCents
+    // *before* the intent is even created, so it's already the right value
+    // by the time this webhook runs — just not re-derivable from
+    // `stripeSession` itself the way the hosted-Checkout path's is.
+    const taxAmountCents = stripeSession.total_details?.amount_tax ?? order.taxAmountCents ?? 0;
     // When the CREATOR is the liable party, TAX_STRATEGY.md §3.6 requires the
     // collected tax to flow into the creator's own payout alongside their
     // earnings ("Briteside never holds the $7.50") — add it to what this

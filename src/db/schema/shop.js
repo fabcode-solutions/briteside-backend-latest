@@ -612,6 +612,14 @@ export const shopCustomServiceOffers = pgTable(
     stripePaymentIntentId: varchar('stripe_payment_intent_id', { length: 255 }),
     stripeCustomerId: varchar('stripe_customer_id', { length: 255 }),
 
+    // Tax (Services) — TAX_STRATEGY.md §3.1, same 'service_not_taxable' bucket
+    // as 1:1 video/priority messages. Same names/shape as shop_orders' own
+    // pair above. taxAmountCents accumulates across every payment event on
+    // this offer (accept + remainder); taxLiability reflects the most recent
+    // checkout's liability resolution.
+    taxLiability: varchar('tax_liability', { length: 10 }).default('none'),
+    taxAmountCents: integer('tax_amount_cents').notNull().default(0),
+
     // Delivery-based escrow — the seller's cut from each payment (deposit,
     // remainder, tip) isn't transferred at charge time; it accumulates here.
     // Two-stage per PAYMENTS_ARCHITECTURE.md Phase 1: 85% moves to the
@@ -686,6 +694,13 @@ export const shopOfferMilestones = pgTable(
     chargedCents: integer('charged_cents'),
     sellerReceiveCents: integer('seller_receive_cents'),
     platformShareCents: integer('platform_share_cents'),
+
+    // Tax (Services) — each stage is its own Checkout session/PaymentIntent
+    // with its own tax calculation, so it tracks liability/amount per-row
+    // like it already tracks chargedCents/sellerReceiveCents per-row. See
+    // shop_custom_service_offers.taxLiability/taxAmountCents above.
+    taxLiability: varchar('tax_liability', { length: 10 }).default('none'),
+    taxAmountCents: integer('tax_amount_cents').notNull().default(0),
 
     stripeSessionId: varchar('stripe_session_id', { length: 255 }),
     stripePaymentIntentId: varchar('stripe_payment_intent_id', { length: 255 }),

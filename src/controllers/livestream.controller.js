@@ -59,6 +59,28 @@ export const getActiveLivestreams = catchAsync(async (req, res) => {
   res.json({ success: true, data: { streams } });
 });
 
+// ─── GET /livestream/recordings ───────────────────────────────────────────
+// The authenticated host's own streams that have recordings
+export const getMyRecordings = catchAsync(async (req, res) => {
+  const items = await LivestreamService.getMyRecordings({ userId: req.user.id });
+  res.json({ success: true, data: { items } });
+});
+
+// ─── DELETE /livestream/:id/recordings ────────────────────────────────────
+export const deleteRecording = catchAsync(async (req, res) => {
+  const { id: livestreamId } = req.params;
+  const { sessionId, filename } = req.body ?? {};
+  if (!sessionId || !filename) throw new ApiError(400, 'sessionId and filename are required.');
+
+  await LivestreamService.deleteRecording({
+    livestreamId,
+    userId: req.user.id,
+    sessionId,
+    filename,
+  });
+  res.json({ success: true, message: 'Recording deleted.' });
+});
+
 // ─── GET /livestream/following ────────────────────────────────────────────
 // Live streams from users the authenticated user follows
 export const getFollowingLivestreams = catchAsync(async (req, res) => {

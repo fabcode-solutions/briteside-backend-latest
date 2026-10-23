@@ -43,6 +43,7 @@ import {
   buildServiceAutomaticTax,
   applyTaxLiabilityToReserve,
 } from '../lib/tax/serviceCheckoutTax.js';
+import { normalizeStateToAbbr } from '../lib/tax/usStates.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 
@@ -994,24 +995,95 @@ export class PriorityMessageService {
    * Mirrors chargeExistingPendingPayment()'s PaymentIntent shape, minus
    * `confirm`/`off_session`/`payment_method` — this card doesn't exist yet.
    */
-  static async createNativePaymentIntent(paymentId, requesterId) {
+  // Standalone Stripe Tax Calculation for the native (raw PaymentIntent)
+  // path — mirrors ShopCustomOfferService._calculateServiceNativeTax /
+  // ShopOrderService._calculateNativeTax, simplified since priority messages
+  // always use the one fixed SERVICE_TAX_CODE. Unlike hosted Checkout's
+  // automatic_tax, there's no built-in address collection here, so this
+  // only runs once the caller has a billing postal code to anchor the
+  // lookup to — absent one, charges $0 tax rather than guessing.
+  static async _calculateNativeTax({ chargedCents, country, postalCode, state, liability }) {
+    const none = { amountCents: 0, taxLabel: null };
+    if (!stripe || !liability || !postalCode?.trim()) return none;
+    try {
+      const stateAbbr = normalizeStateToAbbr(state);
+      const calculation = await stripe.tax.calculations.create(
+        {
+          currency: 'usd',
+          line_items: [
+            {
+              amount: chargedCents,
+              reference: 'priority_message',
+              tax_code: SERVICE_TAX_CODE,
+              tax_behavior: 'exclusive',
+            },
+          ],
+          customer_details: {
+            address: {
+              country: country || 'US',
+              postal_code: postalCode.trim(),
+              ...(stateAbbr ? { state: stateAbbr } : {}),
+            },
+            address_source: 'billing',
+          },
+        },
+        liability.type === 'account' ? { stripeAccount: liability.account } : undefined
+      );
+      return { amountCents: calculation.tax_amount_exclusive ?? 0, taxLabel: 'Tax' };
+    } catch (err) {
+      console.error(`[PriorityMessageTax] native tax calculation failed, charging $0 tax: ${err.message}`);
+      return none;
+    }
+  }
+
+  /** Preview-only — no Stripe PaymentIntent, no DB write. Lets
+   *  NativeCheckoutForm show the real tax amount (and total) BEFORE the
+   *  sender submits payment, same "never charge more than what was shown"
+   *  rule the Shop native-checkout preview already established. */
+  static async previewNativeTax(paymentId, requesterId, { country, postalCode, state } = {}) {
+    const ctx = await this._loadPendingPaymentContext(paymentId);
+    const { payment, chargedCents, tax } = ctx;
+    if (payment.senderId !== requesterId) throw new ApiError(403, 'Forbidden');
+
+    const { amountCents, taxLabel } = await this._calculateNativeTax({
+      chargedCents,
+      country,
+      postalCode,
+      state,
+      liability: tax?.liability,
+    });
+    return {
+      taxAmountCents: amountCents,
+      taxLabel,
+      totalCents: chargedCents + amountCents,
+    };
+  }
+
+  static async createNativePaymentIntent(
+    paymentId,
+    requesterId,
+    { country, postalCode, state } = {}
+  ) {
     if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
 
     const ctx = await this._loadPendingPaymentContext(paymentId);
-    const { payment, profile, chargedCents } = ctx;
+    const { payment, profile, chargedCents, tax } = ctx;
 
     if (payment.senderId !== requesterId) throw new ApiError(403, 'Forbidden');
     if (payment.status !== 'pending') {
       throw new ApiError(409, 'This payment is no longer pending');
     }
 
-    // No automatic_tax/Tax Calculation here either, deliberately — same
-    // reasoning as chargeExistingPendingPayment's direct charge above: a raw
-    // PaymentIntent has no Checkout-hosted form to collect the sender's
-    // billing address live, so there is no address to anchor a Stripe Tax
-    // Calculation call to. taxAmountCents correctly stays 0 for this flow.
+    const { amountCents: taxAmountCents } = await this._calculateNativeTax({
+      chargedCents,
+      country,
+      postalCode,
+      state,
+      liability: tax?.liability,
+    });
+
     const intent = await stripe.paymentIntents.create({
-      amount: chargedCents,
+      amount: chargedCents + taxAmountCents,
       currency: 'usd',
       automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
       metadata: {
@@ -1021,12 +1093,24 @@ export class PriorityMessageService {
         senderId: requesterId,
         talentProfileId: payment.talentProfileId,
         talentUserId: profile.userId,
+        // Carried through to finalizeNativePayment's retrieve() call, which
+        // has no total_details to read tax from on a raw PaymentIntent —
+        // see _deliverPaidPayment's taxAmountCents param.
+        taxAmountCents: String(taxAmountCents),
       },
     });
 
     await db
       .update(priorityMessagePayments)
-      .set({ stripePaymentIntent: intent.id, updatedAt: new Date() })
+      .set({
+        stripePaymentIntent: intent.id,
+        // Re-stamped with this native-intent's own freshly-resolved
+        // liability (not just whatever was resolved at prepare() time) so
+        // _deliverPaidPayment's later read of payment.taxLiability matches
+        // exactly what this calculation actually used.
+        taxLiability: tax?.liability ? tax.liability.type : 'none',
+        updatedAt: new Date(),
+      })
       .where(eq(priorityMessagePayments.id, payment.id));
 
     return { clientSecret: intent.client_secret, paymentId: payment.id };
@@ -1062,12 +1146,20 @@ export class PriorityMessageService {
       throw new ApiError(402, `Payment has not completed (status: ${intent.status})`);
     }
 
+    // Tax — set by createNativePaymentIntent into the intent's own metadata
+    // (not read from total_details, which doesn't exist on a raw
+    // PaymentIntent — see that function's comment).
+    const taxAmountCents = intent.metadata?.taxAmountCents
+      ? Number(intent.metadata.taxAmountCents) || 0
+      : 0;
+
     await this._deliverPaidPayment(paymentId, {
       senderId: requesterId,
       talentUserId: profile.userId,
       io,
       paidFields: { stripePaymentIntent: intent.id },
       spendFields: { stripePaymentIntentId: intent.id },
+      taxAmountCents,
     });
 
     return { success: true, paymentId: payment.id };
@@ -1091,13 +1183,13 @@ export class PriorityMessageService {
     // Mirrors ShopOrderService.handlePaymentWebhook: the amount actually
     // calculated/collected by Stripe only exists once the session completes
     // — payment.taxLiability (set at createCheckout time) only recorded *who*
-    // we asked Stripe to check. `total_details` is absent on the synthetic
-    // "session" object the native/quick-pay PaymentIntent paths pass to
-    // _deliverPaidPayment directly (chargeExistingPendingPayment,
-    // createNativePaymentIntent/finalizeNativePayment) — those never go
-    // through this webhook at all, so taxAmountCents correctly stays 0 for
-    // them rather than guessing (no billing-address collection point to
-    // anchor a tax calculation to).
+    // we asked Stripe to check. `total_details` is only present on the real
+    // hosted-Checkout session this webhook handles. The native-PaymentIntent
+    // path (createNativePaymentIntent/finalizeNativePayment) never reaches
+    // this webhook at all — it computes and passes its own taxAmountCents
+    // directly into _deliverPaidPayment. chargeExistingPendingPayment (the
+    // saved-card quick-pay path) still has no address-collection point to
+    // anchor a calculation to, so it correctly stays at the 0 default there.
     const taxAmountCents = stripeSession.total_details?.amount_tax ?? 0;
 
     await this._deliverPaidPayment(paymentId, {
@@ -1126,9 +1218,11 @@ export class PriorityMessageService {
    *   Connect release cron. false for IAP — Apple/Google collect that money,
    *   not Stripe, so there's nothing in Stripe to transfer (same as shop IAP).
    * @param {number} opts.taxAmountCents  actual tax Stripe calculated/collected
-   *   on this payment's Checkout Session — 0 (the default) for every
-   *   channel/path that never went through automatic_tax (native/quick-pay
-   *   PaymentIntents, IAP), same fail-toward-$0 convention as everywhere else.
+   *   for this payment — passed explicitly by the hosted-Checkout webhook and
+   *   by the native PaymentIntent path (createNativePaymentIntent's own Tax
+   *   Calculation). Stays 0 (the default) for quick-pay and IAP, which have
+   *   no address-collection point to run a calculation against — same
+   *   fail-toward-$0 convention as everywhere else.
    * @returns {{ conversationId, messageIds } | null}
    */
   static async _deliverPaidPayment(

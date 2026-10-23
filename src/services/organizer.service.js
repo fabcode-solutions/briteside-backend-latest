@@ -1,6 +1,6 @@
 import { db } from '../db/index.js';
 import { organizers } from '../db/schema/index.js';
-import { eq } from 'drizzle-orm';
+import { eq, count } from 'drizzle-orm';
 import { generateOrganizerCode } from '../utils/code-generator.js';
 import ApiError from '../utils/api-error.js';
 import { sql } from 'drizzle-orm';
@@ -43,7 +43,10 @@ export class OrganizerService {
     return organizer;
   }
 
-  static async getOrganizers() {
+  static async getOrganizers({ page, limit } = {}) {
+    const pageNum = page ? Math.max(1, parseInt(page, 10)) : undefined;
+    const limitNum = limit ? Math.max(1, parseInt(limit, 10)) : undefined;
+
     const allOrganizers = await db.query.organizers.findMany({
       with: {
         user: {
@@ -56,9 +59,26 @@ export class OrganizerService {
         },
       },
       orderBy: (organizers, { desc }) => [desc(organizers.createdAt)],
+      ...(limitNum
+        ? { limit: limitNum, offset: ((pageNum || 1) - 1) * limitNum }
+        : {}),
     });
 
-    return allOrganizers;
+    if (!limitNum) {
+      return { organizers: allOrganizers };
+    }
+
+    const [{ total }] = await db.select({ total: count() }).from(organizers);
+
+    return {
+      organizers: allOrganizers,
+      pagination: {
+        page: pageNum || 1,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+      },
+    };
   }
 
   static async getOrganizerByUserId(userId) {

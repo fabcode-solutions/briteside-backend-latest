@@ -60,6 +60,7 @@ import {
   buildServiceAutomaticTax,
   applyTaxLiabilityToReserve,
 } from '../lib/tax/serviceCheckoutTax.js';
+import { normalizeStateToAbbr } from '../lib/tax/usStates.js';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
@@ -1553,9 +1554,52 @@ export class TalentSessionService {
   // minimal shimmed "session" object, same trick as the ticket PaymentSheet
   // flow's processPaymentSheetIntent → handleCheckoutSession.
 
-  static async createNativePaymentIntent(sessionId, bookerId) {
-    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+  // Standalone Stripe Tax Calculation for the native (raw PaymentIntent)
+  // path — mirrors ShopCustomOfferService._calculateServiceNativeTax /
+  // PriorityMessageService._calculateNativeTax, simplified since 1:1 video
+  // bookings always use the one fixed SERVICE_TAX_CODE. Unlike hosted
+  // Checkout's automatic_tax, there's no built-in address collection here,
+  // so this only runs once the caller has a billing postal code to anchor
+  // the lookup to — absent one, charges $0 tax rather than guessing.
+  static async _calculateNativeTax({ chargedCents, country, postalCode, state, liability }) {
+    const none = { amountCents: 0, taxLabel: null };
+    if (!stripe || !liability || !postalCode?.trim()) return none;
+    try {
+      const stateAbbr = normalizeStateToAbbr(state);
+      const calculation = await stripe.tax.calculations.create(
+        {
+          currency: 'usd',
+          line_items: [
+            {
+              amount: chargedCents,
+              reference: 'talent_session',
+              tax_code: SERVICE_TAX_CODE,
+              tax_behavior: 'exclusive',
+            },
+          ],
+          customer_details: {
+            address: {
+              country: country || 'US',
+              postal_code: postalCode.trim(),
+              ...(stateAbbr ? { state: stateAbbr } : {}),
+            },
+            address_source: 'billing',
+          },
+        },
+        liability.type === 'account' ? { stripeAccount: liability.account } : undefined
+      );
+      return { amountCents: calculation.tax_amount_exclusive ?? 0, taxLabel: 'Tax' };
+    } catch (err) {
+      console.error(`[TalentSessionTax] native tax calculation failed, charging $0 tax: ${err.message}`);
+      return none;
+    }
+  }
 
+  /** Loads the session + talent profile + pre-tax charge, and re-resolves
+   *  liability fresh (no caching) — shared by createNativePaymentIntent and
+   *  previewNativeTax so both ever compute the exact same thing for the
+   *  exact same session. */
+  static async _loadSessionForNativeTax(sessionId, bookerId) {
     const session = await db.query.talentSessions.findFirst({
       where: eq(talentSessions.id, sessionId),
     });
@@ -1570,13 +1614,57 @@ export class TalentSessionService {
     });
     if (!profile) throw new ApiError(404, 'Talent not found');
 
-    const booker = await db.query.users.findFirst({ where: eq(users.id, bookerId) });
-
     const platformAndServiceFeeCents = calculatePlatformAndServiceFeeCents(session.priceCents);
     const chargedCents = session.priceCents + platformAndServiceFeeCents;
 
+    // Tax (1:1 video bookings) — resolved fresh here (not reused from
+    // whatever _prepareSessionBooking resolved at booking time) so a
+    // creator's nexus/registration change between booking and payment is
+    // always reflected, same reasoning as every other checkout flow.
+    const { liability } = await PlusTaxLiabilityService.resolveLiability(profile.userId);
+
+    return { session, profile, chargedCents, liability };
+  }
+
+  /** Preview-only — no Stripe PaymentIntent, no DB write. Lets
+   *  NativeCheckoutForm show the real tax amount (and total) BEFORE the
+   *  booker submits payment, same "never charge more than what was shown"
+   *  rule the Shop native-checkout preview already established. */
+  static async previewNativeTax(sessionId, bookerId, { country, postalCode, state } = {}) {
+    const { chargedCents, liability } = await this._loadSessionForNativeTax(sessionId, bookerId);
+    const { amountCents, taxLabel } = await this._calculateNativeTax({
+      chargedCents,
+      country,
+      postalCode,
+      state,
+      liability,
+    });
+    return {
+      taxAmountCents: amountCents,
+      taxLabel,
+      totalCents: chargedCents + amountCents,
+    };
+  }
+
+  static async createNativePaymentIntent(sessionId, bookerId, { country, postalCode, state } = {}) {
+    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+
+    const { session, profile, chargedCents, liability } = await this._loadSessionForNativeTax(
+      sessionId,
+      bookerId
+    );
+    const booker = await db.query.users.findFirst({ where: eq(users.id, bookerId) });
+
+    const { amountCents: taxAmountCents } = await this._calculateNativeTax({
+      chargedCents,
+      country,
+      postalCode,
+      state,
+      liability,
+    });
+
     const intent = await stripe.paymentIntents.create({
-      amount: chargedCents,
+      amount: chargedCents + taxAmountCents,
       currency: 'usd',
       ...(booker?.email?.trim() ? { receipt_email: booker.email.trim() } : {}),
       metadata: {
@@ -1584,18 +1672,23 @@ export class TalentSessionService {
         sessionId: session.id,
         bookerId,
         talentUserId: profile.userId,
+        // Carried through to finalizeNativePayment's shimmed "session" —
+        // handlePaymentWebhook has no total_details to read tax from on a
+        // raw PaymentIntent, so it falls back to this.
+        taxAmountCents: String(taxAmountCents),
       },
       // No transfer_data/application_fee_amount — same deliver-first escrow
       // rule as _createHostedSessionCheckout: the talent's cut is held and
       // paid out later, not split at charge time.
-      // No automatic_tax/Tax Calculation here either, deliberately — a raw
-      // PaymentIntent has no Checkout-hosted form to collect the booker's
-      // billing address live, so there is no address to anchor a Stripe Tax
-      // Calculation call to. Same open question flagged for virtual
-      // facilitator events on native checkout (payment.service.js's
-      // allowAutomaticTax) — this session's taxAmountCents correctly stays 0
-      // rather than guessing a jurisdiction.
     });
+
+    // Re-stamped with this native-intent's own freshly-resolved liability so
+    // handlePaymentWebhook's later read of existing.taxLiability matches
+    // exactly what this calculation actually used.
+    await db
+      .update(talentSessions)
+      .set({ taxLiability: liability ? liability.type : 'none', updatedAt: new Date() })
+      .where(eq(talentSessions.id, session.id));
 
     return { clientSecret: intent.client_secret, paymentId: session.id };
   }
@@ -1693,18 +1786,17 @@ export class TalentSessionService {
     const baseTalentNetCents = existing.priceCents - Math.round(existing.priceCents * 0.05);
 
     // Tax (1:1 video bookings) — TAX_STRATEGY.md §3.6, NOT legally reviewed.
-    // Mirrors ShopOrderService.handlePaymentWebhook: the amount actually
-    // calculated/collected by Stripe (booker's real billing state, checked
-    // live during Checkout) only exists once the session completes —
-    // existing.taxLiability only recorded *who* we asked Stripe to check at
-    // booking time (see _prepareSessionBooking). `total_details` is absent on
-    // the synthetic "session" object the native PaymentIntent flow passes in
-    // (finalizeNativePayment/createNativePaymentIntent) and on the
-    // payment_intent.succeeded safety-net webhook — those flows have no
-    // automatic_tax support (no billing-address collection point to anchor a
-    // tax calculation to), so taxAmountCents correctly stays 0 for them
-    // rather than guessing.
-    const taxAmountCents = stripeSession.total_details?.amount_tax ?? 0;
+    // Mirrors ShopOrderService.handlePaymentWebhook's dual-path extraction:
+    // `total_details` covers the hosted-Checkout path (booker's real billing
+    // state, checked live during Checkout). The native PaymentIntent path
+    // (finalizeNativePayment/createNativePaymentIntent) and the
+    // payment_intent.succeeded safety-net webhook both pass the real
+    // PaymentIntent's own metadata, which carries taxAmountCents set at
+    // createNativePaymentIntent's own Tax Calculation — see that function.
+    const nativeTaxAmountCents = stripeSession.metadata?.taxAmountCents
+      ? Number(stripeSession.metadata.taxAmountCents) || 0
+      : 0;
+    const taxAmountCents = stripeSession.total_details?.amount_tax ?? nativeTaxAmountCents;
     const talentNetCents = applyTaxLiabilityToReserve(
       baseTalentNetCents,
       taxAmountCents,
@@ -1848,6 +1940,58 @@ export class TalentSessionService {
         await mailService.sendMail(talentUser.email, subject, html);
       },
     });
+  }
+
+  // ── Release abandoned native-checkout holds ───────────────────────────────
+  // A hosted Checkout Session expires after 30 min and its webhook frees the
+  // slot (handlePaymentExpired); a native PaymentIntent never expires, so
+  // `awaiting_payment` rows with no Checkout Session are released here after
+  // the same window. Unpaid intents are cancelled first so a late
+  // confirmation can't charge for a released slot; one that did succeed (its
+  // webhook/finalize never landed) is fulfilled instead.
+  static async releaseStaleNativeHolds() {
+    if (!stripe) return;
+    const cutoff = new Date(Date.now() - 30 * 60_000);
+    const stale = await db.query.talentSessions.findMany({
+      where: and(
+        eq(talentSessions.status, 'awaiting_payment'),
+        isNull(talentSessions.stripeSessionId),
+        lte(talentSessions.createdAt, cutoff)
+      ),
+    });
+
+    for (const session of stale) {
+      try {
+        // createNativePaymentIntent doesn't store the intent on the row (cancel()
+        // would treat it as paid and try to refund), so look it up by metadata.
+        const { data: intents } = await stripe.paymentIntents.search({
+          query: `metadata['sessionId']:'${session.id}'`,
+        });
+
+        const paid = intents.find(pi => pi.status === 'succeeded');
+        if (paid) {
+          await this.handlePaymentWebhook({
+            id: null,
+            payment_intent: paid.id,
+            amount_total: paid.amount_received || paid.amount,
+            metadata: paid.metadata,
+          });
+          continue;
+        }
+        // Still settling — leave the hold; a later run sees the final status.
+        if (intents.some(pi => pi.status === 'processing')) continue;
+
+        for (const pi of intents) {
+          if (pi.status !== 'canceled') await stripe.paymentIntents.cancel(pi.id);
+        }
+        await this.handlePaymentExpired({ metadata: { sessionId: session.id } });
+      } catch (err) {
+        console.error(
+          `[TalentSession] Failed to release stale native hold ${session.id}:`,
+          err.message
+        );
+      }
+    }
   }
 
   // ── Handle Stripe checkout expired — release the slot ─────────────────────
@@ -3251,7 +3395,7 @@ export class TalentSessionService {
 
   // ── List sessions for a user (as booker or talent) ────────────────────────
 
-  static async listForUser(userId, { role = 'all', tab = 'all', status, date } = {}) {
+  static async listForUser(userId, { role = 'all', tab = 'all', status, date, tz } = {}) {
     const now = new Date();
 
     // ── 1. Role condition ──────────────────────────────────────────────────────
@@ -3311,15 +3455,24 @@ export class TalentSessionService {
 
     let dateCondition;
     if (date) {
-      // Use the talent's local calendar day, not UTC, so this filter matches
-      // the same day the talent (and this session's actual scheduling) sees.
-      let dayTz = 'UTC';
-      if (profileId) {
+      // An explicit `tz` from the caller (the viewer's own browser) is the
+      // most accurate source — it's exactly what day they're looking at.
+      // Otherwise fall back to the talent's business timezone when viewing
+      // as talent, then the viewer's own stored account timezone, then UTC.
+      // Without this, a booking near midnight UTC gets grouped under the
+      // wrong calendar day for anyone not in UTC.
+      let dayTz = tz;
+      if (!dayTz && profileId) {
         const tzWindow = await db.query.talentAvailability.findFirst({
           where: eq(talentAvailability.talentProfileId, profileId),
         });
-        dayTz = tzWindow?.timezone || 'UTC';
+        dayTz = tzWindow?.timezone;
       }
+      if (!dayTz) {
+        const viewer = await db.query.users.findFirst({ where: eq(users.id, userId) });
+        dayTz = viewer?.timezone;
+      }
+      dayTz = dayTz || 'UTC';
       const dayStart = dayjs.tz(date, dayTz).startOf('day').utc().toDate();
       const dayEnd = dayjs.tz(date, dayTz).endOf('day').utc().toDate();
       dateCondition = and(
@@ -4063,12 +4216,17 @@ export async function listSessionsForUser(
   let dateCondition;
   if (date) {
     // Use the talent's local calendar day, not UTC — see listForUser above.
+    // A pure booker has no talent profile to borrow a timezone from — fall
+    // back to their own account timezone rather than UTC.
     let dayTz = 'UTC';
     if (profileIdForTz) {
       const tzWindow = await db.query.talentAvailability.findFirst({
         where: eq(talentAvailability.talentProfileId, profileIdForTz),
       });
       dayTz = tzWindow?.timezone || 'UTC';
+    } else {
+      const viewer = await db.query.users.findFirst({ where: eq(users.id, userId) });
+      dayTz = viewer?.timezone || 'UTC';
     }
     const dayStart = dayjs.tz(date, dayTz).startOf('day').utc().toDate();
     const dayEnd = dayjs.tz(date, dayTz).endOf('day').utc().toDate();
