@@ -13,7 +13,8 @@ import { eq, desc, and, sql } from 'drizzle-orm';
 import { getIO } from '../utils/io.js';
 import { emitNotification } from '../socket/emitter.js';
 import { getActorProfiles } from '../utils/helper.js';
-import { sendPushToUser } from './push.service.js';
+import logger from '../config/logger.js';
+import { sendPushForNotification } from './push.service.js';
 
 const typeToSetting = {
   event_update: 'eventUpdates',
@@ -211,27 +212,24 @@ export const createNotification = async data => {
     emitNotification(ioInstance, notificationData.userId, 'notification:new', enrichedNotification);
   }
 
-  // Device push for chat notifications — reaches the app when it's
-  // backgrounded or closed, where the socket above can't. Only fires when
-  // the in-app notification itself was created, so the user's chatMessages
-  // setting and the "already viewing this chat" skip both apply. Not
-  // awaited: a slow/failed push must never delay or break the caller.
-  if (notificationData.type === 'chat_message' && notificationData.userId) {
-    const meta = notificationData.metadata ?? {};
-    sendPushToUser(notificationData.userId, {
-      title: notificationData.title,
-      // The in-app copy is phrased for the notifications list; drop that
-      // prefix so the push reads as the message itself.
-      body: String(notificationData.message ?? '').replace(/^replied in your conversation : /, ''),
-      data: {
-        type: notificationData.type,
-        conversationId: meta.conversationId,
-        messageId: meta.messageId,
-        isPriority: meta.isPriority ? 'true' : undefined,
-        redirectTo: notificationData.redirectTo,
-      },
-    });
-  }
+  // Device push for every stored notification — reaches the app when it's backgrounded or
+  // closed, where the socket above can't. Only fires once the in-app notification exists, so
+  // the user's notification settings still apply. Chat copy is phrased for the notifications
+  // list; the prefix is dropped so the push reads as the message itself.
+  // Not awaited: the system banner for a backgrounded/closed app must not delay the caller.
+  const pushNotification =
+    enrichedNotification.type === 'chat_message'
+      ? {
+          ...enrichedNotification,
+          message: String(enrichedNotification.message ?? '').replace(
+            /^replied in your conversation : /,
+            ''
+          ),
+        }
+      : enrichedNotification;
+  sendPushForNotification(pushNotification).catch(err =>
+    logger.warn(`[push] notification ${enrichedNotification.id} not pushed: ${err?.message}`)
+  );
 
   return enrichedNotification;
 };
