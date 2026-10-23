@@ -1942,6 +1942,58 @@ export class TalentSessionService {
     });
   }
 
+  // ── Release abandoned native-checkout holds ───────────────────────────────
+  // A hosted Checkout Session expires after 30 min and its webhook frees the
+  // slot (handlePaymentExpired); a native PaymentIntent never expires, so
+  // `awaiting_payment` rows with no Checkout Session are released here after
+  // the same window. Unpaid intents are cancelled first so a late
+  // confirmation can't charge for a released slot; one that did succeed (its
+  // webhook/finalize never landed) is fulfilled instead.
+  static async releaseStaleNativeHolds() {
+    if (!stripe) return;
+    const cutoff = new Date(Date.now() - 30 * 60_000);
+    const stale = await db.query.talentSessions.findMany({
+      where: and(
+        eq(talentSessions.status, 'awaiting_payment'),
+        isNull(talentSessions.stripeSessionId),
+        lte(talentSessions.createdAt, cutoff)
+      ),
+    });
+
+    for (const session of stale) {
+      try {
+        // createNativePaymentIntent doesn't store the intent on the row (cancel()
+        // would treat it as paid and try to refund), so look it up by metadata.
+        const { data: intents } = await stripe.paymentIntents.search({
+          query: `metadata['sessionId']:'${session.id}'`,
+        });
+
+        const paid = intents.find(pi => pi.status === 'succeeded');
+        if (paid) {
+          await this.handlePaymentWebhook({
+            id: null,
+            payment_intent: paid.id,
+            amount_total: paid.amount_received || paid.amount,
+            metadata: paid.metadata,
+          });
+          continue;
+        }
+        // Still settling — leave the hold; a later run sees the final status.
+        if (intents.some(pi => pi.status === 'processing')) continue;
+
+        for (const pi of intents) {
+          if (pi.status !== 'canceled') await stripe.paymentIntents.cancel(pi.id);
+        }
+        await this.handlePaymentExpired({ metadata: { sessionId: session.id } });
+      } catch (err) {
+        console.error(
+          `[TalentSession] Failed to release stale native hold ${session.id}:`,
+          err.message
+        );
+      }
+    }
+  }
+
   // ── Handle Stripe checkout expired — release the slot ─────────────────────
 
   static async handlePaymentExpired(stripeSession) {

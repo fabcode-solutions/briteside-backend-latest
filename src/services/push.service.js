@@ -1,107 +1,176 @@
-// src/services/push.service.js
-// Firebase Cloud Messaging fan-out to a user's registered devices
-// (user_devices, registered by the app via POST /users/devices).
-//
-// Optional by design: without FIREBASE_SERVICE_ACCOUNT_JSON the service logs
-// once and every send is a no-op, so local/dev environments without Firebase
-// credentials keep working exactly as before.
-
-import admin from 'firebase-admin';
+/**
+ * Push delivery (Firebase Cloud Messaging HTTP v1) for in-app notifications, so every
+ * notification also shows as a system banner while the mobile app is backgrounded or closed.
+ * Disabled unless FIREBASE_SERVICE_ACCOUNT_JSON is set. Callers fire-and-forget: a failed push
+ * never affects the stored notification or the request that created it.
+ */
+import { GoogleAuth } from 'google-auth-library';
 import { and, eq, inArray } from 'drizzle-orm';
-import { db } from '../db/index.js';
-import { userDevices } from '../db/schema/index.js';
-import { getActiveDevicesForUser } from './userDevice.service.js';
+
+import config from '../config/config.js';
 import logger from '../config/logger.js';
+import { db } from '../config/database.js';
+import { userDevices } from '../db/schema/index.js';
 
-// Must match the channel the app creates (hooks/useMessageAlerts.ts).
-const ANDROID_MESSAGES_CHANNEL_ID = 'messages';
+const FCM_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
+const SEND_TIMEOUT_MS = 10_000;
+const MAX_TITLE_LENGTH = 100;
+const MAX_BODY_LENGTH = 240;
 
-// FCM error codes meaning the token will never work again.
-const DEAD_TOKEN_CODES = new Set([
-  'messaging/registration-token-not-registered',
-  'messaging/invalid-registration-token',
-]);
+// Android channels created by the app (briteside-expo hooks/useMessageAlerts.ts and
+// hooks/useNotificationAlerts.ts); Android falls back to a default channel if one is missing.
+const MESSAGES_CHANNEL = 'messages';
+const DEFAULT_CHANNEL = 'app_notifications';
 
-let messaging = null;
-let initAttempted = false;
+// FCM error codes meaning the token will never work again, so the device is deactivated.
+const DEAD_TOKEN_CODES = new Set(['UNREGISTERED', 'SENDER_ID_MISMATCH']);
 
-/** Accepts the service-account JSON raw or base64-encoded. */
-function parseServiceAccount(value) {
-  const raw = value.trim().startsWith('{') ? value : Buffer.from(value, 'base64').toString('utf8');
-  const account = JSON.parse(raw);
-  // Keys pasted into env vars often carry literal "\n" — restore real newlines.
-  if (account.private_key) account.private_key = account.private_key.replace(/\\n/g, '\n');
-  return account;
-}
+let messagingClient; // undefined = not initialised yet, null = push disabled
 
-function getMessaging() {
-  if (initAttempted) return messaging;
-  initAttempted = true;
-
-  const value = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!value) {
-    logger.warn('[push] FIREBASE_SERVICE_ACCOUNT_JSON not set — push notifications disabled');
-    return null;
+const getMessagingClient = () => {
+  if (messagingClient !== undefined) return messagingClient;
+  if (!config.firebase.configured) {
+    messagingClient = null;
+    return messagingClient;
   }
   try {
-    const app = admin.apps.length
-      ? admin.app()
-      : admin.initializeApp({ credential: admin.credential.cert(parseServiceAccount(value)) });
-    messaging = app.messaging();
-  } catch (err) {
-    logger.error(`[push] Firebase init failed — push notifications disabled: ${err.message}`);
+    const credentials = JSON.parse(config.firebase.serviceAccountJson);
+    if (!credentials?.project_id) throw new Error('missing project_id');
+    messagingClient = {
+      auth: new GoogleAuth({ credentials, scopes: [FCM_SCOPE] }),
+      projectId: credentials.project_id,
+    };
+  } catch {
+    // The parse error can echo part of the secret, so it is not logged.
+    logger.error('[push] FIREBASE_SERVICE_ACCOUNT_JSON is invalid; push notifications disabled');
+    messagingClient = null;
   }
-  return messaging;
-}
+  return messagingClient;
+};
 
-/** FCM data values must all be strings. */
-function toStringData(data = {}) {
-  return Object.fromEntries(
-    Object.entries(data)
-      .filter(([, v]) => v !== undefined && v !== null)
-      .map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)])
+const truncate = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+/** FCM data values must be strings; empty values are dropped. */
+const toData = fields =>
+  Object.fromEntries(
+    Object.entries(fields)
+      .filter(([, value]) => value !== undefined && value !== null && value !== '')
+      .map(([key, value]) => [key, String(value)])
   );
-}
+
+const buildMessage = notification => {
+  const metadata = notification.metadata ?? {};
+  const isChat = notification.type === 'chat_message';
+  const title = truncate(String(notification.title ?? '').trim() || 'Briteside', MAX_TITLE_LENGTH);
+  const body = truncate(String(notification.message ?? '').trim(), MAX_BODY_LENGTH);
+  // Matches the identifier of the app's own socket-raised banner (msg-<messageId> for chat,
+  // ntf-<notificationId> otherwise), so the OS replaces one with the other instead of showing two.
+  const messageId = isChat ? (metadata.messageId ?? metadata.messageIds?.[0]) : null;
+  const collapseId =
+    typeof messageId === 'string' && messageId ? `msg-${messageId}` : `ntf-${notification.id}`;
+
+  return {
+    notification: { title, body },
+    // Read by the app's tap handler (briteside-expo services/messagePush.ts).
+    data: toData({
+      notificationId: notification.id,
+      type: notification.type,
+      redirectTo: notification.redirectTo,
+      conversationId: typeof metadata.conversationId === 'string' ? metadata.conversationId : '',
+      isPriority: metadata.isPriority ? 'true' : '',
+      paymentId: typeof metadata.paymentId === 'string' ? metadata.paymentId : '',
+    }),
+    android: {
+      priority: 'HIGH',
+      notification: {
+        channel_id: isChat ? MESSAGES_CHANNEL : DEFAULT_CHANNEL,
+        sound: 'default',
+        tag: collapseId,
+      },
+    },
+    apns: {
+      headers: {
+        'apns-priority': '10',
+        'apns-push-type': 'alert',
+        'apns-collapse-id': collapseId,
+      },
+      payload: { aps: { sound: 'default' } },
+    },
+  };
+};
+
+const sendToToken = async (client, accessToken, token, message) => {
+  const res = await fetch(
+    `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(client.projectId)}/messages:send`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message: { ...message, token } }),
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+    }
+  );
+  if (res.ok) return { ok: true };
+
+  const payload = await res.json().catch(() => null);
+  const fcmCode = payload?.error?.details?.find(detail => detail?.errorCode)?.errorCode;
+  const code = fcmCode ?? payload?.error?.status ?? `HTTP_${res.status}`;
+  const invalidToken =
+    code === 'INVALID_ARGUMENT' && /registration token/i.test(payload?.error?.message ?? '');
+  return { ok: false, code, dead: DEAD_TOKEN_CODES.has(code) || invalidToken };
+};
 
 /**
- * Sends one push to every active device of `userId`. Never throws — a push
- * failure must not break the request that triggered it. Tokens FCM reports
- * as permanently invalid are deactivated so they aren't retried forever.
+ * Sends a stored notification to all of its recipient's active mobile devices.
+ * Resolves without throwing when push is disabled or the user has no devices.
  */
-export async function sendPushToUser(userId, { title, body, data } = {}) {
-  const fcm = getMessaging();
-  if (!fcm || !userId) return;
+export const sendPushForNotification = async notification => {
+  const client = getMessagingClient();
+  if (!client || !notification?.userId || !notification.id) return;
 
-  try {
-    const devices = await getActiveDevicesForUser(userId);
-    const tokens = devices
-      .filter(d => d.platform !== 'web' && d.notificationUid)
-      .map(d => d.notificationUid);
-    if (!tokens.length) return;
+  const devices = await db
+    .select({ token: userDevices.notificationUid })
+    .from(userDevices)
+    .where(
+      and(
+        eq(userDevices.userId, notification.userId),
+        eq(userDevices.isActive, true),
+        inArray(userDevices.platform, ['ios', 'android'])
+      )
+    );
+  const tokens = [...new Set(devices.map(device => device.token).filter(Boolean))];
+  if (!tokens.length) return;
 
-    const response = await fcm.sendEachForMulticast({
-      tokens,
-      notification: { title, body },
-      data: toStringData(data),
-      android: {
-        priority: 'high',
-        notification: { channelId: ANDROID_MESSAGES_CHANNEL_ID, sound: 'default' },
-      },
-      apns: { payload: { aps: { sound: 'default' } } },
-    });
+  const accessToken = await client.auth.getAccessToken();
+  if (!accessToken) throw new Error('could not obtain an FCM access token');
 
-    const deadTokens = response.responses
-      .map((r, i) => (!r.success && DEAD_TOKEN_CODES.has(r.error?.code) ? tokens[i] : null))
-      .filter(Boolean);
-    if (deadTokens.length) {
-      await db
-        .update(userDevices)
-        .set({ isActive: false, updatedAt: new Date() })
-        .where(
-          and(eq(userDevices.userId, userId), inArray(userDevices.notificationUid, deadTokens))
-        );
+  const message = buildMessage(notification);
+  const results = await Promise.allSettled(
+    tokens.map(token => sendToToken(client, accessToken, token, message))
+  );
+
+  const deadTokens = [];
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      logger.warn(`[push] send failed: ${result.reason?.name ?? 'Error'}`);
+    } else if (!result.value.ok) {
+      if (result.value.dead) deadTokens.push(tokens[index]);
+      else logger.warn(`[push] send failed: ${result.value.code}`);
     }
-  } catch (err) {
-    logger.warn(`[push] send to user ${userId} failed: ${err.message}`);
+  });
+
+  if (deadTokens.length) {
+    // Scoped to this user, so a token can only be deactivated for the account it was sent for.
+    await db
+      .update(userDevices)
+      .set({ isActive: false, updatedAt: new Date() })
+      .where(
+        and(
+          eq(userDevices.userId, notification.userId),
+          inArray(userDevices.notificationUid, deadTokens)
+        )
+      );
   }
-}
+};

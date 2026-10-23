@@ -67,6 +67,9 @@ const EnvVariables = z.object({
   GOOGLE_PLAY_PACKAGE_NAME: z.string().optional(),
   GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: z.string().optional(),
 
+  // Firebase Cloud Messaging — service-account JSON for push notifications (optional)
+  FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
+
   // ACRCloud — audio fingerprint matching for copyright scans
   ACRCLOUD_HOST: z.string().optional(),
   ACRCLOUD_ACCESS_KEY: z.string().optional(),
@@ -159,6 +162,10 @@ const env = {
     packageName: envVars.GOOGLE_PLAY_PACKAGE_NAME,
     serviceAccountJson: envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON,
     configured: !!(envVars.GOOGLE_PLAY_PACKAGE_NAME && envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON),
+  },
+  firebase: {
+    serviceAccountJson: envVars.FIREBASE_SERVICE_ACCOUNT_JSON,
+    configured: !!envVars.FIREBASE_SERVICE_ACCOUNT_JSON,
   },
   acrcloud: {
     host: envVars.ACRCLOUD_HOST,
