@@ -21,6 +21,7 @@ import {
 } from '../controllers/storyCollection.controller.js';
 import {
   getSocialProfile,
+  getUsersSitemap,
   getProfileAnalytics,
   updateSocialProfile,
   checkProfileUsernameAvailability,
@@ -126,6 +127,7 @@ const router = express.Router();
 
 router.post('/bio-links/:linkId/click', trackBioLinkClick);
 router.post('/post-tab-links/:linkId/click', clickPostTabLink);
+router.get('/users/sitemap', getUsersSitemap);
 
 router.use(authMiddleware);
 

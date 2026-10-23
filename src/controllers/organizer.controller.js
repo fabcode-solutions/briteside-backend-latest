@@ -15,11 +15,12 @@ export const createOrganizer = catchAsync(async (req, res) => {
 });
 
 export const getOrganizers = catchAsync(async (req, res) => {
-  const organizers = await OrganizerService.getOrganizers();
+  const { page, limit } = req.query;
+  const result = await OrganizerService.getOrganizers({ page, limit });
 
   res.json({
     success: true,
-    data: { organizers },
+    data: result,
   });
 });
 

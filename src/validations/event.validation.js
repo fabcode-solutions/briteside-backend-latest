@@ -109,7 +109,6 @@ const eventTaxSchema = z
     name: z.string().max(100).optional(),
     ratePercent: z.number().min(0).max(100).optional(),
     appliesToAllTickets: z.boolean().optional(),
-    absorbed: z.boolean().optional(),
   })
   .superRefine((data, ctx) => {
     // Mirrors Eventbrite's own hard requirement (TAX_STRATEGY.md §2.3): an
@@ -340,10 +339,9 @@ export const updateEventSchema = z.object({
         password: z.string().max(100).optional(),
       })
       .optional(),
-    // Organizer "Tax Tool" opt-in (non-facilitator states only). Sending
-    // `tax: null` clears a previously-saved opt-in (e.g. organizer toggles
-    // "I don't need to collect tax" back off).
-    tax: eventTaxSchema.nullable().optional(),
+    // Tax settings are a one-time choice made at creation (TAX_STRATEGY.md
+    // §2.3) — intentionally not part of this schema, so any `tax` sent on
+    // an update is stripped and has no effect. See event.service.js.
   }),
 });
 

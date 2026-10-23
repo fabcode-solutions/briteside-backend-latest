@@ -56,6 +56,47 @@ function deriveLocationParts(location) {
   return { city, state, country };
 }
 export class ProfileService {
+// Public, unauthenticated listing used only to build sitemap-users.xml —
+// excludes deleted/suspended accounts and profiles the owner set to private.
+static async listPublicUsersForSitemap(page = 1, limit = 200) {
+  const pageNum = Math.max(1, parseInt(page, 10) || 1);
+  const limitNum = Math.max(1, Math.min(parseInt(limit, 10) || 200, 1000));
+  const offset = (pageNum - 1) * limitNum;
+
+  const whereCondition = and(
+    isNull(users.deletedAt),
+    eq(users.isSuspended, false),
+    sql`${users.username} IS NOT NULL`,
+    eq(socialProfiles.isPublic, true)
+  );
+
+  const [rows, [{ total }]] = await Promise.all([
+    db
+      .select({ username: users.username, updatedAt: socialProfiles.updatedAt })
+      .from(users)
+      .innerJoin(socialProfiles, eq(socialProfiles.userId, users.id))
+      .where(whereCondition)
+      .orderBy(desc(users.updatedAt))
+      .limit(limitNum)
+      .offset(offset),
+    db
+      .select({ total: count() })
+      .from(users)
+      .innerJoin(socialProfiles, eq(socialProfiles.userId, users.id))
+      .where(whereCondition),
+  ]);
+
+  return {
+    users: rows,
+    pagination: {
+      page: pageNum,
+      limit: limitNum,
+      total,
+      totalPages: Math.ceil(total / limitNum),
+    },
+  };
+}
+
 static async getOrCreateSocialProfile(userId) {
   const safeUserColumns = {
     id: true,

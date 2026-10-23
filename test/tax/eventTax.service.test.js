@@ -3,19 +3,40 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // EventTaxService talks to Stripe Tax only for the facilitator + in-person
 // branch. Mock the 'stripe' package itself so no real network call happens
 // and we can assert both the happy path and the "fail toward $0 on error"
-// behavior deterministically.
+// behavior deterministically. `locations.create` is the performance-location
+// lookup `_getOrCreatePerformanceLocation` needs — see that method's own
+// describe block below for dedicated coverage.
 const calculationsCreate = vi.fn();
+const locationsCreate = vi.fn();
 vi.mock('stripe', () => ({
   default: vi.fn().mockImplementation(() => ({
-    tax: { calculations: { create: calculationsCreate } },
+    tax: {
+      calculations: { create: calculationsCreate },
+      locations: { create: locationsCreate },
+    },
   })),
 }));
+
+const venuesUpdateWhere = vi.fn().mockResolvedValue(undefined);
+const venuesUpdateSet = vi.fn(() => ({ where: venuesUpdateWhere }));
+const venuesUpdate = vi.fn(() => ({ set: venuesUpdateSet }));
+vi.mock('../../src/db/index.js', () => ({ db: { update: (...args) => venuesUpdate(...args) } }));
+vi.mock('../../src/db/schema/venues.js', () => ({ venues: { id: 'venues.id' } }));
 
 const { EventTaxService } = await import('../../src/services/tax/eventTax.service.js');
 
 describe('EventTaxService.computeTax', () => {
   beforeEach(() => {
     calculationsCreate.mockReset();
+    locationsCreate.mockReset();
+    venuesUpdate.mockClear();
+    venuesUpdateSet.mockClear();
+    venuesUpdateWhere.mockClear();
+    // Sane default for every facilitator in-person test below, so each one
+    // doesn't have to set this up individually just to reach the actual
+    // Tax Calculation call — overridden explicitly in the tests that care
+    // about the location lookup itself.
+    locationsCreate.mockResolvedValue({ id: 'taxloc_default' });
   });
 
   it('charges no tax in a NOMAD (no-sales-tax) state', async () => {
@@ -180,6 +201,9 @@ describe('EventTaxService.computeTax', () => {
     const callArgs = calculationsCreate.mock.calls[0][0];
     // Venue address sources the calculation, never the buyer's.
     expect(callArgs.customer_details.address).toMatchObject({ state: 'TX', country: 'US' });
+    // Required for ticket/event tax codes per docs.stripe.com/tax/tax-for-tickets
+    // — a live 400 confirmed this is enforced, not merely optional.
+    expect(callArgs.line_items[0].performance_location).toBe('taxloc_default');
     expect(result).toMatchObject({
       jurisdictionStatus: 'facilitator',
       amountCents: 825,
@@ -242,5 +266,69 @@ describe('EventTaxService.computeTax', () => {
     // Falls back to buyer-billing automatic tax rather than failing outright.
     expect(result.automaticTax).toEqual({ enabled: true });
     expect(calculationsCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe('EventTaxService._getOrCreatePerformanceLocation', () => {
+  beforeEach(() => {
+    locationsCreate.mockReset();
+    venuesUpdate.mockClear();
+    venuesUpdateSet.mockClear();
+    venuesUpdateWhere.mockClear();
+  });
+
+  it("reuses the venue's cached location id without calling Stripe", async () => {
+    const result = await EventTaxService._getOrCreatePerformanceLocation({
+      id: 'venue-1',
+      stripeTaxLocationId: 'taxloc_cached',
+    });
+    expect(result).toBe('taxloc_cached');
+    expect(locationsCreate).not.toHaveBeenCalled();
+  });
+
+  it('creates and persists a new location when the venue has none cached', async () => {
+    locationsCreate.mockResolvedValue({ id: 'taxloc_new' });
+    const result = await EventTaxService._getOrCreatePerformanceLocation({
+      id: 'venue-2',
+      address: '123 Main St',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      countryCode: 'US',
+    });
+    expect(result).toBe('taxloc_new');
+    expect(locationsCreate).toHaveBeenCalledWith({
+      type: 'performance',
+      address: {
+        line1: '123 Main St',
+        city: 'Austin',
+        state: 'TX',
+        postal_code: '78701',
+        country: 'US',
+      },
+    });
+    expect(venuesUpdate).toHaveBeenCalledTimes(1);
+    expect(venuesUpdateSet).toHaveBeenCalledWith({ stripeTaxLocationId: 'taxloc_new' });
+  });
+
+  it('creates a location but skips persistence when the venue has no id (e.g. a test/ad-hoc caller)', async () => {
+    locationsCreate.mockResolvedValue({ id: 'taxloc_new' });
+    const result = await EventTaxService._getOrCreatePerformanceLocation({
+      address: '123 Main St',
+      state: 'TX',
+    });
+    expect(result).toBe('taxloc_new');
+    expect(venuesUpdate).not.toHaveBeenCalled();
+  });
+
+  it('fails toward null (not an error) if the Stripe location create call fails', async () => {
+    locationsCreate.mockRejectedValue(new Error('Stripe is down'));
+    const result = await EventTaxService._getOrCreatePerformanceLocation({
+      id: 'venue-3',
+      address: '123 Main St',
+      state: 'TX',
+    });
+    expect(result).toBeNull();
+    expect(venuesUpdate).not.toHaveBeenCalled();
   });
 });

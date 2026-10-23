@@ -207,6 +207,36 @@ export class EventTeamService {
       }
     }
 
+    if (teamMemberId && eventId) {
+      try {
+        const rows = await db
+          .select({
+            teamEventId: eventTeams.eventId,
+            memberPerms: eventTeamMembers.permissions,
+            rolePerms: eventTeamRoles.permissions,
+          })
+          .from(eventTeamMembers)
+          .innerJoin(eventTeams, eq(eventTeamMembers.teamId, eventTeams.id))
+          .leftJoin(eventTeamRoles, eq(eventTeamMembers.roleId, eventTeamRoles.id))
+          .where(
+            and(
+              eq(eventTeamMembers.id, teamMemberId),
+              eq(eventTeamMembers.isActive, true),
+              eq(eventTeams.eventId, eventId)
+            )
+          );
+
+        const candidateKeys = resolvePermissionKeys(permissionKey);
+        const row = rows[0];
+        if (row) {
+          const effectivePerms = [...new Set([...(row.rolePerms ?? []), ...(row.memberPerms ?? [])])];
+          if (effectivePerms.some(p => candidateKeys.includes(p))) return true;
+        }
+      } catch (e) {
+        console.log('[hasPermission] teamMemberId check error:', e.message, e.stack);
+      }
+    }
+
     return false;
   }
   // ─── Helpers ──────────────────────────────────────────────────────────────

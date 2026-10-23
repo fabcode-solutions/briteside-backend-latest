@@ -393,7 +393,8 @@ export const prepareCustomOfferAcceptCheckout = catchAsync(async (req, res) => {
 export const createCustomOfferAcceptNativePaymentIntent = catchAsync(async (req, res) => {
   const result = await ShopCustomOfferService.createNativeAcceptPaymentIntent(
     req.params.offerId,
-    req.user.id
+    req.user.id,
+    { country: req.body?.country, postalCode: req.body?.postalCode, state: req.body?.state }
   );
   res.json({ success: true, data: result });
 });
@@ -465,7 +466,8 @@ export const prepareCustomOfferRemainderCheckout = catchAsync(async (req, res) =
 export const createCustomOfferRemainderNativePaymentIntent = catchAsync(async (req, res) => {
   const result = await ShopCustomOfferService.createNativeRemainderPaymentIntent(
     req.params.offerId,
-    req.user.id
+    req.user.id,
+    { country: req.body?.country, postalCode: req.body?.postalCode, state: req.body?.state }
   );
   res.json({ success: true, data: result });
 });
@@ -507,7 +509,8 @@ export const createCustomOfferMilestoneNativePaymentIntent = catchAsync(async (r
   const result = await ShopCustomOfferService.createNativeMilestonePaymentIntent(
     req.params.offerId,
     req.params.milestoneId,
-    req.user.id
+    req.user.id,
+    { country: req.body?.country, postalCode: req.body?.postalCode, state: req.body?.state }
   );
   res.json({ success: true, data: result });
 });

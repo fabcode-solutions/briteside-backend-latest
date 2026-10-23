@@ -73,6 +73,10 @@ export class SocialService {
     return ProfileService.getOrCreateSocialProfile(userId);
   }
 
+  static async listPublicUsersForSitemap(page, limit) {
+    return ProfileService.listPublicUsersForSitemap(page, limit);
+  }
+
   static async updateSocialProfile(userId, data) {
     return ProfileService.updateSocialProfile(userId, data);
   }

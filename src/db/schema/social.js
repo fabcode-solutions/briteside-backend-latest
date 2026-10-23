@@ -153,6 +153,13 @@ export const posts = pgTable(
     isCoverPost: boolean('is_cover_post').default(false).notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
     visibility: varchar('visibility', { length: 20 }).notNull().default('public'),
+    // settings.linkButton: { label, url, eventId?, ticketId? } | null — see
+    // src/utils/link-button.js#sanitizeLinkButton for label/url validation
+    // and post.service.js#_resolveLinkButtonEventRef for the optional
+    // eventId/ticketId deep-link metadata (ownership-checked against the
+    // calling user's own events/tickets). eventId/ticketId here are unrelated
+    // to linkedEventId below — this is just metadata riding on an ordinary
+    // URL button, not the separate "linked event" mechanism.
     settings: json('settings').default({ commentsDisabled: false, hideLikes: false }),
     tags: json('tags').default([]), // Array of tag strings for quick access
     // A post links a URL, OR shop products, OR one event — never more than
@@ -940,7 +947,7 @@ export const userPostOrder = pgTable(
        OR (${table.itemType} = 'link' AND ${table.linkId} IS NOT NULL AND ${table.postId} IS NULL)`
     ),
   ]
-);  
+);
 
 // Atomic reservation counter for bulk-import displayOrder ranges. Counts DOWN
 // from 0 — each import batch reserves the negative range just below the last

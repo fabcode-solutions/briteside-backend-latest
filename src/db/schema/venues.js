@@ -27,6 +27,12 @@ export const venues = pgTable(
     postalCode: varchar('postal_code', { length: 20 }),
     websiteUrl: text('website_url'),
     isVerified: boolean('is_verified').default(false),
+    // Cached Stripe Tax "performance" location id (taxloc_...) for this venue
+    // — TAX_STRATEGY.md §2.4, see EventTaxService._getOrCreatePerformanceLocation.
+    // Stripe's own guidance is to create one location per physical site and
+    // reuse it across every calculation for it, rather than minting a new
+    // one per ticket sale.
+    stripeTaxLocationId: varchar('stripe_tax_location_id', { length: 255 }),
     createdBy: uuid('created_by')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),

@@ -22,7 +22,25 @@ import { PayoutLedgerService } from '../payoutLedger.service.js';
 import { emitSocialChat } from '../../socket/emitter.js';
 import { ShopDeliverableService } from './shopDeliverable.service.js';
 import { shopCustomOfferDeliverables } from '../../db/schema/index.js';
+import { PlusTaxLiabilityService } from '../tax/plusTaxLiability.service.js';
+import {
+  SERVICE_TAX_CODE,
+  buildServiceAutomaticTax,
+  applyTaxLiabilityToReserve,
+} from '../../lib/tax/serviceCheckoutTax.js';
+import { normalizeStateToAbbr } from '../../lib/tax/usStates.js';
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
+
+// Tax (Services) — TAX_STRATEGY.md §3.1, NOT legally reviewed. Checkout's
+// automatic_tax requires EVERY price_data line item to carry a tax_behavior,
+// not just the taxable one (mirrors ShopOrderService._createHostedOrderSession's
+// identical requirement) — tag them all uniformly once tax is known.
+function _tagLineItemsForTax(lineItems, taxCode) {
+  for (const item of lineItems) {
+    item.price_data.tax_behavior = 'exclusive';
+    item.price_data.product_data.tax_code = taxCode;
+  }
+}
 import {
   shopCustomOfferActivity,
   shopCustomOfferRevisionRequests,
@@ -716,8 +734,22 @@ export class ShopCustomOfferService {
    * is released per row by releaseCustomOfferMilestoneReserves. Writing to both
    * would be a double transfer.
    */
-  static async _markMilestoneFunded(milestone, { paymentIntentId, stripeSessionId, paidAt }) {
+  static async _markMilestoneFunded(
+    milestone,
+    { paymentIntentId, stripeSessionId, paidAt, taxAmountCents = 0, taxLiability = 'none' }
+  ) {
     const fees = ShopOrderService.computeFees(milestone.amountCents);
+    // Tax (Services) — this stage's own Checkout session/PaymentIntent ran
+    // its own tax calculation (see createMilestoneFundingCheckout /
+    // createNativeMilestonePaymentIntent); apply it to this row's own
+    // sellerReceiveCents, same rule applyTaxLiabilityToReserve already
+    // applies everywhere else — never to offer.reserveAmountCents, which
+    // milestone money structurally never touches (see function doc above).
+    const sellerReceiveWithTax = applyTaxLiabilityToReserve(
+      fees.sellerReceiveCents,
+      taxAmountCents,
+      taxLiability
+    );
 
     const [updated] = await db
       .update(shopOfferMilestones)
@@ -727,8 +759,10 @@ export class ShopCustomOfferService {
         stripePaymentIntentId: paymentIntentId,
         ...(stripeSessionId ? { stripeSessionId } : {}),
         chargedCents: fees.chargedCents,
-        sellerReceiveCents: fees.sellerReceiveCents,
+        sellerReceiveCents: sellerReceiveWithTax,
         platformShareCents: fees.platformShareCents,
+        taxAmountCents,
+        taxLiability,
         updatedAt: paidAt,
       })
       .where(
@@ -766,14 +800,25 @@ export class ShopCustomOfferService {
    * landing at once can't lose one another's contribution. reserveAmountCents
    * is pointedly absent — see _markMilestoneFunded.
    */
-  static async _addMilestoneMoneyToOffer(offerId, amountCents, fees, at) {
+  static async _addMilestoneMoneyToOffer(
+    offerId,
+    amountCents,
+    fees,
+    at,
+    { taxAmountCents = 0, sellerReceiveCents = fees.sellerReceiveCents } = {}
+  ) {
     await db
       .update(shopCustomServiceOffers)
       .set({
         chargedCents: sql`COALESCE(${shopCustomServiceOffers.chargedCents}, 0) + ${fees.chargedCents}`,
         basePriceCoveredCents: sql`COALESCE(${shopCustomServiceOffers.basePriceCoveredCents}, 0) + ${amountCents}`,
-        sellerReceiveCents: sql`COALESCE(${shopCustomServiceOffers.sellerReceiveCents}, 0) + ${fees.sellerReceiveCents}`,
+        // Caller passes the milestone row's own (already tax-conditionally-
+        // adjusted, per _markMilestoneFunded) sellerReceiveCents here — this
+        // is a running reporting total only, never read back for payout math
+        // (that stays per-row — see the doc comment above).
+        sellerReceiveCents: sql`COALESCE(${shopCustomServiceOffers.sellerReceiveCents}, 0) + ${sellerReceiveCents}`,
         platformShareCents: sql`COALESCE(${shopCustomServiceOffers.platformShareCents}, 0) + ${fees.platformShareCents}`,
+        taxAmountCents: sql`COALESCE(${shopCustomServiceOffers.taxAmountCents}, 0) + ${taxAmountCents}`,
         updatedAt: at,
       })
       .where(eq(shopCustomServiceOffers.id, offerId));
@@ -977,6 +1022,12 @@ export class ShopCustomOfferService {
       columns: { email: true },
     });
 
+    // Tax (Services) — TAX_STRATEGY.md §3.1, NOT legally reviewed. Resolved
+    // the exact same way shop/1:1-video/priority-messages resolve it for
+    // their own checkout (reused, not forked) — see _createHostedAcceptSession.
+    const { liability } = await PlusTaxLiabilityService.resolveLiability(offer.sellerId);
+    const automaticTax = buildServiceAutomaticTax(liability);
+
     // Same metadata.type as a normal offer payment, so the existing webhook
     // dispatch in webhook.controller.js routes it here with no change.
     const metadata = {
@@ -994,6 +1045,35 @@ export class ShopCustomOfferService {
     );
     const nativeRedirect = isNativePlatform(platform);
 
+    const line_items = [
+      {
+        price_data: {
+          currency: 'usd',
+          unit_amount: installmentBase,
+          product_data: {
+            // Same "which milestone is this?" label as createMilestoneFundingCheckout
+            // below — milestone 1 is charged right here at purchase time, so
+            // without this the buyer only ever sees the bare offer title on
+            // Stripe's checkout page with no indication of what's being billed.
+            name: milestoneRows
+              ? `${offer.title} — ${milestoneRows[0].label} (milestone 1 of ${milestoneRows.length})`
+              : offer.title,
+            ...(product.coverUrl ? { images: [product.coverUrl] } : {}),
+          },
+        },
+        quantity: 1,
+      },
+      {
+        price_data: {
+          currency: 'usd',
+          unit_amount: fees.platformAndServiceFeeCents,
+          product_data: { name: 'Platform & Service Fee' },
+        },
+        quantity: 1,
+      },
+    ];
+    if (automaticTax) _tagLineItemsForTax(line_items, SERVICE_TAX_CODE);
+
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
@@ -1001,33 +1081,8 @@ export class ShopCustomOfferService {
       ...(nativeRedirect
         ? { success_url: redirectUrls.successUrl, cancel_url: redirectUrls.cancelUrl }
         : { ui_mode: 'embedded', return_url: redirectUrls.successUrl }),
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: installmentBase,
-            product_data: {
-              // Same "which milestone is this?" label as createMilestoneFundingCheckout
-              // below — milestone 1 is charged right here at purchase time, so
-              // without this the buyer only ever sees the bare offer title on
-              // Stripe's checkout page with no indication of what's being billed.
-              name: milestoneRows
-                ? `${offer.title} — ${milestoneRows[0].label} (milestone 1 of ${milestoneRows.length})`
-                : offer.title,
-              ...(product.coverUrl ? { images: [product.coverUrl] } : {}),
-            },
-          },
-          quantity: 1,
-        },
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: fees.platformAndServiceFeeCents,
-            product_data: { name: 'Platform & Service Fee' },
-          },
-          quantity: 1,
-        },
-      ],
+      ...(automaticTax ? { automatic_tax: automaticTax } : {}),
+      line_items,
       customer_email: buyer?.email,
       // Only worth saving the card when there's a remainder left to collect
       // later — mirrors createAcceptCheckout.
@@ -1050,6 +1105,7 @@ export class ShopCustomOfferService {
         basePriceCoveredCents: installmentBase,
         sellerReceiveCents: fees.sellerReceiveCents,
         platformShareCents: fees.platformShareCents,
+        taxLiability: liability ? liability.type : 'none',
         updatedAt: new Date(),
       })
       .where(eq(shopCustomServiceOffers.id, offer.id));
@@ -1167,12 +1223,17 @@ export class ShopCustomOfferService {
       columns: { email: true },
     });
 
-    return { offer, buyer, milestoneRows, installmentBase, fees };
+    // Tax (Services) — TAX_STRATEGY.md §3.1, NOT legally reviewed. Resolved
+    // once here (not at checkout-send time) so a creator's nexus/registration
+    // change is always reflected at the moment the buyer actually pays.
+    const { liability } = await PlusTaxLiabilityService.resolveLiability(offer.sellerId);
+
+    return { offer, buyer, milestoneRows, installmentBase, fees, liability };
   }
 
   // ── Hosted Stripe Checkout session — shared tail for both accept paths ────
   static async _createHostedAcceptSession(prep) {
-    const { offer, buyer, milestoneRows, installmentBase, fees } = prep;
+    const { offer, buyer, milestoneRows, installmentBase, fees, liability } = prep;
 
     const metadata = {
       type: 'shop_custom_offer',
@@ -1181,32 +1242,37 @@ export class ShopCustomOfferService {
       sellerId: offer.sellerId,
     };
 
+    const automaticTax = buildServiceAutomaticTax(liability);
+    const line_items = [
+      {
+        price_data: {
+          currency: 'usd',
+          unit_amount: installmentBase,
+          product_data: {
+            name: milestoneRows
+              ? `${offer.title} — ${milestoneRows[0].label} (milestone 1 of ${milestoneRows.length})`
+              : offer.title,
+          },
+        },
+        quantity: 1,
+      },
+      {
+        price_data: {
+          currency: 'usd',
+          unit_amount: fees.platformAndServiceFeeCents,
+          product_data: { name: 'Platform & Service Fee' },
+        },
+        quantity: 1,
+      },
+    ];
+    if (automaticTax) _tagLineItemsForTax(line_items, SERVICE_TAX_CODE);
+
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
       expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: installmentBase,
-            product_data: {
-              name: milestoneRows
-                ? `${offer.title} — ${milestoneRows[0].label} (milestone 1 of ${milestoneRows.length})`
-                : offer.title,
-            },
-          },
-          quantity: 1,
-        },
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: fees.platformAndServiceFeeCents,
-            product_data: { name: 'Platform & Service Fee' },
-          },
-          quantity: 1,
-        },
-      ],
+      ...(automaticTax ? { automatic_tax: automaticTax } : {}),
+      line_items,
       ui_mode: 'embedded',
       return_url: `${process.env.FRONTEND_URL}/bookings`,
       customer_email: buyer?.email,
@@ -1240,6 +1306,7 @@ export class ShopCustomOfferService {
         basePriceCoveredCents: installmentBase,
         sellerReceiveCents: fees.sellerReceiveCents,
         platformShareCents: fees.platformShareCents,
+        taxLiability: liability ? liability.type : 'none',
         updatedAt: new Date(),
       })
       .where(eq(shopCustomServiceOffers.id, offer.id));
@@ -1271,11 +1338,56 @@ export class ShopCustomOfferService {
     return { paymentId: prep.offer.id };
   }
 
-  static async createNativeAcceptPaymentIntent(offerId, buyerId) {
+  // Standalone Stripe Tax Calculation for the native (raw PaymentIntent) path
+  // — mirrors ShopOrderService._calculateNativeTax, simplified since Services
+  // always use the one fixed SERVICE_TAX_CODE rather than a per-product
+  // lookup. Unlike hosted Checkout's automatic_tax, there's no built-in
+  // address collection here, so this only runs once the caller has a
+  // billing postal code to anchor the lookup to — absent one, charges $0 tax
+  // rather than guessing.
+  static async _calculateServiceNativeTax({ chargedCents, country, postalCode, state, liability }) {
+    const none = { amountCents: 0, taxLabel: null };
+    if (!stripe || !liability || !postalCode?.trim()) return none;
+    try {
+      const stateAbbr = normalizeStateToAbbr(state);
+      const calculation = await stripe.tax.calculations.create(
+        {
+          currency: 'usd',
+          line_items: [
+            {
+              amount: chargedCents,
+              reference: 'shop_custom_offer',
+              tax_code: SERVICE_TAX_CODE,
+              tax_behavior: 'exclusive',
+            },
+          ],
+          customer_details: {
+            address: {
+              country: country || 'US',
+              postal_code: postalCode.trim(),
+              ...(stateAbbr ? { state: stateAbbr } : {}),
+            },
+            address_source: 'billing',
+          },
+        },
+        liability.type === 'account' ? { stripeAccount: liability.account } : undefined
+      );
+      return { amountCents: calculation.tax_amount_exclusive ?? 0, taxLabel: 'Tax' };
+    } catch (err) {
+      logger.error(`[ServiceTax] native tax calculation failed, charging $0 tax: ${err.message}`);
+      return none;
+    }
+  }
+
+  static async createNativeAcceptPaymentIntent(
+    offerId,
+    buyerId,
+    { country, postalCode, state } = {}
+  ) {
     if (!stripe) throw new ApiError(503, 'Payments are not configured');
 
     const prep = await this._prepareAcceptCheckout(buyerId, offerId);
-    const { offer, buyer, milestoneRows, fees } = prep;
+    const { offer, buyer, milestoneRows, fees, liability } = prep;
 
     const metadata = {
       type: 'shop_custom_offer',
@@ -1292,15 +1404,12 @@ export class ShopCustomOfferService {
       ? await SubscriptionService.getOrCreateStripeCustomer(buyerId)
       : null;
 
-    const intent = await stripe.paymentIntents.create({
-      amount: fees.chargedCents,
-      currency: 'usd',
-      ...(stripeCustomerId
-        ? { customer: stripeCustomerId, setup_future_usage: 'off_session' }
-        : buyer?.email?.trim()
-          ? { receipt_email: buyer.email.trim() }
-          : {}),
-      metadata,
+    const { amountCents: taxAmountCents } = await this._calculateServiceNativeTax({
+      chargedCents: fees.chargedCents,
+      country,
+      postalCode,
+      state,
+      liability,
     });
 
     await db
@@ -1310,9 +1419,26 @@ export class ShopCustomOfferService {
         basePriceCoveredCents: prep.installmentBase,
         sellerReceiveCents: fees.sellerReceiveCents,
         platformShareCents: fees.platformShareCents,
+        taxLiability: liability ? liability.type : 'none',
         updatedAt: new Date(),
       })
       .where(eq(shopCustomServiceOffers.id, offer.id));
+
+    const intent = await stripe.paymentIntents.create({
+      amount: fees.chargedCents + taxAmountCents,
+      currency: 'usd',
+      ...(stripeCustomerId
+        ? { customer: stripeCustomerId, setup_future_usage: 'off_session' }
+        : buyer?.email?.trim()
+          ? { receipt_email: buyer.email.trim() }
+          : {}),
+      // taxAmountCents rides along in metadata (not pre-written to the
+      // offer's cumulative taxAmountCents column, which accept/remainder/
+      // milestone all share) so the webhook can read exactly what THIS
+      // payment collected without racing or clobbering an already-written
+      // total from an earlier installment — see handlePaymentWebhook.
+      metadata: { ...metadata, taxAmountCents: String(taxAmountCents) },
+    });
 
     return { clientSecret: intent.client_secret, paymentId: offer.id };
   }
@@ -1380,6 +1506,24 @@ export class ShopCustomOfferService {
     // other job on these offers, releasing tips.
     const isMilestones = offer.paymentMode === 'milestones';
 
+    // Tax (Services) — TAX_STRATEGY.md §3.6, NOT legally reviewed. Mirrors
+    // ShopOrderService.handlePaymentWebhook's dual-path extraction:
+    // `total_details` covers the hosted-Checkout path; the native-
+    // PaymentIntent path has no `total_details` on the shimmed "session"
+    // finalizeNativeAcceptPayment passes in, so it rides along in
+    // metadata.taxAmountCents instead (set at createNativeAcceptPaymentIntent
+    // — not pre-written to the offer row, which would risk racing/clobbering
+    // a later installment's own write to this same cumulative column).
+    const nativeTaxAmountCents = stripeSession.metadata?.taxAmountCents
+      ? Number(stripeSession.metadata.taxAmountCents) || 0
+      : 0;
+    const taxAmountCents = stripeSession.total_details?.amount_tax ?? nativeTaxAmountCents;
+    const sellerReceiveWithTax = applyTaxLiabilityToReserve(
+      offer.sellerReceiveCents ?? 0,
+      taxAmountCents,
+      offer.taxLiability
+    );
+
     const [updated] = await db
       .update(shopCustomServiceOffers)
       .set({
@@ -1388,8 +1532,9 @@ export class ShopCustomOfferService {
         stripeCustomerId, // NEW
         dueDate: computedDueDate, // NEW — the real due date, set here for the first time
         resolvedAt: paidAt,
+        taxAmountCents: (offer.taxAmountCents || 0) + taxAmountCents,
         // Held (not transferred) until 14/21 days after delivery — see createAcceptCheckout.
-        ...(isMilestones ? {} : { reserveAmountCents: offer.sellerReceiveCents ?? 0 }),
+        ...(isMilestones ? {} : { reserveAmountCents: sellerReceiveWithTax }),
         updatedAt: paidAt,
       })
       .where(
@@ -1423,6 +1568,8 @@ export class ShopCustomOfferService {
             paymentIntentId,
             stripeSessionId: stripeSession.id,
             paidAt,
+            taxAmountCents,
+            taxLiability: offer.taxLiability,
           });
         }
       } catch (err) {
@@ -2082,42 +2229,58 @@ export class ShopCustomOfferService {
       columns: { email: true },
     });
 
-    return { offer, buyer, remainingCents, fees };
+    // Tax (Services) — resolved fresh for this installment rather than
+    // reused from accept-time: a creator's nexus/registration can change
+    // between the two payments. See _prepareAcceptCheckout.
+    const { liability } = await PlusTaxLiabilityService.resolveLiability(offer.sellerId);
+
+    return { offer, buyer, remainingCents, fees, liability };
   }
 
   // ── Hosted Stripe Checkout session — shared tail for both remainder paths ─
   static async _createHostedRemainderSession(prep) {
-    const { offer, buyer, remainingCents, fees } = prep;
+    const { offer, buyer, remainingCents, fees, liability } = prep;
 
     const metadata = {
       type: 'shop_custom_offer_remainder',
       offerId: offer.id,
       buyerId: offer.buyerId,
       sellerId: offer.sellerId,
+      // Read back by handleRemainderPaymentWebhook — this installment's own
+      // liability resolution isn't persisted to the offer row until the
+      // webhook runs (taxLiability there just reflects "most recent"), so it
+      // rides along in metadata the same way taxAmountCents does for the
+      // native path below.
+      taxLiability: liability ? liability.type : 'none',
     };
+
+    const automaticTax = buildServiceAutomaticTax(liability);
+    const line_items = [
+      {
+        price_data: {
+          currency: 'usd',
+          unit_amount: remainingCents,
+          product_data: { name: `${offer.title} — remaining balance` },
+        },
+        quantity: 1,
+      },
+      {
+        price_data: {
+          currency: 'usd',
+          unit_amount: fees.platformAndServiceFeeCents,
+          product_data: { name: 'Platform & Service Fee' },
+        },
+        quantity: 1,
+      },
+    ];
+    if (automaticTax) _tagLineItemsForTax(line_items, SERVICE_TAX_CODE);
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
       expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: remainingCents,
-            product_data: { name: `${offer.title} — remaining balance` },
-          },
-          quantity: 1,
-        },
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: fees.platformAndServiceFeeCents,
-            product_data: { name: 'Platform & Service Fee' },
-          },
-          quantity: 1,
-        },
-      ],
+      ...(automaticTax ? { automatic_tax: automaticTax } : {}),
+      line_items,
       ui_mode: 'embedded',
       return_url: `${process.env.FRONTEND_URL}/bookings`,
       // Stripe rejects a session that sets both `customer` and
@@ -2143,19 +2306,36 @@ export class ShopCustomOfferService {
     return { paymentId: prep.offer.id };
   }
 
-  static async createNativeRemainderPaymentIntent(offerId, buyerId) {
+  static async createNativeRemainderPaymentIntent(
+    offerId,
+    buyerId,
+    { country, postalCode, state } = {}
+  ) {
     if (!stripe) throw new ApiError(503, 'Payments are not configured');
-    const { offer, buyer, fees } = await this._prepareRemainderCheckout(buyerId, offerId);
+    const { offer, buyer, fees, liability } = await this._prepareRemainderCheckout(
+      buyerId,
+      offerId
+    );
+
+    const { amountCents: taxAmountCents } = await this._calculateServiceNativeTax({
+      chargedCents: fees.chargedCents,
+      country,
+      postalCode,
+      state,
+      liability,
+    });
 
     const metadata = {
       type: 'shop_custom_offer_remainder',
       offerId: offer.id,
       buyerId: offer.buyerId,
       sellerId: offer.sellerId,
+      taxLiability: liability ? liability.type : 'none',
+      taxAmountCents: String(taxAmountCents),
     };
 
     const intent = await stripe.paymentIntents.create({
-      amount: fees.chargedCents,
+      amount: fees.chargedCents + taxAmountCents,
       currency: 'usd',
       ...(offer.stripeCustomerId
         ? { customer: offer.stripeCustomerId }
@@ -2223,15 +2403,32 @@ export class ShopCustomOfferService {
         ? stripeSession.payment_intent
         : (stripeSession.payment_intent?.id ?? null);
 
+    // Tax (Services) — this installment's own liability/amount, resolved at
+    // this checkout's own creation time (see _prepareRemainderCheckout) and
+    // carried here via metadata since it isn't persisted to the offer row
+    // until now. Dual-path extraction mirrors handlePaymentWebhook.
+    const remainderTaxLiability = stripeSession.metadata?.taxLiability ?? 'none';
+    const nativeTaxAmountCents = stripeSession.metadata?.taxAmountCents
+      ? Number(stripeSession.metadata.taxAmountCents) || 0
+      : 0;
+    const taxAmountCents = stripeSession.total_details?.amount_tax ?? nativeTaxAmountCents;
+    const sellerReceiveWithTax = applyTaxLiabilityToReserve(
+      fees.sellerReceiveCents,
+      taxAmountCents,
+      remainderTaxLiability
+    );
+
     const [updated] = await db
       .update(shopCustomServiceOffers)
       .set({
         chargedCents: (offer.chargedCents || 0) + fees.chargedCents,
-        sellerReceiveCents: (offer.sellerReceiveCents || 0) + fees.sellerReceiveCents,
+        sellerReceiveCents: (offer.sellerReceiveCents || 0) + sellerReceiveWithTax,
         basePriceCoveredCents: (offer.basePriceCoveredCents || 0) + remainingCents,
         platformShareCents: (offer.platformShareCents || 0) + fees.platformShareCents,
+        taxAmountCents: (offer.taxAmountCents || 0) + taxAmountCents,
+        taxLiability: remainderTaxLiability,
         // Held (not transferred) until 14/21 days after delivery — see createAcceptCheckout.
-        reserveAmountCents: (offer.reserveAmountCents || 0) + fees.sellerReceiveCents,
+        reserveAmountCents: (offer.reserveAmountCents || 0) + sellerReceiveWithTax,
         stripePaymentIntentId: paymentIntentId,
         updatedAt: paidAt,
       })
@@ -2242,7 +2439,7 @@ export class ShopCustomOfferService {
 
     if (!updated) return; // claimed concurrently
 
-    await PayoutLedgerService.creditHold(updated.sellerId, fees.sellerReceiveCents, {
+    await PayoutLedgerService.creditHold(updated.sellerId, sellerReceiveWithTax, {
       sourceType: 'shop_custom_offer',
       sourceId: updated.id,
     }).catch(err =>
@@ -2356,6 +2553,10 @@ export class ShopCustomOfferService {
       columns: { email: true },
     });
 
+    // Tax (Services) — resolved fresh for this stage, same reasoning as
+    // every other installment. See _prepareAcceptCheckout.
+    const { liability } = await PlusTaxLiabilityService.resolveLiability(offer.sellerId);
+
     const metadata = {
       type: 'shop_custom_offer_milestone',
       offerId: offer.id,
@@ -2363,6 +2564,9 @@ export class ShopCustomOfferService {
       position: String(milestone.position),
       buyerId,
       sellerId: offer.sellerId,
+      // Read back by handleMilestonePaymentWebhook — see the same note on
+      // _createHostedRemainderSession.
+      taxLiability: liability ? liability.type : 'none',
     };
 
     const redirectUrls = getRedirectUrls(
@@ -2373,6 +2577,29 @@ export class ShopCustomOfferService {
     );
     const nativeRedirect = isNativePlatform(platform);
 
+    const automaticTax = buildServiceAutomaticTax(liability);
+    const line_items = [
+      {
+        price_data: {
+          currency: 'usd',
+          unit_amount: milestone.amountCents,
+          product_data: {
+            name: `${offer.title} — ${milestone.label} (milestone ${milestone.position + 1} of ${rows.length})`,
+          },
+        },
+        quantity: 1,
+      },
+      {
+        price_data: {
+          currency: 'usd',
+          unit_amount: fees.platformAndServiceFeeCents,
+          product_data: { name: 'Platform & Service Fee' },
+        },
+        quantity: 1,
+      },
+    ];
+    if (automaticTax) _tagLineItemsForTax(line_items, SERVICE_TAX_CODE);
+
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
@@ -2380,26 +2607,8 @@ export class ShopCustomOfferService {
       ...(nativeRedirect
         ? { success_url: redirectUrls.successUrl, cancel_url: redirectUrls.cancelUrl }
         : { ui_mode: 'embedded', return_url: redirectUrls.successUrl }),
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: milestone.amountCents,
-            product_data: {
-              name: `${offer.title} — ${milestone.label} (milestone ${milestone.position + 1} of ${rows.length})`,
-            },
-          },
-          quantity: 1,
-        },
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: fees.platformAndServiceFeeCents,
-            product_data: { name: 'Platform & Service Fee' },
-          },
-          quantity: 1,
-        },
-      ],
+      ...(automaticTax ? { automatic_tax: automaticTax } : {}),
+      line_items,
       // Stripe rejects a session that sets both `customer` and
       // `customer_email` — same mutually-exclusive handling as
       // createRemainderCheckout.
@@ -2454,7 +2663,12 @@ export class ShopCustomOfferService {
     return { paymentId: milestone.id };
   }
 
-  static async createNativeMilestonePaymentIntent(offerId, milestoneId, buyerId) {
+  static async createNativeMilestonePaymentIntent(
+    offerId,
+    milestoneId,
+    buyerId,
+    { country, postalCode, state } = {}
+  ) {
     if (!stripe) throw new ApiError(503, 'Payments are not configured');
     const offer = await this.loadOffer(offerId);
     if (offer.buyerId !== buyerId) throw new ApiError(403, 'This offer is not for you');
@@ -2482,6 +2696,17 @@ export class ShopCustomOfferService {
       columns: { email: true },
     });
 
+    // Tax (Services) — resolved fresh for this stage. See
+    // _prepareAcceptCheckout.
+    const { liability } = await PlusTaxLiabilityService.resolveLiability(offer.sellerId);
+    const { amountCents: taxAmountCents } = await this._calculateServiceNativeTax({
+      chargedCents: fees.chargedCents,
+      country,
+      postalCode,
+      state,
+      liability,
+    });
+
     const metadata = {
       type: 'shop_custom_offer_milestone',
       offerId: offer.id,
@@ -2489,10 +2714,12 @@ export class ShopCustomOfferService {
       position: String(milestone.position),
       buyerId,
       sellerId: offer.sellerId,
+      taxLiability: liability ? liability.type : 'none',
+      taxAmountCents: String(taxAmountCents),
     };
 
     const intent = await stripe.paymentIntents.create({
-      amount: fees.chargedCents,
+      amount: fees.chargedCents + taxAmountCents,
       currency: 'usd',
       ...(offer.stripeCustomerId
         ? { customer: offer.stripeCustomerId }
@@ -2551,17 +2778,34 @@ export class ShopCustomOfferService {
         ? stripeSession.payment_intent
         : (stripeSession.payment_intent?.id ?? null);
 
+    // Tax (Services) — this stage's own liability/amount, resolved at this
+    // checkout's own creation time (see createMilestoneFundingCheckout /
+    // createNativeMilestonePaymentIntent) and carried via metadata since
+    // it's written straight to the milestone row by _markMilestoneFunded,
+    // never staged on the offer. Dual-path extraction mirrors
+    // handlePaymentWebhook.
+    const milestoneTaxLiability = stripeSession.metadata?.taxLiability ?? 'none';
+    const nativeTaxAmountCents = stripeSession.metadata?.taxAmountCents
+      ? Number(stripeSession.metadata.taxAmountCents) || 0
+      : 0;
+    const taxAmountCents = stripeSession.total_details?.amount_tax ?? nativeTaxAmountCents;
+
     const result = await this._markMilestoneFunded(milestone, {
       paymentIntentId,
       stripeSessionId: stripeSession.id,
       paidAt,
+      taxAmountCents,
+      taxLiability: milestoneTaxLiability,
     });
     if (!result) return; // claimed concurrently
 
     const { milestone: funded, fees } = result;
 
     // Offer-level running totals only — NOT reserveAmountCents.
-    await this._addMilestoneMoneyToOffer(offerId, funded.amountCents, fees, paidAt);
+    await this._addMilestoneMoneyToOffer(offerId, funded.amountCents, fees, paidAt, {
+      taxAmountCents,
+      sellerReceiveCents: funded.sellerReceiveCents,
+    });
 
     await this.logActivity(offerId, offer.buyerId, 'milestone_funded', {
       milestoneId: funded.id,

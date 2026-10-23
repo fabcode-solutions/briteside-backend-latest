@@ -264,12 +264,14 @@ export class PaymentService {
     if (eventInfo?.venueId) {
       const [v] = await db
         .select({
+          id: venues.id,
           address: venues.address,
           city: venues.city,
           state: venues.state,
           country: venues.country,
           countryCode: venues.countryCode,
           postalCode: venues.postalCode,
+          stripeTaxLocationId: venues.stripeTaxLocationId,
         })
         .from(venues)
         .where(eq(venues.id, eventInfo.venueId));
@@ -478,19 +480,20 @@ export class PaymentService {
     // Facilitator-jurisdiction tax is withheld from the organizer's payout
     // entirely and remitted by Briteside under its own tax ID (§2.1) —
     // kept out of organizerGrossCents the same way the platform fee is.
-    // Absorbed organizer-state tax is ALSO withheld here per this
-    // feature's product spec ("deducted from the organizer's own revenue
-    // instead of added on top") — TODO(tax): unlike the facilitator case,
-    // Briteside has no registration/remittance pipeline in these states,
-    // so this amount currently just stays on Briteside's platform balance
-    // with no automatic remittance anywhere. That's a real open question
-    // (flagged, not silently resolved) for whoever reviews this feature
-    // next — it may need to become an escrowed/organizer-owed balance
-    // instead of platform float. Non-absorbed organizer-state tax is NOT
-    // withheld — it rides through to the organizer's payout per §2.2
-    // ("passed to the organizer... organizer is solely responsible").
-    const taxWithheldFromOrganizerCents =
-      tax.jurisdictionStatus === 'facilitator' ? taxAmountCents : taxAbsorbed ? taxAmountCents : 0;
+    // Organizer-state tax (Tax Tool, §2.2) is NEVER withheld by Briteside,
+    // absorbed or not — the source doc states unconditionally that
+    // "Eventbrite passes the collected tax funds to the organizer inside
+    // their regular payout," with no carve-out for an absorbed toggle, and
+    // Briteside has no nexus/registration in these states to justify
+    // holding tax funds on its own platform balance (the same
+    // regulatory-liability principle the Briteside Plus doc states
+    // explicitly for creator payouts applies here). "Absorbed" only
+    // changes whether the buyer is charged the tax on top (see
+    // taxChargedToBuyerCents above) — the organizer still receives the
+    // full buyer total in their payout and is solely responsible for
+    // remitting the tax themselves out of it, same as the non-absorbed
+    // case.
+    const taxWithheldFromOrganizerCents = tax.jurisdictionStatus === 'facilitator' ? taxAmountCents : 0;
 
     // Briteside keeps the platform fee (+ any withheld tax) as its share
     // of the Connect transfer split — see comment above on what "withheld"

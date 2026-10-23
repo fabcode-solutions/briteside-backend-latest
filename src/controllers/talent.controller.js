@@ -2,6 +2,9 @@
  * src/controllers/talent.controller.js
  */
 
+import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc.js';
+import timezone from 'dayjs/plugin/timezone.js';
 import { catchAsync } from '../utils/catch-async.js';
 import ApiError from '../utils/api-error.js';
 import { db } from '../db/index.js';
@@ -23,6 +26,9 @@ import { OrderService } from '../services/order.service.js';
 import { talentProfiles } from '../db/schema/talentProfiles.js';
 import { talentCategories } from '../db/schema/talentCategories.js';
 import { ShopCustomOfferService } from '../services/shop/shopCustomOffer.service.js';
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 // ─── TALENT PROFILE ───────────────────────────────────────────────────────────
 
@@ -232,8 +238,21 @@ export const prepareSessionBooking = catchAsync(async (req, res) => {
 export const createSessionNativePaymentIntent = catchAsync(async (req, res) => {
   const result = await TalentSessionService.createNativePaymentIntent(
     req.params.sessionId,
-    req.user.id
+    req.user.id,
+    { country: req.body?.country, postalCode: req.body?.postalCode, state: req.body?.state }
   );
+  res.json({ success: true, data: result });
+});
+
+// Lets NativeCheckoutForm show the real tax amount (and total) as the
+// booker types their ZIP/state, before they submit payment — mirrors
+// Shop's own native-tax-preview endpoint.
+export const previewSessionNativeTax = catchAsync(async (req, res) => {
+  const result = await TalentSessionService.previewNativeTax(req.params.sessionId, req.user.id, {
+    country: req.body?.country,
+    postalCode: req.body?.postalCode,
+    state: req.body?.state,
+  });
   res.json({ success: true, data: result });
 });
 
@@ -335,13 +354,14 @@ export const endSession = catchAsync(async (req, res) => {
  * Returns: { sessions, total, page, limit, totalPages }
  */
 export const listMySessions = catchAsync(async (req, res) => {
-  const { role, tab, status, date, page, limit } = req.query;
+  const { role, tab, status, date, page, limit, tz } = req.query;
 
   const result = await TalentSessionService.listForUser(req.user.id, {
     role: role || 'all',
     tab: tab || 'all',
     status,
     date,
+    tz: tz || req.user.timezone,
     page: page ? parseInt(page) : 1,
     limit: limit ? parseInt(limit) : 10,
   });
@@ -417,9 +437,13 @@ export const getSession = catchAsync(async (req, res) => {
  * }
  */
 export const getMyBookedEvents = catchAsync(async (req, res) => {
-  const { page, limit, status, date } = req.query;
+  const { page, limit, status, date, tz } = req.query;
   const pageNum = page ? parseInt(page) : 1;
   const limitNum = limit ? parseInt(limit) : 10;
+  // An explicit `tz` from the caller (the viewer's own browser) is the most
+  // accurate source for "which calendar day is this" — fall back to their
+  // stored account timezone, then UTC.
+  const viewerTz = tz || req.user.timezone || 'UTC';
 
   const [eventResult, sessionResult] = await Promise.all([
     OrderService.listUserOrders(req.user.id, {
@@ -433,6 +457,7 @@ export const getMyBookedEvents = catchAsync(async (req, res) => {
       role: 'all',
       tab: 'all',
       date,
+      tz: viewerTz,
       page: pageNum,
       limit: limitNum,
     }),
@@ -440,8 +465,13 @@ export const getMyBookedEvents = catchAsync(async (req, res) => {
 
   let items = eventResult.items ?? [];
   if (date) {
-    const dayStart = new Date(`${date}T00:00:00.000Z`);
-    const dayEnd = new Date(`${date}T23:59:59.999Z`);
+    // Use the viewer's own local calendar day, not a raw UTC day — otherwise
+    // an event stored a few hours either side of midnight UTC gets grouped
+    // under the wrong day for anyone not in UTC (it would show up when
+    // picking one date and vanish from the day the viewer actually sees it
+    // land on).
+    const dayStart = dayjs.tz(date, viewerTz).startOf('day').utc().toDate();
+    const dayEnd = dayjs.tz(date, viewerTz).endOf('day').utc().toDate();
     items = items.filter(item => {
       const startDate = new Date(item.event?.startDate);
       return startDate >= dayStart && startDate <= dayEnd;

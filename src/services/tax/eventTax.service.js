@@ -1,5 +1,8 @@
 import Stripe from 'stripe';
+import { eq } from 'drizzle-orm';
 import config from '../../config/config.js';
+import { db } from '../../db/index.js';
+import { venues } from '../../db/schema/venues.js';
 import { getEventTaxStatus, EVENT_TAX_CODES } from '../../lib/tax/eventTaxJurisdictions.js';
 import { normalizeStateToAbbr } from '../../lib/tax/usStates.js';
 
@@ -8,16 +11,21 @@ import { normalizeStateToAbbr } from '../../lib/tax/usStates.js';
 // venue (src/lib/tax/eventTaxJurisdictions.js); never trust a client-supplied
 // "this state is a facilitator state" flag.
 //
-// IMPORTANT — a documented limitation of this implementation, not a guess:
-// TAX_STRATEGY.md describes sourcing the tax rate from Stripe's
-// "performance_location" for in-person events. That is not a real parameter
-// in the installed `stripe` SDK (v19.3.1) — checked against its Tax
-// Calculation, Checkout Session, and automatic_tax type definitions, none of
-// which expose a venue/performance-location concept distinct from the
-// buyer's own billing/shipping address. The closest real mechanism (and
-// Stripe's own documented approach for tax on ticketed/live events) is to
-// pass the VENUE's address as `customer_details.address` on a standalone Tax
-// Calculation, which is what `_calculateFacilitatorInPersonTax` below does.
+// CORRECTED (was previously documented as a limitation — it no longer is):
+// this used to pass only the venue's address as `customer_details.address`,
+// on the belief that Stripe's Tax Calculation API had no real
+// venue/performance-location concept. Stripe has since shipped exactly that
+// (see docs.stripe.com/tax/tax-for-tickets) — live testing confirmed
+// `txcd_50013001` (business conference) outright REJECTS a calculation with
+// a 400 unless a `performance_location` is supplied, and the error only
+// offers two ways to do it: a Tax Location id, or (per the error text) an
+// inline address — but Stripe's own API reference for
+// `line_items.performance_location` documents it as a plain string "tax
+// location ID" only, created ahead of time via `POST /v1/tax/locations`
+// (type: performance) and reused across transactions for the same site —
+// see `_getOrCreatePerformanceLocation` below. `customer_details.address`
+// is still sent alongside it (harmless, and still the fallback if location
+// creation itself fails).
 // For virtual events (no venue to anchor to), TAX_STRATEGY.md §2.4 already
 // calls for buyer-billing-address sourcing, which maps directly onto
 // Checkout's native `automatic_tax` (collected live during the hosted
@@ -41,7 +49,10 @@ if (config.stripe?.secretKey) {
 export class EventTaxService {
   /**
    * @param {object} params
-   * @param {{address?: string, city?: string|null, state?: string|null, country?: string|null, countryCode?: string|null, postalCode?: string|null}|null} params.venue
+   * @param {{id?: string, address?: string, city?: string|null, state?: string|null, country?: string|null, countryCode?: string|null, postalCode?: string|null, stripeTaxLocationId?: string|null}|null} params.venue
+   *   `id`/`stripeTaxLocationId` are optional — when present, lets the
+   *   in-person facilitator branch reuse (or cache) a Stripe Tax Location
+   *   instead of creating one fresh. See `_getOrCreatePerformanceLocation`.
    * @param {string} params.eventMode - 'in_person' | 'virtual'
    * @param {number} params.subtotalCents - the taxable "Buyer Total" (ticket subtotal + any passed-on platform fee — see TAX_STRATEGY.md §2.1; the caller in payment.service.js already adds the platform fee in before passing this).
    * @param {object|null} params.organizerTax - the event's persisted `tax` opt-in object, or null.
@@ -132,20 +143,69 @@ export class EventTaxService {
   }
 
   /**
-   * Pre-checkout Stripe Tax Calculation anchored to the venue's address
-   * (see the module-level comment on why this stands in for
-   * "performance_location"). Briteside is the liable party by definition in
-   * a facilitator jurisdiction, so no `stripe_account`/liability override is
-   * passed — this uses Briteside's own platform Tax Settings/registrations.
-   * Falls toward $0 (not an error) if Stripe isn't configured, the venue's
-   * state can't be normalized, or the calculation call itself fails — a
-   * broken tax lookup must never block a sale or guess a nonzero amount.
+   * Returns a reusable Stripe Tax Location (type: performance) id for this
+   * venue, creating one if it doesn't have one cached yet. Stripe's own
+   * guidance (docs.stripe.com/tax/tax-for-tickets) is to create one location
+   * per physical site and reuse it across every calculation for it, rather
+   * than minting a fresh one per ticket sale.
+   *
+   * Required for `txcd_50013001` (confirmed via a live 400 otherwise) and
+   * documented as "required, optional, or not supported" depending on tax
+   * code in general — supplying it whenever available is always safe.
+   *
+   * Falls back to null (not an error) on any failure — same fail-toward-$0
+   * posture as the rest of this file. The caller's own address-based
+   * calculation still proceeds without it; for a code that strictly
+   * requires it, that calculation will itself then fail and correctly fall
+   * back to $0 via the existing catch block below, rather than this
+   * function throwing and blocking the sale.
+   */
+  static async _getOrCreatePerformanceLocation(venue) {
+    if (venue?.stripeTaxLocationId) return venue.stripeTaxLocationId;
+    if (!stripe) return null;
+
+    try {
+      const location = await stripe.tax.locations.create({
+        type: 'performance',
+        address: {
+          line1: venue.address || undefined,
+          city: venue.city || undefined,
+          state: normalizeStateToAbbr(venue.state) || undefined,
+          postal_code: venue.postalCode || undefined,
+          country: venue.countryCode || 'US',
+        },
+      });
+      if (venue?.id) {
+        await db
+          .update(venues)
+          .set({ stripeTaxLocationId: location.id })
+          .where(eq(venues.id, venue.id));
+      }
+      return location.id;
+    } catch (err) {
+      console.error('[EventTax] failed to create performance tax location, continuing without one:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Pre-checkout Stripe Tax Calculation anchored to the venue's address and
+   * (when available) a cached performance Tax Location — see
+   * `_getOrCreatePerformanceLocation`. Briteside is the liable party by
+   * definition in a facilitator jurisdiction, so no `stripe_account`/
+   * liability override is passed — this uses Briteside's own platform Tax
+   * Settings/registrations. Falls toward $0 (not an error) if Stripe isn't
+   * configured, the venue's state can't be normalized, or the calculation
+   * call itself fails — a broken tax lookup must never block a sale or
+   * guess a nonzero amount.
    */
   static async _calculateFacilitatorInPersonTax({ venue, subtotalCents, taxCode }) {
     if (!stripe || subtotalCents <= 0) return 0;
 
     const stateAbbr = normalizeStateToAbbr(venue.state);
     if (!stateAbbr) return 0;
+
+    const performanceLocation = await EventTaxService._getOrCreatePerformanceLocation(venue);
 
     try {
       const calculation = await stripe.tax.calculations.create({
@@ -156,6 +216,7 @@ export class EventTaxService {
             reference: 'event_tickets',
             tax_code: taxCode,
             tax_behavior: 'exclusive',
+            ...(performanceLocation ? { performance_location: performanceLocation } : {}),
           },
         ],
         customer_details: {
@@ -168,7 +229,8 @@ export class EventTaxService {
           // Neither a real "billing" nor "shipping" address — this is the
           // venue's address standing in for Stripe Tax's address sourcing.
           // 'billing' is used since there is no third option; see the
-          // module-level comment.
+          // module-level comment. Kept alongside performance_location —
+          // harmless, and still the only input if location creation failed.
           address_source: 'billing',
         },
       });
