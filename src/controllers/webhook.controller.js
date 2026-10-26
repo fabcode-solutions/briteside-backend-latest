@@ -17,7 +17,7 @@ import { UserSpendService } from '../services/userSpend.service.js';
 import ApiError from '../utils/api-error.js';
 import { OrderService } from '../services/order.service.js';
 import { PaymentService } from '../services/payment.service.js';
-import { buildTicketBundleUrl } from '../utils/helper.js';
+import { buildTicketBundleUrl, buildTicketViewUrl } from '../utils/helper.js';
 import { generateTicketCode } from '../utils/code-generator.js';
 import QRCode from 'qrcode';
 import { UploadService } from '../services/upload.service.js';
@@ -395,6 +395,16 @@ export async function handleCheckoutSession(session) {
     eventScheduleId: (session.metadata && session.metadata.eventScheduleId) || null,
   };
 
+  // The in-app PaymentSheet flow (payment.service.js#processPaymentSheetIntent)
+  // builds a synthetic "session" with customer_details: null, so holderEmail
+  // only exists here if the client explicitly sent one. Fall back to the
+  // buyer's own account email so a logged-in purchase never silently skips
+  // the confirmation email just because the request body omitted it.
+  if (!holderInfo.holderEmail && order?.userId) {
+    const buyer = await db.query.users.findFirst({ where: eq(users.id, order.userId) });
+    if (buyer?.email) holderInfo.holderEmail = buyer.email;
+  }
+
   if (order) {
     const { updatedOrder, previousStatus } = await OrderService.updateOrder(
       order.id,
@@ -423,13 +433,16 @@ export async function handleCheckoutSession(session) {
       ticketIssueResult = await OrderService.issueTicketsAndMerchandise(order.id, holderInfo);
       console.log('Issued tickets & merchandise for order:', order.id);
       if (holderInfo.holderEmail && ticketIssueResult?.tickets?.length > 0) {
-        const downloadUrl = `${process.env.API_HOST || 'https://gokyro.com'}/tickets/user`;
+        const downloadUrl = buildTicketViewUrl(
+          ticketIssueResult.tickets.map(t => t.viewToken)
+        );
         await sendTicketPurchaseEmail(
           holderInfo.holderEmail,
           ticketIssueResult.event,
           ticketIssueResult.tickets,
           ticketIssueResult.event.venue,
-          downloadUrl
+          downloadUrl,
+          { receiptUrl, orderId: order.id }
         );
       }
     } catch (err) {

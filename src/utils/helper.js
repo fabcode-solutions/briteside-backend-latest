@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import crypto from 'crypto';
 import dayjs from 'dayjs';
 import { db } from '../db/index.js';
 import {
@@ -205,6 +206,30 @@ export function buildTicketUrl(ticketCode) {
   }
   const frontendBase = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://gokyro.com';
   return `${frontendBase.replace(/\/+$/, '')}/tickets/${encodeURIComponent(ticketCode)}`;
+}
+
+/**
+ * Crypto-strength secret for a no-login ticket view link — same pattern as
+ * DoorSalesService.createToken(). Not the Math.random-based ticketCode.
+ * @returns {string}
+ */
+export function generateTicketViewToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+/**
+ * Build a frontend "view your tickets without logging in" URL for one or
+ * more tickets issued from the same purchase.
+ * @param {string|string[]} viewTokens
+ * @returns {string}
+ */
+export function buildTicketViewUrl(viewTokens) {
+  const tokens = (Array.isArray(viewTokens) ? viewTokens : [viewTokens]).filter(Boolean);
+  if (tokens.length === 0) {
+    throw new Error('At least one view token is required');
+  }
+  const frontendBase = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://gokyro.com';
+  return `${frontendBase.replace(/\/+$/, '')}/ticket/view/${encodeURIComponent(tokens.join(','))}`;
 }
 
 /**
