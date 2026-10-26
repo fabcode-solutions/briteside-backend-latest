@@ -154,7 +154,7 @@ export class UploadService {
         ContentType: file.mimetype || 'application/octet-stream',
         ACL: 'public-read',
         Metadata: {
-          'original-name': file.originalname,
+          'original-name': encodeURIComponent(file.originalname),
           'upload-timestamp': new Date().toISOString(),
           'file-size': file.size.toString(),
           'uploaded-by': userId?.toString() || 'anonymous',
