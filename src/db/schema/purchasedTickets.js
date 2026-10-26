@@ -59,6 +59,12 @@ export const purchasedTickets = pgTable(
     refundAmount: decimal('refund_amount', { precision: 10, scale: 2 }),
     trackingLinkId: uuid('tracking_link_id').references(() => trackingLinks.id),
     snsSubscriptionArn: varchar('sns_subscription_arn', { length: 512 }),
+    // Secret for the no-login "view your ticket" link sent in the purchase
+    // confirmation email — a crypto.randomBytes token (see TicketService
+    // .issueViewToken / doorSales.service.js#createToken for the same
+    // pattern), not the weak Math.random-based ticketCode.
+    viewToken: varchar('view_token', { length: 64 }).unique(),
+    viewTokenExpiresAt: timestamp('view_token_expires_at', { withTimezone: true }),
     purchasedAt: timestamp('purchased_at', { withTimezone: true }).defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
   },
@@ -74,5 +80,6 @@ export const purchasedTickets = pgTable(
     index('idx_purchased_tickets_scanned_at').on(table.lastScannedAt),
     index('idx_purchased_tickets_phone').on(table.holderPhone),
     index('idx_purchased_tickets_tracking_link').on(table.trackingLinkId),
+    index('idx_purchased_tickets_view_token').on(table.viewToken),
   ]
 );

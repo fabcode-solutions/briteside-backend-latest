@@ -19,10 +19,13 @@ import QRCode from 'qrcode';
 import { UploadService } from './upload.service.js';
 import { MediaModerationService, MEDIA_ENTITY } from './moderation/mediaModeration.service.js';
 import { subscribeWithRetry } from '../utils/aws.util.js';
+import { generateTicketViewToken } from '../utils/helper.js';
 
 const DEFAULT_PAGE_LIMIT = 20;
 const MAX_PAGE_LIMIT = 100;
 const SORTABLE_ORDER_FIELDS = ['createdAt', 'totalAmount', 'status'];
+// How long the no-login "view your ticket" email link stays valid for.
+const TICKET_VIEW_TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 
 function getEffectiveTicketPrice(tier) {
   const base = parseFloat(tier.price);
@@ -632,6 +635,8 @@ export class OrderService {
                 qrCode: JSON.stringify(qrCodeData),
                 status: 'active',
                 eventScheduleId: holderInfo.eventScheduleId || null,
+                viewToken: generateTicketViewToken(),
+                viewTokenExpiresAt: new Date(Date.now() + TICKET_VIEW_TOKEN_TTL_MS),
                 purchasedAt: new Date(),
                 updatedAt: new Date(),
               })

@@ -137,3 +137,18 @@ export const issueTicketForUser = catchAsync(async (req, res) => {
     data: { tickets: result.tickets, event: result.event },
   });
 });
+
+// ---------------------------------------------------------------------------
+// Public (no-login) endpoint — "view your ticket" link from the purchase
+// confirmation email
+// ---------------------------------------------------------------------------
+
+export const getTicketsByViewToken = catchAsync(async (req, res) => {
+  const { tokens } = req.params;
+  if (!tokens) throw new ApiError(400, 'A view token is required');
+
+  const tokenList = tokens.split(',').filter(Boolean);
+  const result = await TicketService.getTicketsByViewTokens(tokenList);
+
+  res.json({ success: true, data: result });
+});

@@ -19,6 +19,10 @@ import { EventScheduleService } from './eventSchedule.service.js';
 import { VirtualDetailsService } from './virtualDetails.service.js';
 import { subscribeWithRetry } from '../utils/aws.util.js';
 import { eventTicketScheduleInventory } from '../db/schema/events.js';
+import { generateTicketViewToken, buildTicketViewUrl } from '../utils/helper.js';
+
+// How long the no-login "view your ticket" email link stays valid for.
+const TICKET_VIEW_TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 /**
  * Shared formatter that shapes a flat DB row into the standard ticket-sale
  * response object. The order processing fee and the 5% platform fee are both
@@ -178,6 +182,8 @@ export class TicketService {
             holderPhone,
             price: ticketTier.price,
             qrCode: ticketCode,
+            viewToken: generateTicketViewToken(),
+            viewTokenExpiresAt: new Date(Date.now() + TICKET_VIEW_TOKEN_TTL_MS),
             purchasedAt: new Date(),
             updatedAt: new Date(),
           })
@@ -270,11 +276,11 @@ export class TicketService {
       event = eventInfo;
       venue = eventInfo.venue;
       userEmail = holderEmail;
-      downloadUrl = `${process.env.API_HOST || 'https://gokyro.com'}/tickets/user`;
     }
 
     try {
       if (userEmail && event && venue && tickets.length > 0) {
+        downloadUrl = buildTicketViewUrl(tickets.map(t => t.viewToken));
         await sendTicketPurchaseEmail(userEmail, event, tickets, venue, downloadUrl);
       }
     } catch (mailError) {
@@ -353,6 +359,57 @@ export class TicketService {
       ...ticket,
       event: eventMap[ticket.eventId] ?? null,
     }));
+  }
+
+  /**
+   * Public, no-login lookup for the "view your ticket" link sent in the
+   * purchase confirmation email. Unlike ticketCode (Math.random-based,
+   * see generateTicketCode), viewToken is a crypto.randomBytes secret, so
+   * matching it is the only access check this needs — same trust model as
+   * the door-sales public routes.
+   */
+  static async getTicketsByViewTokens(tokens) {
+    const tokenList = (Array.isArray(tokens) ? tokens : [tokens]).filter(Boolean);
+    if (tokenList.length === 0) {
+      throw new ApiError(400, 'A view token is required');
+    }
+
+    const tickets = await db.query.purchasedTickets.findMany({
+      where: inArray(purchasedTickets.viewToken, tokenList),
+    });
+
+    const now = new Date();
+    let validTickets = tickets.filter(
+      t => t.viewTokenExpiresAt && new Date(t.viewTokenExpiresAt) > now
+    );
+
+    if (validTickets.length === 0) {
+      throw new ApiError(404, 'Ticket link not found or expired');
+    }
+
+    // All tokens in one email link always come from the same purchase/event;
+    // drop any mismatched token rather than mixing events on one page.
+    const eventId = validTickets[0].eventId;
+    validTickets = validTickets.filter(t => t.eventId === eventId);
+
+    const event = await db.query.events.findFirst({
+      where: eq(events.id, eventId),
+      with: { venue: true },
+    });
+
+    if (!event) {
+      throw new ApiError(404, 'Event not found');
+    }
+
+    let virtualDetails = null;
+    try {
+      virtualDetails = await VirtualDetailsService.getVirtualDetails(eventId);
+    } catch {}
+
+    return {
+      tickets: validTickets,
+      event: { ...event, virtualDetails },
+    };
   }
 
   /**

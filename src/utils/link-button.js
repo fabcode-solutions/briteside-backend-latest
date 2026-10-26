@@ -61,7 +61,7 @@ export const sanitizeLinkButton = (linkButton, isPlus, surface) => {
     throw new ApiError(422, "This link can't be used on this platform.");
   }
 
-  if (isBlocked(parsed.href)) {
+  if (isBlocked(parsed.hostname).blocked) {
     logger.warn('[blocklist] blocked link submitted', {
       field: 'linkButton.url',
       url: parsed.href,

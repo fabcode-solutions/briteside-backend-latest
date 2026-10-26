@@ -13,9 +13,15 @@ import {
   getOrganizerEventTickets,
   getOrganizerAllSales,
   issueTicketForUser,
+  getTicketsByViewToken,
 } from '../controllers/ticket.controller.js';
 
 const router = express.Router();
+
+// Public route — "view your ticket" link from the purchase confirmation
+// email, no login required (security relies on the token's entropy + expiry,
+// same trust model as the door-sales public routes).
+router.get('/view/:tokens', getTicketsByViewToken);
 
 // Protected routes
 router.post('/purchase', authMiddleware, purchaseTickets);
