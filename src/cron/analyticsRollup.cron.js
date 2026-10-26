@@ -8,6 +8,9 @@ import {
   productAnalyticsDaily,
   serviceAnalyticsDaily,
   talentProfiles,
+  posts,
+  groups,
+  shopProducts,
 } from '../db/schema/index.js';
 import { cronLogger as logger } from '../config/logger.js';
 
@@ -23,6 +26,11 @@ const ROLLUP_TARGETS = {
     table: postAnalyticsDaily,
     idColumn: postAnalyticsDaily.postId,
     idField: 'postId',
+    // entityTable/entityIdColumn: where to check the referenced entity still
+    // exists before upserting — postId/groupId/etc are FOREIGN KEYs, so a
+    // bucket for a since-deleted entity throws on insert otherwise.
+    entityTable: posts,
+    entityIdColumn: posts.id,
     columns: {
       impression: 'impressions',
       view: 'views',
@@ -36,6 +44,8 @@ const ROLLUP_TARGETS = {
     table: groupAnalyticsDaily,
     idColumn: groupAnalyticsDaily.groupId,
     idField: 'groupId',
+    entityTable: groups,
+    entityIdColumn: groups.id,
     columns: {
       impression: 'impressions',
       view: 'views',
@@ -47,6 +57,8 @@ const ROLLUP_TARGETS = {
     table: productAnalyticsDaily,
     idColumn: productAnalyticsDaily.productId,
     idField: 'productId',
+    entityTable: shopProducts,
+    entityIdColumn: shopProducts.id,
     columns: {
       impression: 'impressions',
       view: 'views',
@@ -57,6 +69,8 @@ const ROLLUP_TARGETS = {
     table: serviceAnalyticsDaily,
     idColumn: serviceAnalyticsDaily.talentProfileId,
     idField: 'talentProfileId',
+    entityTable: talentProfiles,
+    entityIdColumn: talentProfiles.id,
     columns: {
       impression: 'impressions',
       view: 'views',
@@ -148,26 +162,34 @@ export async function runAnalyticsRollup() {
 
   const buckets = aggregate(rows);
 
-  // A talent profile referenced by a logged 'service' event can be deleted
-  // (or never existed, e.g. a stale/replayed event) by the time this cron
-  // runs — service_analytics_daily.talent_profile_id is a FOREIGN KEY, so
-  // upserting against a missing one throws and aborts the whole batch.
-  // Skip those buckets rather than let one dangling id fail every other
-  // rollup in the run.
-  const serviceIds = [...new Set(buckets.filter(b => b.entityType === 'service').map(b => b.entityId))];
-  let existingTalentProfileIds = new Set();
-  if (serviceIds.length > 0) {
+  // The entity a bucket is for (post/group/product/talent profile) can be
+  // deleted — or never existed, e.g. a stale/replayed event — by the time
+  // this cron runs. Every rollup table's id column is a FOREIGN KEY to that
+  // entity, so upserting against a missing one throws and aborts the whole
+  // batch, including every unrelated, perfectly valid bucket queued after
+  // it. Check existence per entity type up front and skip dangling ones
+  // rather than let one bad id fail the entire run.
+  const idsByType = new Map();
+  for (const bucket of buckets) {
+    if (!idsByType.has(bucket.entityType)) idsByType.set(bucket.entityType, new Set());
+    idsByType.get(bucket.entityType).add(bucket.entityId);
+  }
+
+  const existingIdsByType = new Map();
+  for (const [entityType, ids] of idsByType) {
+    const target = ROLLUP_TARGETS[entityType];
     const existing = await db
-      .select({ id: talentProfiles.id })
-      .from(talentProfiles)
-      .where(inArray(talentProfiles.id, serviceIds));
-    existingTalentProfileIds = new Set(existing.map(row => row.id));
+      .select({ id: target.entityIdColumn })
+      .from(target.entityTable)
+      .where(inArray(target.entityIdColumn, [...ids]));
+    existingIdsByType.set(entityType, new Set(existing.map(row => row.id)));
   }
 
   for (const bucket of buckets) {
-    if (bucket.entityType === 'service' && !existingTalentProfileIds.has(bucket.entityId)) {
-      logger.warn('[Cron] AnalyticsRollup: skipping service event for missing talent profile', {
-        talentProfileId: bucket.entityId,
+    if (!existingIdsByType.get(bucket.entityType)?.has(bucket.entityId)) {
+      logger.warn('[Cron] AnalyticsRollup: skipping event for missing entity', {
+        entityType: bucket.entityType,
+        entityId: bucket.entityId,
         date: bucket.date,
       });
       continue;

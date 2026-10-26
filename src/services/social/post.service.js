@@ -272,7 +272,12 @@ export class PostService {
    * the user's own events list — a mismatch here means a real bug, not a
    * free-text edge case.
    */
-  static async _resolveLinkButtonEventRef(userId, sanitizedLinkButton, { eventId, ticketId } = {}) {
+  static async _resolveLinkButtonEventRef(userId, sanitizedLinkButton, rawLinkButton) {
+    // `= {}` as a parameter default only covers `undefined`, not an explicit
+    // `null` — callers pass `settings?.linkButton` here, which is `null`
+    // whenever the client explicitly clears the link button, crashing this
+    // destructure. Falling back inside the body handles both.
+    const { eventId, ticketId } = rawLinkButton || {};
     if (!sanitizedLinkButton || !eventId) return sanitizedLinkButton;
 
     const [owned] = await db
