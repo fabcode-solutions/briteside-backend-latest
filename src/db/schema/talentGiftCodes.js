@@ -4,10 +4,12 @@
  * talent profile and session duration.
  *
  * Lifecycle:
- *   active    → code has been generated and emailed to the recipient
- *   redeemed  → recipient used the code to book a session
- *   expired   → code was never used and its validity period passed
- *   cancelled → gifter cancelled before delivery / support action
+ *   awaiting_payment → gift purchase created, waiting on the gifter's payment
+ *   active           → payment confirmed; code is valid and will be (or has
+ *                      been) emailed to the recipient
+ *   redeemed         → recipient used the code to book a session
+ *   expired          → code was never used and its validity period passed
+ *   cancelled        → gifter cancelled before delivery / support action
  *
  * The code itself is an 8-character uppercase alphanumeric string
  * (e.g. "GIFT-A3K9") that is unique across the table.
@@ -66,7 +68,11 @@ export const talentGiftCodes = pgTable(
 
     // Status
     status: varchar('status', { length: 20 }).notNull().default('active'),
-    // active | redeemed | expired | cancelled
+    // awaiting_payment | active | redeemed | expired | cancelled
+
+    // Set while status is 'awaiting_payment' — the native checkout PaymentIntent
+    // this purchase is waiting on, so finalize can verify it server-side.
+    stripePaymentIntentId: varchar('stripe_payment_intent_id', { length: 255 }),
 
     // Set when redeemed
     redeemedAt: timestamp('redeemed_at', { withTimezone: true }),

@@ -26,23 +26,33 @@
  *   - The talent's cut is NOT reserved for the Stripe Connect release cron
  *     (reserveAmountCents 0, same as shop IAP). Paying talents for IAP sales
  *     needs a separate settlement process this doesn't build.
- *   - The 72h no-reply auto-refund only refunds through Stripe, so it skips
- *     IAP payments (no stripePaymentIntent). Apple/Google refunds are
- *     requested by the buyer through the store.
+ *   - The 72h no-reply job handles IAP payments separately
+ *     (PriorityMessageService._closeExpiredIapPayment): a Google payment
+ *     with nothing answered is refunded through Play; otherwise it's closed
+ *     and the buyer is told to ask the store.
+ *   - Each store purchase is claimed once across shop + priority messages
+ *     (IapClaimService); sandbox purchases are recorded with amountCents 0.
  */
 
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
+import logger from '../config/logger.js';
+import config from '../config/config.js';
 import { db } from '../db/index.js';
 import { priorityMessagePayments } from '../db/schema/index.js';
 import ApiError from '../utils/api-error.js';
 import { PriorityMessageService } from './priorityMessage.service.js';
 import { ShopIapService } from './shop/shopIap.service.js';
+import { IapClaimService, IAP_REASON, iapError } from './iapClaim.service.js';
 import {
   getTierConfig,
   productIdForTier,
   tierForProductId,
   tierForWebChargedCents,
 } from './iapTiers.js';
+
+// A finalize retry re-runs delivery only once the first attempt has clearly
+// failed, never while it may still be running (delivery isn't idempotent).
+const DELIVERY_RETRY_AFTER_MS = 2 * 60 * 1000;
 
 export class PriorityMessageIapService {
   /** The App's source of truth for tiers (shared with the shop — iapTiers.js). */
@@ -77,10 +87,7 @@ export class PriorityMessageIapService {
         .update(priorityMessagePayments)
         .set({ status: 'failed', updatedAt: new Date() })
         .where(eq(priorityMessagePayments.id, payment.id));
-      throw new ApiError(
-        400,
-        'This message is too large to pay for in the app. Please use Pay on Web.'
-      );
+      throw new ApiError(400, 'This message is too large to pay for in the app.');
     }
 
     const iapProductId = this.productIdForTier(tierCents);
@@ -109,59 +116,97 @@ export class PriorityMessageIapService {
     });
     if (!payment) throw new ApiError(404, 'Payment not found');
     if (payment.senderId !== senderId) throw new ApiError(403, 'Forbidden');
-    if (payment.status !== 'pending') {
-      throw new ApiError(409, 'This payment has already been processed');
-    }
     if (!payment.iapProductId) {
       throw new ApiError(400, 'This payment was not prepared for in-app purchase');
     }
 
+    let verified;
     let verifiedTransactionId;
     let googleOrderId = null;
     if (store === 'apple') {
       if (!transactionId) throw new ApiError(400, '`transactionId` is required');
-      const decoded = await ShopIapService.verifyAppleTransaction(transactionId);
-      if (decoded.productId !== payment.iapProductId) {
+      verified = await ShopIapService.verifyAppleTransaction(transactionId);
+      if (verified.productId !== payment.iapProductId) {
         throw new ApiError(400, "This transaction doesn't match this payment");
       }
-      verifiedTransactionId = decoded.transactionId;
+      verifiedTransactionId = verified.transactionId;
     } else if (store === 'google') {
       if (!purchaseToken) throw new ApiError(400, '`purchaseToken` is required');
       // Throws unless purchaseState is "purchased" for exactly this product.
-      const googlePurchase = await ShopIapService.verifyGooglePurchase(
-        purchaseToken,
-        payment.iapProductId
-      );
-      await ShopIapService.rejectRealMoneyGooglePurchase(googlePurchase, testOnly);
+      verified = await ShopIapService.verifyGooglePurchase(purchaseToken, payment.iapProductId);
+      await ShopIapService.rejectRealMoneyGooglePurchase(verified, testOnly);
       verifiedTransactionId = purchaseToken;
-      googleOrderId = googlePurchase.orderId ?? null;
+      googleOrderId = verified.orderId ?? null;
     } else {
       throw new ApiError(400, '`store` must be "apple" or "google"');
     }
+    IapClaimService.assertBuyer(store, verified, senderId, config.iap.accountTokenRequiredFrom);
+    const environment = IapClaimService.environmentOf(store, verified);
 
     // What the sender actually paid is the tier price, not the web total —
-    // recorded before delivery so spend/"Total spent" reflect it.
+    // recorded before delivery so spend/"Total spent" reflect it. Sandbox
+    // purchases move no real money, so they record 0.
     const tierCents = this.tierForProductId(payment.iapProductId);
-    try {
-      await db
+    const amountCents = environment === 'sandbox' ? 0 : tierCents;
+
+    // Claim + "pending → this purchase" commit together; the conditional
+    // update stops two different purchases both paying for one payment.
+    const retryDelivery = await db.transaction(async tx => {
+      const conflict = await IapClaimService.claim(tx, {
+        store,
+        transactionId: verifiedTransactionId,
+        userId: senderId,
+        purpose: 'priority_message',
+        referenceId: payment.id,
+        productId: payment.iapProductId,
+        environment,
+      });
+      if (conflict) {
+        if (conflict.purpose !== 'priority_message' || conflict.referenceId !== payment.id) {
+          throw IapClaimService.transactionUsed();
+        }
+        // Our own retry. Delivered already → nothing to do. Still pending
+        // well after verification → the earlier delivery failed; retry it.
+        // (A recent one may still be in flight — don't deliver twice.)
+        const current = await tx.query.priorityMessagePayments.findFirst({
+          where: eq(priorityMessagePayments.id, payment.id),
+          columns: { status: true, iapVerifiedAt: true },
+        });
+        const stalled =
+          current?.status === 'pending' &&
+          current.iapVerifiedAt &&
+          Date.now() - current.iapVerifiedAt.getTime() > DELIVERY_RETRY_AFTER_MS;
+        if (!stalled) throw IapClaimService.alreadyRecorded();
+        return true;
+      }
+
+      const updated = await tx
         .update(priorityMessagePayments)
         .set({
           purchaseChannel: store === 'apple' ? 'apple_iap' : 'google_iap',
           iapTransactionId: verifiedTransactionId,
           iapOrderId: googleOrderId,
           iapVerifiedAt: new Date(),
-          ...(tierCents ? { amountCents: tierCents } : {}),
+          ...(amountCents != null ? { amountCents } : {}),
           updatedAt: new Date(),
         })
-        .where(eq(priorityMessagePayments.id, payment.id));
-    } catch (err) {
-      // Unique violation on iap_transaction_id — this purchase was already
-      // used for a payment (retried/duplicate finalize call).
-      if (err.code === '23505') {
-        throw new ApiError(409, 'This purchase has already been recorded');
+        .where(
+          and(
+            eq(priorityMessagePayments.id, payment.id),
+            eq(priorityMessagePayments.status, 'pending'),
+            isNull(priorityMessagePayments.iapTransactionId)
+          )
+        )
+        .returning({ id: priorityMessagePayments.id });
+      if (updated.length === 0) {
+        throw iapError(
+          409,
+          'This payment has already been processed',
+          IAP_REASON.PAYMENT_PROCESSED
+        );
       }
-      throw err;
-    }
+      return false;
+    });
 
     const delivered = await PriorityMessageService._deliverPaidPayment(payment.id, {
       senderId: payment.senderId,
@@ -176,6 +221,16 @@ export class PriorityMessageIapService {
       );
     }
 
-    return { paymentId: payment.id, ...delivered };
+    // Google auto-refunds a purchase not acknowledged within 3 days. The App
+    // consumes it (which acknowledges) after this returns; acknowledging here
+    // covers an App killed before it could.
+    if (store === 'google') {
+      await ShopIapService.acknowledgeGooglePurchase(purchaseToken, payment.iapProductId).catch(
+        err =>
+          logger.error(`[PriorityIap] Google acknowledge failed for ${payment.id}: ${err.message}`)
+      );
+    }
+
+    return { paymentId: payment.id, retriedDelivery: retryDelivery, ...delivered };
   }
 }

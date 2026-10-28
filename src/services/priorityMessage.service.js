@@ -36,6 +36,7 @@ import { getRedirectUrls, isNativePlatform } from '../utils/redirect-urls.js';
 import { socialConversations } from '../db/schema/socialChat.js';
 import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
 import { PayoutLedgerService } from './payoutLedger.service.js';
+import { computeExpiredRefund } from './priorityMessageRefund.js';
 import { stripeCustomers } from '../db/schema/britesidePlus.js';
 import { PlusTaxLiabilityService } from './tax/plusTaxLiability.service.js';
 import {
@@ -2163,19 +2164,36 @@ export class PriorityMessageService {
     const isGoogle = payment.purchaseChannel === 'google_iap';
     const canRefundInFull = isGoogle && repliedItems === 0 && !!payment.iapOrderId;
 
-    if (canRefundInFull) {
-      await ShopIapService.refundGoogleOrder(payment.iapOrderId);
-    }
-
+    // Close it first (only if still open) so overlapping runs can't both
+    // refund; reopen it if Google rejects the refund so the next run retries.
     const now = new Date();
-    await db
+    const [closed] = await db
       .update(priorityMessagePayments)
       .set({
         status: canRefundInFull ? 'refunded' : 'expired',
         ...(canRefundInFull ? { refundedAt: now } : {}),
         updatedAt: now,
       })
-      .where(eq(priorityMessagePayments.id, payment.id));
+      .where(
+        and(
+          eq(priorityMessagePayments.id, payment.id),
+          inArray(priorityMessagePayments.status, ['paid', 'partial'])
+        )
+      )
+      .returning({ id: priorityMessagePayments.id });
+    if (!closed) return;
+
+    if (canRefundInFull) {
+      try {
+        await ShopIapService.refundGoogleOrder(payment.iapOrderId);
+      } catch (err) {
+        await db
+          .update(priorityMessagePayments)
+          .set({ status: payment.status, refundedAt: null, updatedAt: new Date() })
+          .where(eq(priorityMessagePayments.id, payment.id));
+        throw err;
+      }
+    }
 
     await db
       .update(priorityMessageItems)
@@ -2213,6 +2231,46 @@ export class PriorityMessageService {
     });
   }
 
+  /**
+   * Lowers a payment's held talent cut (reserveAmountCents + the payout
+   * ledger hold) after part of the charge was refunded. Only before the
+   * first release — after that the money is no longer in the hold.
+   */
+  static async _reduceTalentReserve(paymentId, cents, reason) {
+    const payment = await db.query.priorityMessagePayments.findFirst({
+      where: eq(priorityMessagePayments.id, paymentId),
+      columns: { talentUserId: true, reserveAmountCents: true, standardReleasedAt: true },
+    });
+    if (!payment || payment.standardReleasedAt || !payment.reserveAmountCents) return;
+    const cut = Math.min(Math.max(0, cents), payment.reserveAmountCents); // cents may be Infinity
+    if (cut <= 0) return;
+
+    const [updated] = await db
+      .update(priorityMessagePayments)
+      .set({
+        reserveAmountCents: sql`${priorityMessagePayments.reserveAmountCents} - ${cut}`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(priorityMessagePayments.id, paymentId),
+          eq(priorityMessagePayments.reserveAmountCents, payment.reserveAmountCents),
+          isNull(priorityMessagePayments.standardReleasedAt)
+        )
+      )
+      .returning({ id: priorityMessagePayments.id });
+    // Changed underneath us (concurrent release/refund) — leave it alone.
+    if (!updated) return;
+
+    await PayoutLedgerService.reverseHold(payment.talentUserId, cut, {
+      sourceType: 'priority_message',
+      sourceId: paymentId,
+      reason,
+    }).catch(err =>
+      console.error(`[PriorityMessage] ledger reverseHold failed for ${paymentId}: ${err.message}`)
+    );
+  }
+
   static async processExpiredRefunds() {
     const cutoff = new Date(Date.now() - REPLY_WINDOW_MS);
 
@@ -2243,8 +2301,6 @@ export class PriorityMessageService {
 
         const totalItems = deliveredItems.length;
         const repliedItems = totalItems - unrepliedItems.length;
-        const refundRatio = unrepliedItems.length / totalItems;
-        const refundCents = Math.round(payment.amountCents * refundRatio);
 
         // Paid in the App Store / Google Play — no Stripe charge to refund.
         if (payment.purchaseChannel === 'apple_iap' || payment.purchaseChannel === 'google_iap') {
@@ -2257,20 +2313,7 @@ export class PriorityMessageService {
           continue;
         }
 
-        // Only update DB if Stripe refund actually succeeds (or no payment intent)
-        if (payment.stripePaymentIntent) {
-          await stripe.refunds.create({
-            payment_intent: payment.stripePaymentIntent,
-            amount: refundCents,
-            reason: 'requested_by_customer',
-            metadata: {
-              reason: '72h_no_response',
-              paymentId: payment.id,
-              unrepliedItems: unrepliedItems.length,
-              totalItems,
-            },
-          });
-        } else {
+        if (!payment.stripePaymentIntent) {
           // No payment intent — log and skip, don't mark refunded
           console.warn(
             `[PriorityMessage] No stripePaymentIntent for ${payment.id} — skipping refund`
@@ -2278,24 +2321,60 @@ export class PriorityMessageService {
           continue;
         }
 
+        const attachments = await db.query.priorityMessageAttachments.findMany({
+          where: eq(priorityMessageAttachments.paymentId, payment.id),
+          columns: { id: true, priceCents: true, status: true },
+        });
+        const { isFullRefund, refundCents, reserveCutCents } = computeExpiredRefund({
+          amountCents: payment.amountCents,
+          baseCents: payment.baseCents,
+          attachments,
+          totalItems,
+          unrepliedItems: unrepliedItems.length,
+        });
+
+        if (refundCents > 0) {
+          // Idempotent across cron overlaps / a failed status write below:
+          // a repeat call returns the same refund instead of a second one.
+          await stripe.refunds.create(
+            {
+              payment_intent: payment.stripePaymentIntent,
+              amount: refundCents,
+              reason: 'requested_by_customer',
+              metadata: {
+                reason: isFullRefund ? '72h_no_response' : '72h_partial_no_response',
+                paymentId: payment.id,
+                unrepliedItems: unrepliedItems.length,
+                totalItems,
+              },
+            },
+            { idempotencyKey: `pm-72h-refund-${payment.id}` }
+          );
+        }
+
         // Use 'partial_refunded' when some items WERE replied to (talent keeps earnings)
         // Use 'refunded' only when nothing was replied to at all
-        const newStatus = repliedItems > 0 ? 'partial_refunded' : 'refunded';
+        const newStatus = isFullRefund ? 'refunded' : 'partial_refunded';
+        const now = new Date();
 
-        await db
+        const [closed] = await db
           .update(priorityMessagePayments)
-          .set({
-            status: newStatus,
-            refundedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(priorityMessagePayments.id, payment.id));
+          .set({ status: newStatus, refundedAt: now, updatedAt: now })
+          .where(
+            and(
+              eq(priorityMessagePayments.id, payment.id),
+              inArray(priorityMessagePayments.status, ['paid', 'partial'])
+            )
+          )
+          .returning({ id: priorityMessagePayments.id });
+        // Another run closed it first — it also did the bookkeeping below.
+        if (!closed) continue;
 
         // Mark unreplied items as closed — 'expired' (not 'replied', not
         // eligible for a late reply to earn) now that the refund has issued.
         await db
           .update(priorityMessageItems)
-          .set({ repliedAt: new Date(), status: 'expired' })
+          .set({ repliedAt: now, status: 'expired' })
           .where(
             inArray(
               priorityMessageItems.id,
@@ -2303,8 +2382,22 @@ export class PriorityMessageService {
             )
           );
 
+        if (isFullRefund) {
+          await db
+            .update(priorityMessageAttachments)
+            .set({ status: 'refunded', refundedAt: now })
+            .where(
+              and(
+                eq(priorityMessageAttachments.paymentId, payment.id),
+                ne(priorityMessageAttachments.status, 'refunded')
+              )
+            );
+        }
+
+        // The talent's held cut shrinks by what was refunded.
+        await this._reduceTalentReserve(payment.id, reserveCutCents, '72h_refund');
+
         const refundDollars = (refundCents / 100).toFixed(2);
-        const isFullRefund = repliedItems === 0;
 
         await createNotification({
           userId: payment.senderId,
@@ -2323,43 +2416,6 @@ export class PriorityMessageService {
             refundCents,
           },
         });
-
-        // Refund all attachments (viewed or not) if talent never replied within 72h
-        const refundableAttachments = await db.query.priorityMessageAttachments.findMany({
-          where: and(
-            eq(priorityMessageAttachments.paymentId, payment.id),
-            ne(priorityMessageAttachments.status, 'refunded')
-          ),
-          columns: { id: true, priceCents: true },
-        });
-
-        if (refundableAttachments.length > 0 && payment.stripePaymentIntent) {
-          const attachmentRefundCents = refundableAttachments.reduce(
-            (sum, a) => sum + a.priceCents,
-            0
-          );
-
-          await stripe.refunds.create({
-            payment_intent: payment.stripePaymentIntent,
-            amount: attachmentRefundCents,
-            reason: 'requested_by_customer',
-            metadata: {
-              reason: '48h_no_reply_attachment_refund',
-              paymentId: payment.id,
-              attachmentCount: String(refundableAttachments.length),
-            },
-          });
-
-          await db
-            .update(priorityMessageAttachments)
-            .set({ status: 'refunded', refundedAt: new Date() })
-            .where(
-              inArray(
-                priorityMessageAttachments.id,
-                refundableAttachments.map(a => a.id)
-              )
-            );
-        }
       } catch (err) {
         console.error(`[PriorityMessage] Refund failed for ${payment.id}:`, err.message);
       }
@@ -2396,21 +2452,35 @@ export class PriorityMessageService {
     }
 
     try {
-      await stripe.refunds.create({
-        payment_intent: payment.stripePaymentIntent,
-        amount: attachment.priceCents,
-        reason: 'requested_by_customer',
-        metadata: {
-          reason: 'moderation_rejected_attachment',
-          paymentId: payment.id,
-          attachmentId: attachment.id,
+      await stripe.refunds.create(
+        {
+          payment_intent: payment.stripePaymentIntent,
+          amount: attachment.priceCents,
+          reason: 'requested_by_customer',
+          metadata: {
+            reason: 'moderation_rejected_attachment',
+            paymentId: payment.id,
+            attachmentId: attachment.id,
+          },
         },
-      });
+        { idempotencyKey: `pm-attachment-refund-${attachment.id}` }
+      );
 
-      await db
+      const [claimed] = await db
         .update(priorityMessageAttachments)
         .set({ status: 'refunded', refundedAt: new Date() })
-        .where(eq(priorityMessageAttachments.id, attachment.id));
+        .where(
+          and(
+            eq(priorityMessageAttachments.id, attachment.id),
+            ne(priorityMessageAttachments.status, 'refunded')
+          )
+        )
+        .returning({ id: priorityMessageAttachments.id });
+      // Another run already recorded this refund (same idempotency key).
+      if (!claimed) return;
+
+      // The attachment price was part of the talent's held cut.
+      await this._reduceTalentReserve(payment.id, attachment.priceCents, 'attachment_refund');
 
       const refundDollars = (attachment.priceCents / 100).toFixed(2);
       if (payment?.senderId) {

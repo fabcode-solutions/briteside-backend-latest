@@ -432,21 +432,30 @@ export async function handleCheckoutSession(session) {
     try {
       ticketIssueResult = await OrderService.issueTicketsAndMerchandise(order.id, holderInfo);
       console.log('Issued tickets & merchandise for order:', order.id);
-      if (holderInfo.holderEmail && ticketIssueResult?.tickets?.length > 0) {
+    } catch (err) {
+      console.error('Failed to issue tickets after payment:', err);
+    }
+
+    if (holderInfo.holderEmail && ticketIssueResult?.tickets?.length > 0) {
+      try {
         const downloadUrl = buildTicketViewUrl(
           ticketIssueResult.tickets.map(t => t.viewToken)
         );
+        const venue = ticketIssueResult.event?.venueId
+          ? await db.query.venues.findFirst({ where: eq(venues.id, ticketIssueResult.event.venueId) })
+          : null;
         await sendTicketPurchaseEmail(
           holderInfo.holderEmail,
           ticketIssueResult.event,
           ticketIssueResult.tickets,
-          ticketIssueResult.event.venue,
+          venue,
           downloadUrl,
           { receiptUrl, orderId: order.id }
         );
+        console.log('Sent ticket purchase email for order:', order.id);
+      } catch (err) {
+        console.error('Failed to send ticket purchase email for order:', order.id, err);
       }
-    } catch (err) {
-      console.error('Failed to issue tickets after payment:', err);
     }
 
     // Record spend — fire-and-forget, payment already confirmed

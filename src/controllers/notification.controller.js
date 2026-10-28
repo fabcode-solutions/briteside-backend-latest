@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 const updateNotificationSchema = z.object({
   isRead: z.boolean().optional(),
+  isSeen: z.boolean().optional(),
 });
 
 const updateSettingsSchema = z.object({

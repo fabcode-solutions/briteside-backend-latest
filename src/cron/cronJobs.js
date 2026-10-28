@@ -30,6 +30,7 @@ import { refreshFromS3IfNewer } from '../services/urlModeration/scheduler.js';
 import { processCustomOfferAutoApprove } from './customOfferAutoApprove.js';
 import { ensureAnalyticsPartitions } from './analyticsPartitionMaintenance.cron.js';
 import { runAnalyticsRollup } from './analyticsRollup.cron.js';
+import { deliverScheduledGifts } from './deliverScheduledGifts.js';
 // Wraps a cron callback — catches any top-level uncaught throw and logs it.
 const runCron = (name, fn) => async () => {
   try {
@@ -73,6 +74,9 @@ export const initializeCronJobs = () => {
 
   // Run daily at 8 AM to send birthday notifications to followers
   cron.schedule('0 8 * * *', runCron('birthdayNotifications', processBirthdayNotifications));
+
+  // Run daily at 8 AM to deliver gift emails whose chosen delivery date has arrived
+  cron.schedule('0 8 * * *', runCron('deliverScheduledGifts', deliverScheduledGifts));
 
   // 24h reminder — runs every hour
   cron.schedule('0 * * * *', runCron('sessionReminders24h', processSessionReminders24h));

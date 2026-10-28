@@ -603,7 +603,7 @@ export class SubscriptionService {
       // Couldn't recover a usable PaymentIntent from the stale subscription —
       // cancel it so it doesn't keep shadowing future attempts, then fall
       // through to create a fresh one.
-      await stripe.subscriptions.cancel(stale.id).catch(() => {});
+      await stripe.subscriptions.cancel(stale.id).catch(() => { });
     }
 
     const user = await db.query.users.findFirst({
@@ -1581,8 +1581,8 @@ export class SubscriptionService {
           : 'soon';
         const suspensionDate = invoice.next_payment_attempt
           ? dayjs(invoice.next_payment_attempt * 1000)
-              .add(14, 'days')
-              .format('MMMM D, YYYY')
+            .add(14, 'days')
+            .format('MMMM D, YYYY')
           : dayjs().add(21, 'days').format('MMMM D, YYYY');
         await sendBridesidePlusPaymentFailedEmail(user.email, {
           user_name: user.firstName,

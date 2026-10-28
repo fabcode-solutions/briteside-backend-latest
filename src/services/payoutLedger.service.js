@@ -91,6 +91,36 @@ export class PayoutLedgerService {
   }
 
   /**
+   * Undoes (part of) a creditHold whose money was refunded to the buyer
+   * before any of it was released — same 85/15 split, so a full reversal
+   * exactly cancels the original hold.
+   */
+  static async reverseHold(userId, totalCents, { sourceType, sourceId, reason, metadata = {} } = {}) {
+    if (!totalCents || totalCents <= 0) return null;
+
+    const reserveCents = Math.round(totalCents * 0.15);
+    const pendingCents = totalCents - reserveCents;
+
+    const ledger = await this.getOrCreateLedger(userId);
+
+    await db
+      .update(creatorPayoutLedgers)
+      .set({
+        pendingCents: sql`${creatorPayoutLedgers.pendingCents} - ${pendingCents}`,
+        reserveCents: sql`${creatorPayoutLedgers.reserveCents} - ${reserveCents}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(creatorPayoutLedgers.id, ledger.id));
+
+    await db.insert(payoutLedgerEntries).values([
+      { ledgerId: ledger.id, sourceType, sourceId, bucket: 'pending', amountCents: -pendingCents, reason, metadata },
+      { ledgerId: ledger.id, sourceType, sourceId, bucket: 'reserve', amountCents: -reserveCents, reason, metadata },
+    ]);
+
+    return { ledgerId: ledger.id, pendingCents, reserveCents };
+  }
+
+  /**
    * Moves money from 'pending' or 'reserve' into 'available' — call this
    * right where the cron actually transfers money to the seller's Connect
    * balance (once the transfer succeeds), never speculatively ahead of it.

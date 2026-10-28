@@ -23,7 +23,7 @@ export async function sendEventPublishedEmail(organizerEmail, event) {
       }</strong> has been published and is now visible to users on GoKyro.</p>
       <p>Event Date: <strong>${new Date(event.startDate).toLocaleString()}</strong></p>
       <p>Thank you for using GoKyro!</p>
-      <p>Best regards,<br>GoKyro Team</p>
+      <p>Best regards,<br>Briteside Team</p>
     </div>
   `;
   const text = `Your event "${event.title}" is now published!\nEvent Date: ${new Date(
@@ -44,6 +44,7 @@ export async function sendTicketPurchaseEmail(
   options = {}
 ) {
   const { receiptUrl, orderId } = options;
+  venue = venue || {};
   const subject = `Your tickets for ${event.title}`;
   // Group tickets by holderName
   const ticketsByHolder = tickets.reduce((acc, t) => {
@@ -63,27 +64,106 @@ export async function sendTicketPurchaseEmail(
     )
     .join('');
 
+  const BRAND_GREEN = '#09c375';
+  const TEXT_DARK = '#1a1a1a';
+  const TEXT_MUTED = '#6b7280';
+  const BORDER = '#e5e7eb';
+  const LOGO_URL = `${FRONTEND_URL}/assets/logo/logo.png`;
+
+  const ticketCardsHtml = Object.entries(ticketsByHolder)
+    .map(
+      ([holder, codes]) => `
+        <tr>
+          <td style="padding: 14px 18px; border: 1px solid ${BORDER}; border-radius: 10px; background: #f9fafb;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="font-family: 'Inter', Arial, sans-serif; font-size: 14px; color: ${TEXT_MUTED};">Holder</td>
+                <td align="right" style="font-family: 'Inter', Arial, sans-serif; font-size: 14px; color: ${TEXT_DARK}; font-weight: 600;">${holder}</td>
+              </tr>
+              <tr>
+                <td style="font-family: 'Inter', Arial, sans-serif; font-size: 14px; color: ${TEXT_MUTED}; padding-top: 6px;">Status</td>
+                <td align="right" style="padding-top: 6px;">
+                  <span style="font-family: 'Inter', Arial, sans-serif; font-size: 12px; font-weight: 600; color: ${BRAND_GREEN}; background: rgba(9,195,117,0.12); border-radius: 999px; padding: 2px 10px; display: inline-block;">Active</span>
+                </td>
+              </tr>
+              <tr>
+                <td colspan="2" style="font-family: 'Inter', Arial, sans-serif; font-size: 14px; color: ${TEXT_MUTED}; padding-top: 6px;">
+                  Ticket Code${codes.length > 1 ? 's' : ''}: <span style="color: ${TEXT_DARK}; font-weight: 600; font-family: 'Courier New', monospace;">${codes.join(', ')}</span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr><td style="height: 10px; line-height: 10px; font-size: 0;">&nbsp;</td></tr>`
+    )
+    .join('');
+
+  const detailRow = (label, value) =>
+    value
+      ? `<tr>
+          <td style="padding: 6px 0; font-family: 'Inter', Arial, sans-serif; font-size: 14px; color: ${TEXT_MUTED}; width: 110px; vertical-align: top;">${label}</td>
+          <td style="padding: 6px 0; font-family: 'Inter', Arial, sans-serif; font-size: 14px; color: ${TEXT_DARK}; font-weight: 500;">${value}</td>
+        </tr>`
+      : '';
+
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #333;">Ticket Purchase Confirmation</h2>
-      <p>Thank you for your purchase! Here are your ticket details:</p>
-      <ul>${ticketList}</ul>
-      <h3>Event Details</h3>
-      <p><strong>${event.title}</strong></p>
-      <p>Date: ${new Date(event.startDate).toLocaleString()}</p>
-      <p>Venue: ${venue.name}, ${venue.address}</p>
-      <p>Location: ${venue.city}, ${venue.state}, ${venue.country}, ${venue.postalCode}</p>
-      ${orderId ? `<p><strong>Order ID:</strong> ${orderId}</p>` : ''}
-      ${receiptUrl ? `<p><strong>Payment Receipt:</strong> <a href="${receiptUrl}">${receiptUrl}</a></p>` : ''}
-      <p>View and download your tickets: <a href="${downloadUrl}">${downloadUrl}</a></p>
-      <p>Best regards,<br/>GoKyro Team</p>
-    </div>
+  <div style="background: #f3f4f6; padding: 32px 16px; font-family: 'Inter', Arial, sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto;">
+      <tr>
+        <td align="center" style="padding-bottom: 24px;">
+          <img src="${LOGO_URL}" alt="Briteside" height="32" style="height: 32px; width: auto; display: inline-block;" />
+        </td>
+      </tr>
+      <tr>
+        <td style="background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid ${BORDER};">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="background: ${BRAND_GREEN}; padding: 28px 32px;">
+                <p style="margin: 0; font-family: 'Inter', Arial, sans-serif; font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: rgba(255,255,255,0.85);">Ticket Purchase Confirmed</p>
+                <h1 style="margin: 6px 0 0; font-family: 'Inter', Arial, sans-serif; font-size: 22px; color: #ffffff;">${event.title}</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 28px 32px 8px;">
+                <p style="margin: 0 0 20px; font-family: 'Inter', Arial, sans-serif; font-size: 15px; color: ${TEXT_DARK};">Thank you for your purchase! Your tickets are confirmed — here are the details.</p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  ${ticketCardsHtml}
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 32px 0;">
+                <p style="margin: 20px 0 10px; font-family: 'Inter', Arial, sans-serif; font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: ${TEXT_MUTED};">Event Details</p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  ${detailRow('Date', new Date(event.startDate).toLocaleString())}
+                  ${detailRow('Venue', venue.name ? `${venue.name}${venue.address ? `, ${venue.address}` : ''}` : '')}
+                  ${detailRow('Location', venue.city ? `${venue.city}, ${venue.state}, ${venue.country}, ${venue.postalCode}` : '')}
+                  ${detailRow('Order ID', orderId)}
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td align="center" style="padding: 28px 32px 32px;">
+                <a href="${downloadUrl}" style="display: inline-block; background: ${BRAND_GREEN}; color: #ffffff; font-family: 'Inter', Arial, sans-serif; font-size: 15px; font-weight: 600; text-decoration: none; padding: 13px 32px; border-radius: 10px;">View &amp; Download Tickets</a>
+                ${receiptUrl ? `<p style="margin: 16px 0 0; font-family: 'Inter', Arial, sans-serif; font-size: 13px;"><a href="${receiptUrl}" style="color: ${TEXT_MUTED}; text-decoration: underline;">View payment receipt</a></p>` : ''}
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td align="center" style="padding: 24px 16px 0;">
+          <p style="margin: 0; font-family: 'Inter', Arial, sans-serif; font-size: 13px; color: ${TEXT_MUTED};">Best regards,<br/>Briteside Team</p>
+        </td>
+      </tr>
+    </table>
+  </div>
   `;
 
-  const text = `Your tickets for ${event.title}\nVenue: ${venue.name}, ${
-    venue.address
-  }\nLocation: ${venue.city}, ${venue.state}, ${venue.country}, ${
-    venue.postalCode
+  const text = `Your tickets for ${event.title}${
+    venue.name ? `\nVenue: ${venue.name}${venue.address ? `, ${venue.address}` : ''}` : ''
+  }${
+    venue.city ? `\nLocation: ${venue.city}, ${venue.state}, ${venue.country}, ${venue.postalCode}` : ''
   }\nDate: ${new Date(
     event.startDate
   ).toLocaleString()}${orderId ? `\nOrder ID: ${orderId}` : ''}${receiptUrl ? `\nPayment Receipt: ${receiptUrl}` : ''}\nView & Download Tickets: ${downloadUrl}\n\nTickets:\n${Object.entries(
@@ -200,7 +280,7 @@ export async function sendRefundConfirmationEmail(userEmail, order, refund, even
 
       <p>If you have any questions about this refund, please contact our support team.</p>
 
-      <p>Best regards,<br/>GoKyro Team</p>
+      <p>Best regards,<br/>Briteside Team</p>
     </div>
   `;
 
@@ -213,7 +293,7 @@ Refund Confirmation\n\nDear Customer,\n\nYour refund has been successfully proce
     itemsSummary.length > 0 ? `Items Refunded: ${itemsSummary.join(' and ')}\n` : ''
   }\nThe refund will be credited back to your original payment method within 5-10 business days.\n${
     refund.reason ? `\nReason: ${refund.reason}\n` : ''
-  }\nIf you have any questions about this refund, please contact our support team.\n\nBest regards,\nGoKyro Team
+  }\nIf you have any questions about this refund, please contact our support team.\n\nBest regards,\nBriteside Team
   `;
 
   try {
