@@ -1821,28 +1821,14 @@ export class TalentSessionService {
       console.error(`[TalentSession] ledger creditHold failed for session ${sessionId}: ${err.message}`)
     );
 
-    if (session.giftCode) {
-      await GiftCodeService.redeem(
-        session.giftCode,
-        session.talentProfileId,
-        session.durationMins,
-        session.id
-      ).catch(err => console.error('[GiftCode] redeem failed:', err.message));
-    }
-    if (session.isGift && session.giftDetails?.recipientEmail) {
-      await GiftCodeService.generate({
-        gifterId: session.bookerId,
-        talentProfileId: session.talentProfileId,
-        durationMins: session.durationMins,
-        priceCents: session.priceCents,
-        recipientName: session.giftDetails.recipientName ?? null,
-        recipientEmail: session.giftDetails.recipientEmail,
-        recipientPhone: session.giftDetails.recipientPhone ?? null,
-        occasion: session.giftDetails.occasion ?? null,
-        personalMessage: session.giftDetails.message ?? null,
-        deliveryDate: session.giftDetails.deliveryDate ?? null,
-      }).catch(err => console.error('[GiftCode] generate failed:', err.message));
-    }
+    // Note: gift purchases no longer create a talentSessions row at all
+    // (see GiftCodeService.preparePurchase/finalizeNativePayment) and gift
+    // redemption never reaches this payment webhook (it's free — handled
+    // directly in TalentSessionService.book()) — so session.giftCode /
+    // session.isGift can no longer be true here. The newStatus/acceptDeadline
+    // branches above are harmless no-ops now (existing.isGift is always
+    // false), kept rather than touched since this function also still
+    // serves every normal (non-gift) session payment.
 
     const [booker, profile] = await Promise.all([
       db.query.users.findFirst({ where: eq(users.id, session.bookerId) }),
@@ -2111,29 +2097,23 @@ export class TalentSessionService {
         streamCallCid: streamCall.cid || callId,
       })
       .returning();
-    // 4a. If this booking redeems a gift code, validate + mark it consumed
+    // 4a. If this booking redeems a gift code, validate + mark it consumed.
+    // The gifter already paid at gift-purchase time (GiftCodeService.
+    // preparePurchase/finalizeNativePayment) — the talent's payout hold is
+    // only credited now, once there's an actual session to credit it
+    // against, same "deliver-first" principle as every other session.
     if (giftCode) {
-      await GiftCodeService.redeem(giftCode, talentProfileId, durationMins, session.id);
-    }
-
-    // 4b. If the booker is gifting to someone else, generate and email the code
-    if (isGift && giftDetails?.recipientEmail) {
-      await GiftCodeService.generate({
-        gifterId: bookerId,
-        talentProfileId,
-        durationMins,
-        priceCents: slot.priceCents,
-        recipientName: giftDetails.recipientName ?? null,
-        recipientEmail: giftDetails.recipientEmail,
-        recipientPhone: giftDetails.recipientPhone ?? null,
-        occasion: giftDetails.occasion ?? null,
-        personalMessage: giftDetails.message ?? null,
-        deliveryDate: giftDetails.deliveryDate ?? null,
+      const redeemed = await GiftCodeService.redeem(giftCode, talentProfileId, durationMins, session.id);
+      const talentNetCents = redeemed.priceCents - Math.round(redeemed.priceCents * 0.05);
+      await PayoutLedgerService.creditHold(profile.userId, talentNetCents, {
+        sourceType: 'talent_session',
+        sourceId: session.id,
+        metadata: { giftCodeId: redeemed.id },
       }).catch(err =>
-        // Non-fatal: gift code generation failure should not block the booking
-        console.error('[GiftCode] Failed to generate gift code:', err.message)
+        console.error(`[TalentSession] ledger creditHold failed for gift session ${session.id}: ${err.message}`)
       );
     }
+
     // 5. Send notifications + emails to both parties
     const talentUser = profile.user;
     const talentName = `${talentUser.firstName} ${talentUser.lastName}`;

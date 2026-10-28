@@ -41,7 +41,7 @@ export const generateEventReminderEmail = (event, user, hoursBefore) => {
         </a>
       </p>
 
-      <p>Best regards,<br>The GoKyro Team</p>
+      <p>Best regards,<br>The Briteside Team</p>
     </div>
   `;
 
@@ -61,7 +61,7 @@ export const generateEventReminderEmail = (event, user, hoursBefore) => {
     We can't wait to see you there!
 
     Best regards,
-    The GoKyro Team
+    The Briteside Team
   `;
 
   return { subject, html, text };
@@ -139,7 +139,7 @@ export const generateMerchandiseUpsellEmail = (event, user, merchandise, ticketC
         Limited quantities available. Prices may change. Don't miss out on these exclusive items!
       </p>
 
-      <p>Best regards,<br>The GoKyro Team</p>
+      <p>Best regards,<br>The Briteside Team</p>
     </div>
   `;
 
@@ -157,7 +157,7 @@ export const generateMerchandiseUpsellEmail = (event, user, merchandise, ticketC
     Shop now: ${process.env.FRONTEND_URL || 'https://gokyro.com'}/events/${event.slug}/merchandise
 
     Best regards,
-    The GoKyro Team
+    The Briteside Team
   `;
 
   return { subject, html, text };
@@ -218,7 +218,7 @@ export const generatePromotionalEmail = (user, events) => {
         Don't miss out on these amazing experiences! Early bird pricing available on select events.
       </p>
 
-      <p>Best regards,<br>The GoKyro Team</p>
+      <p>Best regards,<br>The Briteside Team</p>
     </div>
   `;
 
@@ -240,7 +240,7 @@ export const generatePromotionalEmail = (user, events) => {
     Browse all events: ${process.env.FRONTEND_URL || 'https://gokyro.com'}/events
 
     Best regards,
-    The GoKyro Team
+    The Briteside Team
   `;
 
   return { subject, html, text };

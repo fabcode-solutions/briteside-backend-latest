@@ -1,6 +1,11 @@
 /**
  * Handles the full gift code lifecycle:
- *   generate()  — called when a gifter completes a gift booking
+ *   preparePurchase()     — creates the gift row (status 'awaiting_payment')
+ *                           for a chosen duration, no session/slot involved
+ *   createNativePaymentIntent() / finalizeNativePayment() — native checkout,
+ *                           mirrors TalentSessionService's own pair
+ *   generate()  — legacy path, kept only for reference/compat (no longer
+ *                 called from the purchase flow — see preparePurchase)
  *   sendEmail() — sends the gift email to the recipient
  *   validate()  — called from BookOneOnOne "Apply" button
  *   redeem()    — called inside TalentSessionService.book() when giftCode is present
@@ -15,6 +20,13 @@ import { talentSessions } from '../db/schema/talentSessions.js';
 import { users } from '../db/schema/index.js';
 import ApiError from '../utils/api-error.js';
 import * as mailService from './mail.service.js';
+import { SubscriptionService } from './subscription.service.js';
+import { FEATURES } from '../constants/features.js';
+import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
+import config from '../config/config.js';
+import Stripe from 'stripe';
+
+const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -127,6 +139,196 @@ function buildGiftEmail({
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export class GiftCodeService {
+  /**
+   * Step 1 of a gift purchase — called from BookOneOnOne's "Yes, this is a
+   * gift" flow. Unlike a real booking, this needs no date/time/slot: the
+   * price is the talent's flat rate for the chosen duration, and the actual
+   * session gets scheduled later by the recipient (see redeem()). Creates
+   * the gift row up front (status 'awaiting_payment') so the code + all
+   * recipient details already exist before payment, same shape as
+   * TalentSessionService.prepareBooking().
+   */
+  static async preparePurchase({
+    gifterId,
+    talentProfileId,
+    durationMins,
+    recipientName,
+    recipientEmail,
+    recipientPhone,
+    occasion,
+    personalMessage,
+    deliveryDate,
+  }) {
+    const profile = await db.query.talentProfiles.findFirst({
+      where: eq(talentProfiles.id, talentProfileId),
+    });
+    if (!profile) throw new ApiError(404, 'Talent not found');
+
+    // Same gate as a real booking — don't take the gifter's money for a
+    // talent who can't actually be booked right now.
+    const canBook = await SubscriptionService.checkFeatureAccess(
+      profile.userId,
+      FEATURES.VIDEO_BOOKING
+    );
+    if (!canBook) {
+      throw new ApiError(403, 'This talent is not currently accepting video bookings');
+    }
+
+    const rate = profile.rates?.[String(durationMins)];
+    if (!rate) throw new ApiError(400, `Talent does not offer ${durationMins}-min sessions`);
+    const priceCents = Math.round(rate * 100);
+
+    const platformAndServiceFeeCents = calculatePlatformAndServiceFeeCents(priceCents);
+    const chargedCents = priceCents + platformAndServiceFeeCents;
+
+    const code = await generateUniqueCode();
+    const expiresAt = new Date();
+    expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+
+    const [gift] = await db
+      .insert(talentGiftCodes)
+      .values({
+        gifterId,
+        talentProfileId,
+        code,
+        durationMins,
+        priceCents,
+        recipientName: recipientName ?? null,
+        recipientEmail: recipientEmail ?? null,
+        recipientPhone: recipientPhone ?? null,
+        occasion: occasion ?? null,
+        personalMessage: personalMessage ?? null,
+        deliveryDate: deliveryDate ? new Date(deliveryDate) : null,
+        status: 'awaiting_payment',
+        expiresAt,
+      })
+      .returning();
+
+    return {
+      giftCodeId: gift.id,
+      talentPriceCents: priceCents,
+      platformAndServiceFeeCents,
+      chargedCents,
+    };
+  }
+
+  /**
+   * Step 2 — create the Stripe PaymentIntent for a prepared gift purchase.
+   * No tax: 1:1 video bookings are a non-taxable service (TAX_STRATEGY.md
+   * §3.1) — same category the real session booking uses, just without the
+   * address-dependent Stripe Tax Calculation since that only matters when a
+   * category IS taxable.
+   */
+  static async createNativePaymentIntent(giftCodeId, gifterId) {
+    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+
+    const gift = await db.query.talentGiftCodes.findFirst({
+      where: eq(talentGiftCodes.id, giftCodeId),
+    });
+    if (!gift) throw new ApiError(404, 'Gift purchase not found');
+    if (gift.gifterId !== gifterId) throw new ApiError(403, 'This gift purchase is not yours');
+    if (gift.status !== 'awaiting_payment') {
+      throw new ApiError(409, `This gift purchase is already ${gift.status}`);
+    }
+
+    const platformAndServiceFeeCents = calculatePlatformAndServiceFeeCents(gift.priceCents);
+    const chargedCents = gift.priceCents + platformAndServiceFeeCents;
+
+    const gifter = await db.query.users.findFirst({ where: eq(users.id, gifterId) });
+
+    const intent = await stripe.paymentIntents.create({
+      amount: chargedCents,
+      currency: 'usd',
+      ...(gifter?.email?.trim() ? { receipt_email: gifter.email.trim() } : {}),
+      metadata: {
+        type: 'talent_gift',
+        giftCodeId: gift.id,
+        gifterId,
+      },
+      // No transfer_data/application_fee_amount — same as a real session:
+      // the talent's cut is an internal ledger hold, credited at redemption
+      // (see TalentSessionService.book()), not split at charge time.
+    });
+
+    await db
+      .update(talentGiftCodes)
+      .set({ stripePaymentIntentId: intent.id, updatedAt: new Date() })
+      .where(eq(talentGiftCodes.id, gift.id));
+
+    return { clientSecret: intent.client_secret, paymentId: gift.id };
+  }
+
+  /**
+   * Step 3 — verify the PaymentIntent server-side, flip the gift to
+   * 'active', and deliver the email now unless a future delivery date was
+   * requested (the deliverScheduledGifts cron handles those).
+   */
+  static async finalizeNativePayment(giftCodeId, gifterId, paymentIntentId) {
+    if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
+
+    const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (intent.metadata?.giftCodeId !== giftCodeId || intent.metadata?.gifterId !== gifterId) {
+      throw new ApiError(409, 'Payment does not match this gift purchase');
+    }
+    if (intent.status !== 'succeeded') {
+      throw new ApiError(409, `Payment is not completed yet (status: ${intent.status})`);
+    }
+
+    // Atomic claim, not a SELECT-then-UPDATE — guards against a retried or
+    // duplicate finalize call processing the same payment twice (same
+    // reasoning as TalentSessionService.handlePaymentWebhook).
+    const [gift] = await db
+      .update(talentGiftCodes)
+      .set({ status: 'active', updatedAt: new Date() })
+      .where(and(eq(talentGiftCodes.id, giftCodeId), eq(talentGiftCodes.status, 'awaiting_payment')))
+      .returning();
+
+    if (!gift) {
+      console.log('[GiftCode] Already processed:', giftCodeId);
+      return { giftCodeId };
+    }
+
+    const deliverNow = !gift.deliveryDate || new Date(gift.deliveryDate) <= new Date();
+    if (deliverNow && gift.recipientEmail) {
+      await GiftCodeService.sendEmail(gift).catch(err =>
+        console.error('[GiftCode] Failed to send gift email:', err.message)
+      );
+    }
+
+    return { giftCodeId };
+  }
+
+  /**
+   * Sends the gift email for any 'active' gift whose delivery date has
+   * arrived but hasn't been delivered yet. Run daily by a cron job
+   * (scripts/cron or src/cron — see deliverScheduledGifts job) — this is
+   * what actually honors the delivery date a gifter picked; finalizeNativePayment()
+   * only sends immediately when no future date was requested.
+   */
+  static async deliverScheduledGifts() {
+    const due = await db.query.talentGiftCodes.findMany({
+      where: (g, { eq, and, lte, isNull, isNotNull }) =>
+        and(
+          eq(g.status, 'active'),
+          isNull(g.deliveredAt),
+          isNotNull(g.recipientEmail),
+          isNotNull(g.deliveryDate),
+          lte(g.deliveryDate, new Date())
+        ),
+    });
+
+    let sent = 0;
+    for (const gift of due) {
+      try {
+        await GiftCodeService.sendEmail(gift);
+        sent++;
+      } catch (err) {
+        console.error(`[GiftCode] Scheduled delivery failed for ${gift.id}:`, err.message);
+      }
+    }
+    return { checked: due.length, sent };
+  }
+
   /**
    * Generate a gift code after a gift booking is placed.
    *
@@ -301,7 +503,7 @@ export class GiftCodeService {
     if (gift.durationMins !== Number(durationMins))
       throw new ApiError(400, `Gift code is for a ${gift.durationMins}-minute session`);
 
-    await db
+    const [redeemed] = await db
       .update(talentGiftCodes)
       .set({
         status: 'redeemed',
@@ -309,7 +511,14 @@ export class GiftCodeService {
         redeemedSessionId: sessionId,
         updatedAt: new Date(),
       })
-      .where(eq(talentGiftCodes.id, gift.id));
+      .where(eq(talentGiftCodes.id, gift.id))
+      .returning();
+
+    // Returned so the caller (TalentSessionService.book()) can credit the
+    // talent's payout hold now that the gift's money is tied to a real
+    // session — the gifter paid at purchase time, but the talent is only
+    // credited once there's an actual session to credit it against.
+    return redeemed;
   }
 
   /**
