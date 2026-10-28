@@ -2,6 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import httpStatus from 'http-status';
 import { authMiddleware } from '../middlewares/auth.middleware.js';
+import { iapLimiter } from '../middlewares/rateLimiter.js';
 import { checkBlockedUrl } from '../middlewares/checkBlockedUrl.js';
 import ApiError from '../utils/api-error.js';
 import { submitReviewFromCustomOffer } from '../controllers/talent.controller.js';
@@ -287,7 +288,7 @@ router.post('/orders/:orderId/native-tax-preview', previewShopNativeTax);
 router.post('/orders/:orderId/native-finalize', finalizeShopNativePayment);
 // App-only — the web checkout above is untouched by these two.
 router.get('/products/:productId/iap/buy-options', getShopIapBuyOptions);
-router.post('/products/:productId/iap/purchase', finalizeShopIapPurchase);
+router.post('/products/:productId/iap/purchase', iapLimiter, finalizeShopIapPurchase);
 router.post('/products/:productId/pin', pinShopProduct);
 router.delete('/products/:productId/pin', unpinShopProduct);
 router.get('/products/:productId/analytics', getShopProductAnalytics);

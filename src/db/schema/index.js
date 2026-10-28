@@ -130,6 +130,7 @@ export * from './talentReviews.js';
 export * from './talentGiftCodes.js';
 export * from './priorityMessagePayments.js';
 export * from './priorityMessageAttachments.js';
+export * from './iapTransactionClaims.js';
 export * from './livestreams.js';
 
 // Communication blasts

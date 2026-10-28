@@ -134,8 +134,21 @@ const analyticsRollupTriggerLimiter = createLimiter({
   message: defaultMsg('Refreshed recently — try again in a moment.'),
 });
 
+// In-app purchase prepare/verify — each call hits Apple's / Google's APIs,
+// which rate-limit Briteside as a whole. Keyed per signed-in user; generous
+// enough for the App's own retries of an unconfirmed purchase.
+const iapLimiter = createLimiter({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: process.env.NODE_ENV !== 'production' ? 1000 : 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: req => (req.user?.id ? `user:${req.user.id}` : ipKeyGenerator(req.ip)),
+  message: defaultMsg('Too many purchase attempts. Try again in a few minutes.'),
+});
+
 export {
   createLimiter,
+  iapLimiter,
   userReportsLimiter,
   contactLimiter,
   passwordResetLimiter,
