@@ -213,7 +213,7 @@ export class StoryService {
               message: `${mentionUser?.username || 'Someone'} mentioned you in a your stroy`,
               type: 'social_update',
               relatedId: story.id,
-              redirectTo: `/feed/story/${story.id}`,
+              redirectTo: `/feed?openStory=${story.id}`,
               metadata: { storyId: story.id, mentionedByUserId: userId },
             });
           }
@@ -616,7 +616,7 @@ static async addStoryComment(storyId, userId, content, parentId = null, mentione
               message: `${commenter?.username || 'Someone'} mentioned you in a comment`,
               type: 'social_update',
               relatedId: comment.id,
-              redirectTo: `/feed/story/${storyId}`,
+              redirectTo: `/feed?openStory=${storyId}`,
               metadata: { storyId, commentId: comment.id, mentionedByUserId: userId },
             });
           } catch (err) {
@@ -690,7 +690,7 @@ static async addStoryComment(storyId, userId, content, parentId = null, mentione
               message: `${commenter?.username || 'Someone'} mentioned you in a comment`,
               type: 'social_update',
               relatedId: commentId,
-              redirectTo: `/feed/story/${storyId}`,
+              redirectTo: `/feed?openStory=${storyId}`,
               metadata: { storyId, commentId, mentionedByUserId: userId },
             });
           } catch (err) {

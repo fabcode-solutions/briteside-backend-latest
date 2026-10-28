@@ -275,12 +275,12 @@ export const deleteNotificationByTypeAndRelatedId = async (userId, type, related
 export const markStoryNotificationsRead = async (userId, storyId) => {
   const updated = await db
     .update(notifications)
-    .set({ isRead: true })
+    .set({ isRead: true, isSeen: true })
     .where(
       and(
         eq(notifications.userId, userId),
         eq(notifications.type, 'social_update'),
-        eq(notifications.isRead, false),
+        eq(notifications.isSeen, false),
         sql`${notifications.metadata}->>'storyId' = ${storyId}`
       )
     )

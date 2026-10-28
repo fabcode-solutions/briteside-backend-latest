@@ -41,6 +41,7 @@ export const notifications = pgTable(
     redirectTo: varchar('redirect_to', { length: 255 }),
     relatedId: uuid('related_id'),
     isRead: boolean('is_read').default(false),
+    isSeen: boolean('is_seen').default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
     metadata: jsonb('metadata').default(sql`'{}'::jsonb`),
   },
