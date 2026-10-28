@@ -7,6 +7,7 @@
 
 import express from 'express';
 import { authMiddleware } from '../middlewares/auth.middleware.js';
+import { iapLimiter } from '../middlewares/rateLimiter.js';
 import { requireFeature } from '../middlewares/subscription.middleware.js';
 import { FEATURES } from '../constants/features.js';
 import {
@@ -48,8 +49,8 @@ router.post('/prepare', prepareCheckout);
 // "Pay in App" — native App Store / Google Play purchase (price tiers).
 // Registered before '/:paymentId/...' so 'iap' is never read as a paymentId.
 router.get('/iap/tiers', getIapTiers);
-router.post('/iap/prepare', prepareIapPurchase);
-router.post('/:paymentId/iap/finalize', finalizeIapPurchase);
+router.post('/iap/prepare', iapLimiter, prepareIapPurchase);
+router.post('/:paymentId/iap/finalize', iapLimiter, finalizeIapPurchase);
 // Proactive check before the sender even fills out the form — lets the
 // talent-profile "Send Message" dialog warn about an outstanding pending
 // message immediately, instead of only failing at checkout submission.

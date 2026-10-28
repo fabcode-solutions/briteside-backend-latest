@@ -66,6 +66,13 @@ const EnvVariables = z.object({
   // Google Play In-App Purchase — Play Developer API (service account)
   GOOGLE_PLAY_PACKAGE_NAME: z.string().optional(),
   GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: z.string().optional(),
+  // Pub/Sub push auth for Play Real-time Developer Notifications: the push
+  // subscription's OIDC audience and the service account it signs as.
+  GOOGLE_PLAY_RTDN_AUDIENCE: z.string().optional(),
+  GOOGLE_PLAY_RTDN_SERVICE_ACCOUNT: z.string().optional(),
+  // ISO date. Once the App build that tags purchases with the buyer is out,
+  // purchases made after this without that tag are refused.
+  IAP_ACCOUNT_TOKEN_REQUIRED_FROM: z.string().datetime({ offset: true }).optional(),
 
   // Firebase Cloud Messaging — service-account JSON for push notifications (optional)
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
@@ -161,7 +168,14 @@ const env = {
   googleIap: {
     packageName: envVars.GOOGLE_PLAY_PACKAGE_NAME,
     serviceAccountJson: envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON,
+    rtdnPushAudience: envVars.GOOGLE_PLAY_RTDN_AUDIENCE,
+    rtdnPushServiceAccount: envVars.GOOGLE_PLAY_RTDN_SERVICE_ACCOUNT,
     configured: !!(envVars.GOOGLE_PLAY_PACKAGE_NAME && envVars.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON),
+  },
+  iap: {
+    accountTokenRequiredFrom: envVars.IAP_ACCOUNT_TOKEN_REQUIRED_FROM
+      ? new Date(envVars.IAP_ACCOUNT_TOKEN_REQUIRED_FROM)
+      : null,
   },
   firebase: {
     serviceAccountJson: envVars.FIREBASE_SERVICE_ACCOUNT_JSON,
@@ -178,5 +192,23 @@ const env = {
     ),
   },
 };
+
+// Missing store settings don't stop the server (IAP endpoints answer 503),
+// but in production a buyer can be charged by the store and then stay
+// unconfirmed — say so loudly at boot.
+if (env.nodeEnv === 'production') {
+  const missingIap = [
+    'APPLE_IAP_ISSUER_ID',
+    'APPLE_IAP_KEY_ID',
+    'APPLE_IAP_PRIVATE_KEY',
+    'APPLE_IAP_BUNDLE_ID',
+    'APPLE_ASC_APP_ID',
+    'GOOGLE_PLAY_PACKAGE_NAME',
+    'GOOGLE_PLAY_SERVICE_ACCOUNT_JSON',
+  ].filter(key => !envVars[key]);
+  if (missingIap.length > 0) {
+    logger.error(`[config] In-app purchases are not fully configured — missing: ${missingIap.join(', ')}`);
+  }
+}
 
 export default env;

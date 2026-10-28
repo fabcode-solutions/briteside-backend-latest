@@ -46,7 +46,7 @@ import {
   VerificationException,
   VerificationStatus,
 } from '@apple/app-store-server-library';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../../db/index.js';
 import { shopProducts, shopOrders } from '../../db/schema/index.js';
 import ApiError from '../../utils/api-error.js';
@@ -56,6 +56,7 @@ import { ShopOrderService } from './shopOrder.service.js';
 import { ShopProductService } from './shopProduct.service.js';
 import { productIdForTier, tierForWebChargedCents } from '../iapTiers.js';
 import { UserSpendService } from '../userSpend.service.js';
+import { IapClaimService, IAP_REASON, iapError } from '../iapClaim.service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -126,6 +127,12 @@ export class ShopIapService {
   }
 
   static _signedDataVerifier(environment) {
+    // Apple requires the app's Apple ID to verify Production transactions;
+    // without it every real purchase would fail verification.
+    if (environment === Environment.PRODUCTION && !config.appleIap.ascAppId) {
+      logger.error('[ShopIap] APPLE_ASC_APP_ID is not set — cannot verify Production purchases');
+      throw new ApiError(503, 'Apple in-app purchases are not configured');
+    }
     return new SignedDataVerifier(
       this._appleRootCerts(),
       true, // enableOnlineChecks — revocation + expiry checked live
@@ -166,9 +173,13 @@ export class ShopIapService {
       if (!response?.signedTransactionInfo) {
         throw new ApiError(400, 'Apple returned no transaction data for this id');
       }
-      return this._signedDataVerifier(environment).verifyAndDecodeTransaction(
+      const decoded = await this._signedDataVerifier(environment).verifyAndDecodeTransaction(
         response.signedTransactionInfo
       );
+      if (decoded.revocationDate) {
+        throw new ApiError(400, 'This purchase was refunded or revoked by Apple');
+      }
+      return decoded;
     }
     throw new ApiError(400, 'Apple could not find this transaction');
   }
@@ -515,13 +526,28 @@ export class ShopIapService {
     };
   }
 
+  /** The error for a purchase that's already claimed: the buyer's own
+   * retry for this same product is "already recorded" (the App may finish
+   * the store transaction); anything else is a reuse. */
+  static async _claimConflict(tx, claim, buyerId, productId) {
+    if (claim.purpose === 'shop_order' && claim.userId === buyerId && claim.referenceId) {
+      const prior = await tx.query.shopOrders.findFirst({
+        where: eq(shopOrders.id, claim.referenceId),
+        columns: { productId: true },
+      });
+      if (prior?.productId === productId) return IapClaimService.alreadyRecorded();
+    }
+    return IapClaimService.transactionUsed();
+  }
+
   /**
    * Called after the App completes a native purchase — verifies it
    * server-to-server with the relevant store, then finalizes it exactly
    * like a web purchase's webhook does: creates the paid shopOrders row,
-   * bumps salesCount, notifies the seller. Idempotent via the unique index
-   * on iapTransactionId — a retried call for the same transaction throws a
-   * clean 409 instead of double-counting a sale.
+   * bumps salesCount, notifies the seller. Each store purchase is claimed
+   * once across shop + priority messages (IapClaimService); a retried call
+   * for the same purchase throws a 409 with reason IAP_ALREADY_RECORDED
+   * instead of double-counting a sale.
    */
   static async finalizePurchase(
     buyerId,
@@ -538,9 +564,6 @@ export class ShopIapService {
     }
     if (product.userId === buyerId) throw new ApiError(400, "You can't buy your own product");
 
-    const alreadyOwned = await ShopOrderService.findPaidOrder(buyerId, productId);
-    if (alreadyOwned) throw new ApiError(409, 'You already own this product');
-
     // The shared price tier this listing's price maps to (iapTiers.js) — the
     // purchase must be for exactly that tier.
     const pricing = this.computePricingOptions(product.priceCents);
@@ -549,34 +572,62 @@ export class ShopIapService {
       throw new ApiError(400, 'This product is priced too high for in-app purchase');
     }
 
+    let verified;
     let verifiedTransactionId;
     let originalTransactionId = null;
 
     if (store === 'apple') {
       if (!transactionId) throw new ApiError(400, '`transactionId` is required');
-      const decoded = await this.verifyAppleTransaction(transactionId);
-      if (decoded.productId !== expectedProductId) {
+      verified = await this.verifyAppleTransaction(transactionId);
+      if (verified.productId !== expectedProductId) {
         throw new ApiError(400, "This transaction doesn't match this product");
       }
-      verifiedTransactionId = decoded.transactionId;
-      originalTransactionId = decoded.originalTransactionId ?? null;
+      verifiedTransactionId = verified.transactionId;
+      originalTransactionId = verified.originalTransactionId ?? null;
     } else if (store === 'google') {
       if (!purchaseToken) throw new ApiError(400, '`purchaseToken` is required');
-      const googlePurchase = await this.verifyGooglePurchase(purchaseToken, expectedProductId);
-      await this.rejectRealMoneyGooglePurchase(googlePurchase, testOnly);
+      verified = await this.verifyGooglePurchase(purchaseToken, expectedProductId);
+      await this.rejectRealMoneyGooglePurchase(verified, testOnly);
       verifiedTransactionId = purchaseToken;
     } else {
       throw new ApiError(400, '`store` must be "apple" or "google"');
     }
+    IapClaimService.assertBuyer(store, verified, buyerId, config.iap.accountTokenRequiredFrom);
+    const environment = IapClaimService.environmentOf(store, verified);
+    // Sandbox (TestFlight / App Review / Google testers) moves no real money,
+    // so it must not count toward the buyer's spend or the seller's earnings.
+    const isSandbox = environment === 'sandbox';
 
     // Seller's cut is off the ORIGINAL price, unaffected by the app markup —
     // a seller earns the same whichever button the buyer tapped.
     const fees = ShopOrderService.computeFees(product.priceCents);
     const settings = await ShopProductService.getShopSettings(product.userId);
+    const chargedCents = isSandbox ? 0 : pricing.appChargedCents;
+    const sellerReceiveCents = isSandbox ? 0 : fees.sellerReceiveCents;
 
-    let order;
-    try {
-      [order] = await db
+    // One transaction: the purchase claim, the ownership check and the order
+    // commit or roll back together. The advisory lock serialises concurrent
+    // finalizes for the same buyer + product so both can't pass the check.
+    const order = await db.transaction(async tx => {
+      const existingClaim = await IapClaimService.findClaim(tx, store, verifiedTransactionId);
+      if (existingClaim) throw await this._claimConflict(tx, existingClaim, buyerId, product.id);
+
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${buyerId}), hashtext(${product.id}))`
+      );
+      const alreadyOwned = await tx.query.shopOrders.findFirst({
+        where: and(
+          eq(shopOrders.buyerId, buyerId),
+          eq(shopOrders.productId, product.id),
+          eq(shopOrders.status, 'paid')
+        ),
+        columns: { id: true },
+      });
+      if (alreadyOwned) {
+        throw iapError(409, 'You already own this product', IAP_REASON.ALREADY_OWNED);
+      }
+
+      const [inserted] = await tx
         .insert(shopOrders)
         .values({
           productId: product.id,
@@ -585,9 +636,9 @@ export class ShopIapService {
           status: 'paid',
           productTitleSnapshot: product.title,
           priceCents: product.priceCents,
-          chargedCents: pricing.appChargedCents,
-          sellerReceiveCents: fees.sellerReceiveCents,
-          platformShareCents: pricing.appChargedCents - fees.sellerReceiveCents,
+          chargedCents,
+          sellerReceiveCents,
+          platformShareCents: chargedCents - sellerReceiveCents,
           refundsAllowedSnapshot: settings.refundsEnabled,
           refundWindowDaysSnapshot: settings.refundWindowDays,
           refundAfterDownloadSnapshot: settings.refundAfterDownload,
@@ -610,19 +661,27 @@ export class ShopIapService {
           reserveAmountCents: 0,
         })
         .returning();
-    } catch (err) {
-      // Unique violation on iapTransactionId — this exact purchase was
-      // already recorded (a retried/duplicate finalize call).
-      if (err.code === '23505') {
-        throw new ApiError(409, 'This purchase has already been recorded');
-      }
-      throw err;
-    }
 
-    await db
-      .update(shopProducts)
-      .set({ salesCount: sql`${shopProducts.salesCount} + 1` })
-      .where(eq(shopProducts.id, product.id));
+      // A concurrent finalize of the same purchase may have claimed it after
+      // the check above — then this whole transaction rolls back.
+      const conflict = await IapClaimService.claim(tx, {
+        store,
+        transactionId: verifiedTransactionId,
+        userId: buyerId,
+        purpose: 'shop_order',
+        referenceId: inserted.id,
+        productId: expectedProductId,
+        environment,
+      });
+      if (conflict) throw await this._claimConflict(tx, conflict, buyerId, product.id);
+
+      await tx
+        .update(shopProducts)
+        .set({ salesCount: sql`${shopProducts.salesCount} + 1` })
+        .where(eq(shopProducts.id, product.id));
+
+      return inserted;
+    });
 
     if (store === 'google') {
       try {
@@ -644,20 +703,21 @@ export class ShopIapService {
 
     // Same spend record the web webhook writes (ShopOrderService
     // .handlePaymentWebhook), so IAP purchases show in the buyer's spend log.
-    await UserSpendService.recordSpend({
-      userId: buyerId,
-      spendType: 'shop',
-      amountCents: order.chargedCents,
-      referenceId: order.id,
-      referenceType: 'shop_order',
-      talentUserId: order.sellerId,
-      metadata: {
-        productId: order.productId,
-        productTitle: order.productTitleSnapshot,
-        purchaseChannel: order.purchaseChannel,
-      },
-      paidAt: order.paidAt,
-    }).catch(err => logger.error(`[ShopIap] spend record failed: ${err.message}`));
+    if (!isSandbox)
+      await UserSpendService.recordSpend({
+        userId: buyerId,
+        spendType: 'shop',
+        amountCents: order.chargedCents,
+        referenceId: order.id,
+        referenceType: 'shop_order',
+        talentUserId: order.sellerId,
+        metadata: {
+          productId: order.productId,
+          productTitle: order.productTitleSnapshot,
+          purchaseChannel: order.purchaseChannel,
+        },
+        paidAt: order.paidAt,
+      }).catch(err => logger.error(`[ShopIap] spend record failed: ${err.message}`));
 
     await ShopOrderService.notifyPurchase(order).catch(err =>
       logger.error(`[ShopIap] purchase notify failed: ${err.message}`)

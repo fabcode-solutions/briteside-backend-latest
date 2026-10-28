@@ -545,6 +545,22 @@ export async function releaseShopOrderFinalReserves(force = false) {
 // ─── Priority Messages ──────────────────────────────────────────────────────
 // No tip/top-up mechanic — same simple one-shot shape as Shop Orders.
 
+// Earned once every message was answered ('replied', clock from repliedAt),
+// or once the 72h job refunded the unanswered ones of a partly answered
+// batch ('partial_refunded', clock from refundedAt — the answered share
+// stays in reserveAmountCents).
+const priorityPaymentSettledBefore = cutoff =>
+  or(
+    and(
+      eq(priorityMessagePayments.status, 'replied'),
+      lte(priorityMessagePayments.repliedAt, cutoff)
+    ),
+    and(
+      eq(priorityMessagePayments.status, 'partial_refunded'),
+      lte(priorityMessagePayments.refundedAt, cutoff)
+    )
+  );
+
 export async function releasePriorityMessageStandardReserves(force = false) {
   if (!stripe) {
     logger.warn(
@@ -560,10 +576,9 @@ export async function releasePriorityMessageStandardReserves(force = false) {
         isNull(priorityMessagePayments.standardReleasedAt)
       )
     : and(
-        eq(priorityMessagePayments.status, 'replied'),
         gt(priorityMessagePayments.reserveAmountCents, 0),
         isNull(priorityMessagePayments.standardReleasedAt),
-        lte(priorityMessagePayments.repliedAt, cutoff)
+        priorityPaymentSettledBefore(cutoff)
       );
 
   const paymentRows = await db.query.priorityMessagePayments.findMany({
@@ -670,11 +685,10 @@ export async function releasePriorityMessageFinalReserves(force = false) {
         isNull(priorityMessagePayments.reserveReleasedAt)
       )
     : and(
-        eq(priorityMessagePayments.status, 'replied'),
         gt(priorityMessagePayments.reserveAmountCents, 0),
         isNotNull(priorityMessagePayments.standardReleasedAt),
         isNull(priorityMessagePayments.reserveReleasedAt),
-        lte(priorityMessagePayments.repliedAt, cutoff)
+        priorityPaymentSettledBefore(cutoff)
       );
 
   const paymentRows = await db.query.priorityMessagePayments.findMany({

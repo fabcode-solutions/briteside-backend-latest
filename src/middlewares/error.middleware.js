@@ -24,18 +24,20 @@ export const handler = (err, req, res, next) => {
   const statusCode = normalizeStatus(err?.statusCode);
 
   // internal failure details must never reach the client in production
+  const hideInternals = isProduction() && statusCode >= 500 && !err?.isOperational;
+  const message = hideInternals
+    ? httpStatus[statusCode]
+    : err?.message || httpStatus[statusCode];
 
-const message = err?.message || httpStatus[statusCode];
-
-const response = {
-  success: false,
-  error: {
-    code: statusCode,
-    message,
-    stack: err?.stack,
-    ...(err?.details && { details: err.details }),
-  },
-};
+  const response = {
+    success: false,
+    error: {
+      code: statusCode,
+      message,
+      ...(!isProduction() && { stack: err?.stack }),
+      ...(err?.details && !hideInternals && { details: err.details }),
+    },
+  };
 
   logger.log(statusCode === httpStatus.NOT_FOUND ? 'silly' : 'error', 'Error handler error log:', {
     statusCode,
