@@ -25,6 +25,7 @@ import { FEATURES } from '../constants/features.js';
 import { calculatePlatformAndServiceFeeCents } from '../utils/orderProcessingFee.js';
 import config from '../config/config.js';
 import Stripe from 'stripe';
+import { FRONTEND_URL, BRAND_COLOR, header, footer, ctaButton, calloutBox } from '../templates/emailLayout.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 
@@ -52,10 +53,6 @@ async function generateUniqueCode() {
 
 // ─── Email template ───────────────────────────────────────────────────────────
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://briteside.app';
-const BRAND_COLOR = '#00D16E';
-const BRAND_NAME = 'Briteside';
-
 function buildGiftEmail({
   recipientName,
   gifterName,
@@ -79,9 +76,7 @@ function buildGiftEmail({
 
   const html = `
 <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
-  <div style="background-color:${BRAND_COLOR};padding:24px;text-align:center;">
-    <h1 style="color:#ffffff;margin:0;font-size:22px;font-weight:600;">${BRAND_NAME}</h1>
-  </div>
+  ${header}
   <div style="padding:32px 40px;">
     <h2 style="color:#333;margin-top:0;">You've got a gift! 🎁</h2>
     <p style="color:#555;">Hi ${recipientName || 'there'},</p>
@@ -90,15 +85,7 @@ function buildGiftEmail({
       with <strong>${talentName}</strong>${occasion ? ` for your <strong>${occasion}</strong>` : ''}.
     </p>
 
-    ${
-      personalMessage
-        ? `
-    <div style="background:#f8f9fa;border-left:4px solid ${BRAND_COLOR};padding:16px 20px;border-radius:0 8px 8px 0;margin:20px 0;">
-      <p style="color:#555;margin:0;font-style:italic;">"${personalMessage}"</p>
-      <p style="color:#888;font-size:13px;margin:8px 0 0;">— ${gifterName}</p>
-    </div>`
-        : ''
-    }
+    ${personalMessage ? calloutBox(`<p style="color:#555;margin:0;font-style:italic;">"${personalMessage}"</p><p style="color:#888;font-size:13px;margin:8px 0 0;">— ${gifterName}</p>`) : ''}
 
     <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:20px;margin:24px 0;text-align:center;">
       <p style="color:#555;margin:0 0 8px;font-size:14px;">Your gift code</p>
@@ -109,11 +96,7 @@ function buildGiftEmail({
     <p style="color:#555;">To book your session, click the button below and enter your gift code:</p>
 
     <p style="text-align:center;margin:28px 0;">
-      <a href="${redeemUrl}"
-        style="background-color:${BRAND_COLOR};color:#fff;padding:14px 32px;text-decoration:none;
-               border-radius:8px;font-weight:600;font-size:15px;display:inline-block;">
-        Redeem Your Gift
-      </a>
+      ${ctaButton('Redeem Your Gift', redeemUrl)}
     </p>
 
     <p style="color:#999;font-size:13px;">
@@ -128,9 +111,7 @@ function buildGiftEmail({
       <a href="mailto:support@briteside.app" style="color:${BRAND_COLOR};">support@briteside.app</a>.
     </p>
   </div>
-  <div style="background:#f5f5f5;padding:16px 40px;text-align:center;">
-    <p style="color:#999;font-size:12px;margin:0;">${BRAND_NAME} · 1:1 Sessions Platform</p>
-  </div>
+  ${footer('Briteside · 1:1 Sessions Platform')}
 </div>`;
 
   return { subject, html };

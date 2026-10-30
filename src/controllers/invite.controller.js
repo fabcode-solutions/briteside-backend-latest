@@ -2,8 +2,7 @@ import { catchAsync } from '../utils/catch-async.js';
 import ApiError from '../utils/api-error.js';
 import { getUserInformation } from '../utils/helper.js';
 import { sendMail } from '../services/mail.service.js';
-
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://briteside.app';
+import { FRONTEND_URL, header, footer, ctaButton } from '../templates/emailLayout.js';
 
 export const sendInvite = catchAsync(async (req, res) => {
   const { emails } = req.body;
@@ -33,16 +32,17 @@ export const sendInvite = catchAsync(async (req, res) => {
 
   const subject = `${inviterName} invited you to Briteside`;
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #333;">You've been invited to Briteside!</h2>
-      <p><strong>${inviterName}</strong> thinks you'd like Briteside and wants you to join.</p>
-      <p style="text-align: center; margin: 30px 0;">
-        <a href="${inviteLink}"
-           style="background-color: #16a34a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
-          Join Briteside
-        </a>
-      </p>
-      <p style="font-size: 12px; color: #666;">If you weren't expecting this invite, you can safely ignore this email.</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color: #333;">You've been invited to Briteside!</h2>
+        <p><strong>${inviterName}</strong> thinks you'd like Briteside and wants you to join.</p>
+        <div style="text-align: center; margin: 30px 0;">
+          ${ctaButton('Join Briteside', inviteLink)}
+        </div>
+        <p style="font-size: 12px; color: #666;">If you weren't expecting this invite, you can safely ignore this email.</p>
+      </div>
+      ${footer()}
     </div>
   `;
   const text = `${inviterName} invited you to Briteside!\nJoin here: ${inviteLink}`;

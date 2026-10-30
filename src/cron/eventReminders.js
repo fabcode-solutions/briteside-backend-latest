@@ -25,13 +25,15 @@ const createEventReminderNotification = async (event, userId, hoursBefore) => {
       type: 'event_reminder',
       title: 'Event Reminder',
       message,
-      data: {
+      redirectTo: `/events/${event.slug}`,
+      relatedId: event.id,
+      metadata: {
         eventId: event.id,
+        eventSlug: event.slug,
         eventTitle: event.title,
         eventStartDate: event.startDate,
         hoursBefore,
       },
-      metadata: { eventId: event.id, eventTitle: event.title },
     });
     logger.info('[Cron] Event reminder notification created', { userId, eventTitle: event.title });
   } catch (error) {

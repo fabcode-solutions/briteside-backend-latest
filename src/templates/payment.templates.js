@@ -3,19 +3,7 @@
  * Covers: payment receipt, refund confirmation, paid message auto-refund
  */
 
-const header = `
-  <div style="text-align:center;padding:20px 0;border-bottom:1px solid #eee;">
-    <strong>BRITESIDE</strong><br/>
-    <a href="https://www.briteside.app" style="color:#666;font-size:12px;">www.briteside.app</a>
-  </div>`;
-
-const footer = text => `
-  <div style="padding:15px 20px;border-top:1px solid #eee;font-size:12px;color:#999;text-align:center;">
-    ${text}
-  </div>`;
-
-const ctaButton = (label, href = '#') =>
-  `<a href="${href}" style="background:#6c47ff;color:#fff;padding:11px 22px;border-radius:6px;text-decoration:none;margin:0 6px;display:inline-block;">${label}</a>`;
+import { header, footer, ctaButton, infoBox } from './emailLayout.js';
 
 export const paymentTemplates = {
   // ── Payment Receipt ─────────────────────────────────────────────────────
@@ -44,7 +32,7 @@ export const paymentTemplates = {
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">Thank you for your purchase! 💳</h2>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;font-size:14px;">
+          <div style="background:#f8f9fa;border-left:4px solid #00D16E;border-radius:0 8px 8px 0;padding:20px 24px;margin:16px 0;font-size:14px;">
             <strong>Receipt #${receipt_number}</strong> &nbsp;|&nbsp; ${purchase_date}<br/><br/>
             <strong>Items:</strong><br/>
             ${item_name}<br/>
@@ -94,13 +82,13 @@ export const paymentTemplates = {
         ${header}
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
-          <h2 style="color:#27ae60;">Your refund has been processed! 💰</h2>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;font-size:14px;">
-            <strong>Refund Reference:</strong> ${refund_reference}<br/>
-            <strong>Original Order:</strong> #${order_number}<br/>
-            <strong>Refund Amount:</strong> ${amount}<br/>
-            <strong>Refund Date:</strong> ${refund_date}
-          </div>
+          <h2 style="color:#00D16E;">Your refund has been processed! 💰</h2>
+          ${infoBox([
+            ['Refund Reference', refund_reference],
+            ['Original Order', `#${order_number}`],
+            ['Refund Amount', amount],
+            ['Refund Date', refund_date],
+          ])}
           <p><strong>Original Purchase:</strong> ${item_name}<br/>
           Purchased on: ${original_purchase_date}<br/>
           Reason: ${refund_reason}</p>
@@ -131,12 +119,12 @@ export const paymentTemplates = {
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">Paid Message Auto-Refunded 🔄</h2>
           <p>Your paid message was automatically refunded because <strong>${recipient_name}</strong> did not reply within 48 hours.</p>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>💬 <strong>Recipient:</strong> ${recipient_name}</div>
-            <div>💰 <strong>Refund Amount:</strong> $${refund_amount}</div>
-            <div>📅 <strong>Original Message Sent:</strong> ${message_date}</div>
-            <div>🔄 <strong>Refund Processed:</strong> ${refund_date}</div>
-          </div>
+          ${infoBox([
+            ['Recipient', `💬 ${recipient_name}`],
+            ['Refund Amount', `💰 $${refund_amount}`],
+            ['Original Message Sent', `📅 ${message_date}`],
+            ['Refund Processed', `🔄 ${refund_date}`],
+          ])}
           <p>Your refund of <strong>$${refund_amount}</strong> will be returned to your original payment method.</p>
           <p style="font-size:13px;color:#666;">💡 <strong>Tip:</strong> Some creators receive many messages. Try sending your message at a different time, or check if the creator offers 1:1 video bookings for a guaranteed connection.</p>
           <div style="text-align:center;margin:24px 0;">

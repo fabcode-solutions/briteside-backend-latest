@@ -1,5 +1,6 @@
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import env from '../config/config.js';
+import { header, footer, ctaButton, infoBox } from '../templates/emailLayout.js';
 
 const sesClient = new SESClient({
   region: process.env.AWS_SES_REGION, // e.g. 'us-east-1'
@@ -67,18 +68,21 @@ export const sendTransactionEmail = async (to, transactionDetails) => {
 
   const subject = `Payment Confirmation - ${eventName}`;
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #333;">Payment Confirmation</h2>
-      <p>Dear Customer,</p>
-      <p>Your payment has been successfully processed.</p>
-      <div style="background-color: #f5f5f5; padding: 20px; margin: 20px 0;">
-        <h3>Transaction Details:</h3>
-        <p><strong>Amount:</strong> ${amount} ${currency.toUpperCase()}</p>
-        <p><strong>Event:</strong> ${eventName}</p>
-        <p><strong>Transaction ID:</strong> ${transactionId}</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color: #333;">Payment Confirmation</h2>
+        <p>Dear Customer,</p>
+        <p>Your payment has been successfully processed.</p>
+        ${infoBox([
+          ['Amount', `${amount} ${currency.toUpperCase()}`],
+          ['Event', eventName],
+          ['Transaction ID', transactionId],
+        ])}
+        <p>Thank you for your purchase!</p>
+        <p>Best regards,<br>Briteside Team</p>
       </div>
-      <p>Thank you for your purchase!</p>
-      <p>Best regards,<br>Briteside Team</p>
+      ${footer()}
     </div>
   `;
 
@@ -120,13 +124,17 @@ export const sendGeneralEmail = async ({ to, subject, message = '', websiteUrl =
   `;
 
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #333;">Hello from Briteside</h2>
-      <p>${defaultMessage}</p>
-      <p style="text-align: center; margin: 30px 0;">
-        <a href="${websiteUrl}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Visit Our Website</a>
-      </p>
-      <p>Best regards,<br>Briteside Team</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color: #333;">Hello from Briteside</h2>
+        <p>${defaultMessage}</p>
+        <p style="text-align: center; margin: 30px 0;">
+          ${ctaButton('Visit Our Website', websiteUrl)}
+        </p>
+        <p>Best regards,<br>Briteside Team</p>
+      </div>
+      ${footer()}
     </div>
   `;
 
@@ -154,21 +162,21 @@ export const sendOtpEmail = async (to, otp) => {
   const subject = 'Password Reset OTP - Briteside';
 
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9f9f9; padding: 20px; border-radius: 10px;">
-      <h2 style="color: #333; text-align: center;">Password Reset Request</h2>
-      <p style="color: #666; font-size: 16px;">Hello,</p>
-      <p style="color: #666; font-size: 16px;">You requested a password reset for your Briteside account. Please use the following One-Time Password (OTP) to reset your password:</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color: #333; text-align: center;">Password Reset Request</h2>
+        <p style="color: #666; font-size: 16px;">Hello,</p>
+        <p style="color: #666; font-size: 16px;">You requested a password reset for your Briteside account. Please use the following One-Time Password (OTP) to reset your password:</p>
 
-      <div style="background-color: #ffffff; padding: 15px; text-align: center; border-radius: 5px; margin: 30px 0; border: 1px solid #ddd;">
-        <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #007bff;">${otp}</span>
+        <div style="background-color: #f8f9fa; border-left: 4px solid #00D16E; border-radius: 0 8px 8px 0; padding: 15px; text-align: center; margin: 30px 0;">
+          <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #00D16E;">${otp}</span>
+        </div>
+
+        <p style="color: #666; font-size: 14px;">This OTP is valid for <strong>15 minutes</strong>.</p>
+        <p style="color: #999; font-size: 14px; margin-top: 30px;">If you didn't request this, please ignore this email. Your password will remain unchanged.</p>
       </div>
-
-      <p style="color: #666; font-size: 14px;">This OTP is valid for <strong>15 minutes</strong>.</p>
-      <p style="color: #999; font-size: 14px; margin-top: 30px;">If you didn't request this, please ignore this email. Your password will remain unchanged.</p>
-
-      <div style="border-top: 1px solid #eee; margin-top: 20px; padding-top: 20px; text-align: center;">
-        <p style="color: #aaa; font-size: 12px;">&copy; ${new Date().getFullYear()} Briteside. All rights reserved.</p>
-      </div>
+      ${footer()}
     </div>
   `;
 
@@ -202,26 +210,26 @@ export const sendResetPasswordEmail = async (to, token) => {
   }/reset-password?email=${to}&token=${token}`;
 
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9f9f9; padding: 20px; border-radius: 10px;">
-      <h2 style="color: #333; text-align: center;">Reset Your Password</h2>
-      <p style="color: #666; font-size: 16px;">Hello,</p>
-      <p style="color: #666; font-size: 16px;">You recently requested to reset your password for your Briteside account. Click the button below to reset it:</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color: #333; text-align: center;">Reset Your Password</h2>
+        <p style="color: #666; font-size: 16px;">Hello,</p>
+        <p style="color: #666; font-size: 16px;">You recently requested to reset your password for your Briteside account. Click the button below to reset it:</p>
 
-      <div style="text-align: center; margin: 30px 0;">
-        <a href="${resetLink}" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; font-size: 16px;">Reset Password</a>
+        <div style="text-align: center; margin: 30px 0;">
+          ${ctaButton('Reset Password', resetLink)}
+        </div>
+
+        <p style="color: #666; font-size: 14px;">If the button above doesn't work, copy and paste the following link into your browser:</p>
+        <p style="color: #00D16E; font-size: 14px; word-break: break-all;"><a href="${resetLink}" style="color: #00D16E;">${resetLink}</a></p>
+
+        <p style="color: #666; font-size: 14px;">This link is valid for <strong>${
+          env.jwt.resetPasswordExpirationMinutes
+        } minutes</strong>.</p>
+        <p style="color: #999; font-size: 14px; margin-top: 30px;">If you didn't request a password reset, please ignore this email.</p>
       </div>
-
-      <p style="color: #666; font-size: 14px;">If the button above doesn't work, copy and paste the following link into your browser:</p>
-      <p style="color: #007bff; font-size: 14px; word-break: break-all;"><a href="${resetLink}">${resetLink}</a></p>
-
-      <p style="color: #666; font-size: 14px;">This link is valid for <strong>${
-        env.jwt.resetPasswordExpirationMinutes
-      } minutes</strong>.</p>
-      <p style="color: #999; font-size: 14px; margin-top: 30px;">If you didn't request a password reset, please ignore this email.</p>
-
-      <div style="border-top: 1px solid #eee; margin-top: 20px; padding-top: 20px; text-align: center;">
-        <p style="color: #aaa; font-size: 12px;">&copy; ${new Date().getFullYear()} Briteside. All rights reserved.</p>
-      </div>
+      ${footer()}
     </div>
   `;
 
@@ -259,15 +267,16 @@ The Briteside Team
 export const sendUsernameReservationApprovedEmail = async ({ to, fullName, username }) => {
   const subject = 'Your Username Reservation Has Been Approved — Briteside';
   const html = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-      <h2 style="color:#38a169">Username Reserved!</h2>
-      <p>Hi <strong>${fullName || 'there'}</strong>,</p>
-      <p>Great news! Your username reservation for <strong>@${username}</strong> has been approved.</p>
-      <p>You can now register on Briteside using this username. Please note that your reservation may have an expiry window — sign up soon to secure it.</p>
-      <p>Best regards,<br>Briteside Team</p>
-      <div style="border-top:1px solid #eee;margin-top:20px;padding-top:20px;text-align:center">
-        <p style="color:#aaa;font-size:12px">&copy; ${new Date().getFullYear()} Briteside. All rights reserved.</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color:#00D16E">Username Reserved!</h2>
+        <p>Hi <strong>${fullName || 'there'}</strong>,</p>
+        <p>Great news! Your username reservation for <strong>@${username}</strong> has been approved.</p>
+        <p>You can now register on Briteside using this username. Please note that your reservation may have an expiry window — sign up soon to secure it.</p>
+        <p>Best regards,<br>Briteside Team</p>
       </div>
+      ${footer()}
     </div>`;
   const text = `Hi ${fullName || 'there'},\n\nYour username reservation for @${username} has been approved.\nSign up on Briteside to claim it.\n\nBest regards,\nBriteside Team`;
   return sendMail(to, subject, html, text);
@@ -290,16 +299,17 @@ export const sendUsernameReservationRejectedEmail = async ({
 }) => {
   const subject = 'Your Username Reservation Was Not Approved — Briteside';
   const html = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-      <h2 style="color:#e53e3e">Reservation Not Approved</h2>
-      <p>Hi <strong>${fullName || 'there'}</strong>,</p>
-      <p>Unfortunately, your reservation request for <strong>@${username}</strong> was not approved.</p>
-      ${rejectionReason ? `<p><strong>Reason:</strong> ${rejectionReason}</p>` : ''}
-      <p>You are welcome to submit a new reservation request at any time.</p>
-      <p>Best regards,<br>Briteside Team</p>
-      <div style="border-top:1px solid #eee;margin-top:20px;padding-top:20px;text-align:center">
-        <p style="color:#aaa;font-size:12px">&copy; ${new Date().getFullYear()} Briteside. All rights reserved.</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color:#e53e3e">Reservation Not Approved</h2>
+        <p>Hi <strong>${fullName || 'there'}</strong>,</p>
+        <p>Unfortunately, your reservation request for <strong>@${username}</strong> was not approved.</p>
+        ${rejectionReason ? `<p><strong>Reason:</strong> ${rejectionReason}</p>` : ''}
+        <p>You are welcome to submit a new reservation request at any time.</p>
+        <p>Best regards,<br>Briteside Team</p>
       </div>
+      ${footer()}
     </div>`;
   const text = `Hi ${fullName || 'there'},\n\nYour reservation for @${username} was not approved.${rejectionReason ? `\nReason: ${rejectionReason}` : ''}\n\nYou may submit a new request.\n\nBest regards,\nBriteside Team`;
   return sendMail(to, subject, html, text);
@@ -320,13 +330,17 @@ export const sendSuspensionEmail = async ({ to, username, reason, suspendedUntil
     ? `until <strong>${new Date(suspendedUntil).toDateString()}</strong>`
     : 'indefinitely';
   const html = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-      <h2 style="color:#e53e3e">Account Suspended</h2>
-      <p>Hi <strong>${username || 'there'}</strong>,</p>
-      <p>Your Briteside account has been suspended ${until}.</p>
-      <p><strong>Reason:</strong> ${reason}</p>
-      <p>If you believe this is a mistake, you can submit an appeal from the app.</p>
-      <p>Best regards,<br>Briteside Team</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color:#e53e3e">Account Suspended</h2>
+        <p>Hi <strong>${username || 'there'}</strong>,</p>
+        <p>Your Briteside account has been suspended ${until}.</p>
+        <p><strong>Reason:</strong> ${reason}</p>
+        <p>If you believe this is a mistake, you can submit an appeal from the app.</p>
+        <p>Best regards,<br>Briteside Team</p>
+      </div>
+      ${footer()}
     </div>`;
   const text = `Your account has been suspended ${until}.\nReason: ${reason}\nYou may appeal via the app.`;
   return sendMail(to, subject, html, text);
@@ -342,11 +356,15 @@ export const sendSuspensionEmail = async ({ to, username, reason, suspendedUntil
 export const sendUnsuspensionEmail = async ({ to, username }) => {
   const subject = 'Your Briteside Account Has Been Reinstated';
   const html = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-      <h2 style="color:#38a169">Account Reinstated</h2>
-      <p>Hi <strong>${username || 'there'}</strong>,</p>
-      <p>Your suspension has been lifted. You can now log in again.</p>
-      <p>Best regards,<br>Briteside Team</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color:#00D16E">Account Reinstated</h2>
+        <p>Hi <strong>${username || 'there'}</strong>,</p>
+        <p>Your suspension has been lifted. You can now log in again.</p>
+        <p>Best regards,<br>Briteside Team</p>
+      </div>
+      ${footer()}
     </div>`;
   const text = `Your Briteside account has been reinstated. You can now log in.`;
   return sendMail(to, subject, html, text);
@@ -362,11 +380,15 @@ export const sendUnsuspensionEmail = async ({ to, username }) => {
 export const sendAppealReceivedEmail = async ({ to, username }) => {
   const subject = 'Appeal Received — Briteside';
   const html = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-      <h2>Appeal Submitted</h2>
-      <p>Hi <strong>${username || 'there'}</strong>,</p>
-      <p>We have received your suspension appeal and will review it within 3–5 business days.</p>
-      <p>Best regards,<br>Briteside Team</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color:#333">Appeal Submitted</h2>
+        <p>Hi <strong>${username || 'there'}</strong>,</p>
+        <p>We have received your suspension appeal and will review it within 3–5 business days.</p>
+        <p>Best regards,<br>Briteside Team</p>
+      </div>
+      ${footer()}
     </div>`;
   const text = `We received your suspension appeal. We will review it within 3–5 business days.`;
   return sendMail(to, subject, html, text);
@@ -399,12 +421,16 @@ export const sendAppealReviewedEmail = async ({
       : 'Your suspension has been fully lifted. You can log in again.'
     : 'Your appeal was not approved. Your original suspension remains in effect.';
   const html = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-      <h2 style="color:${approved ? '#38a169' : '#e53e3e'}">${subject}</h2>
-      <p>Hi <strong>${username || 'there'}</strong>,</p>
-      <p>${statusText}</p>
-      ${adminResponse ? `<p><strong>Admin note:</strong> ${adminResponse}</p>` : ''}
-      <p>Best regards,<br>Briteside Team</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color:${approved ? '#00D16E' : '#e53e3e'}">${subject}</h2>
+        <p>Hi <strong>${username || 'there'}</strong>,</p>
+        <p>${statusText}</p>
+        ${adminResponse ? `<p><strong>Admin note:</strong> ${adminResponse}</p>` : ''}
+        <p>Best regards,<br>Briteside Team</p>
+      </div>
+      ${footer()}
     </div>`;
   const text = `${subject}\n\n${statusText}${adminResponse ? `\n\nAdmin note: ${adminResponse}` : ''}`;
   return sendMail(to, subject, html, text);
@@ -420,24 +446,20 @@ const demoConfirmationTemplate = ({ firstName, inviteLink, scheduledAt }) => {
     : null;
 
   return `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;background:#fafafa">
-      <h2 style="color:#333">Hi ${firstName}, your demo is confirmed!</h2>
-      <p style="color:#555;font-size:15px">We're excited to show you what Briteside can do. Here are your details:</p>
-      <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:20px;margin:20px 0">
-        ${scheduledDateStr ? `<p style="margin:0 0 8px"><strong>When:</strong> ${scheduledDateStr}</p>` : ''}
-        <p style="margin:0"><strong>Join Link:</strong>
-          <a href="${inviteLink}" style="color:#007bff">${inviteLink}</a>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color:#333">Hi ${firstName}, your demo is confirmed!</h2>
+        <p style="color:#555;font-size:15px">We're excited to show you what Briteside can do. Here are your details:</p>
+        ${infoBox([scheduledDateStr && ['When', scheduledDateStr], ['Join Link', `<a href="${inviteLink}" style="color:#00D16E">${inviteLink}</a>`]])}
+        <div style="text-align:center;margin:30px 0">
+          ${ctaButton('Join Demo Call', inviteLink)}
+        </div>
+        <p style="color:#888;font-size:13px">If the button doesn't work, paste this link in your browser:<br>
+          <a href="${inviteLink}">${inviteLink}</a>
         </p>
       </div>
-      <div style="text-align:center;margin:30px 0">
-        <a href="${inviteLink}" style="background:#007bff;color:#fff;padding:12px 28px;text-decoration:none;border-radius:6px;font-weight:bold;font-size:15px">Join Demo Call</a>
-      </div>
-      <p style="color:#888;font-size:13px">If the button doesn't work, paste this link in your browser:<br>
-        <a href="${inviteLink}">${inviteLink}</a>
-      </p>
-      <div style="border-top:1px solid #eee;margin-top:24px;padding-top:16px;text-align:center">
-        <p style="color:#aaa;font-size:12px">&copy; ${new Date().getFullYear()} Briteside. All rights reserved.</p>
-      </div>
+      ${footer()}
     </div>`;
 };
 
@@ -457,13 +479,17 @@ export const sendIssueSubmittedEmail = ({ to, reporterName, entityType, amountCe
   const amount = `$${(amountCents / 100).toFixed(2)}`;
   const subject = 'Issue Received — Briteside';
   const html = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-      <h2>Issue Received</h2>
-      <p>Hi <strong>${reporterName}</strong>,</p>
-      <p>We have received your issue regarding your <strong>${typeLabel}</strong> (amount paid: <strong>${amount}</strong>).</p>
-      <p>Our team will review it and get back to you within 3–5 business days.</p>
-      <p style="color:#888;font-size:12px">Issue ID: ${issueId}</p>
-      <p>Best regards,<br>Briteside Team</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color:#333">Issue Received</h2>
+        <p>Hi <strong>${reporterName}</strong>,</p>
+        <p>We have received your issue regarding your <strong>${typeLabel}</strong> (amount paid: <strong>${amount}</strong>).</p>
+        <p>Our team will review it and get back to you within 3–5 business days.</p>
+        <p style="color:#888;font-size:12px">Issue ID: ${issueId}</p>
+        <p>Best regards,<br>Briteside Team</p>
+      </div>
+      ${footer()}
     </div>`;
   const text = `Hi ${reporterName},\n\nWe received your issue for a ${typeLabel} (${amount} paid).\nWe will review it within 3–5 business days.\n\nIssue ID: ${issueId}\n\nBriteside Team`;
   return sendMail(to, subject, html, text);
@@ -493,14 +519,18 @@ export const sendIssueResolvedToReporterEmail = ({
       ? `<p>A refund of <strong>$${(refundAmountCents / 100).toFixed(2)}</strong> has been issued and will appear within 5–10 business days.</p>`
       : '';
   const html = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-      <h2 style="color:${isDismissed ? '#718096' : '#38a169'}">${subject}</h2>
-      <p>Hi <strong>${reporterName}</strong>,</p>
-      <p>Your issue regarding your <strong>${typeLabel}</strong> has been <strong>${isDismissed ? 'dismissed' : 'resolved'}</strong>.</p>
-      ${refundLine}
-      ${adminNote ? `<p><strong>Admin note:</strong> ${adminNote}</p>` : ''}
-      <p style="color:#888;font-size:12px">Issue ID: ${issueId}</p>
-      <p>Best regards,<br>Briteside Team</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color:${isDismissed ? '#718096' : '#00D16E'}">${subject}</h2>
+        <p>Hi <strong>${reporterName}</strong>,</p>
+        <p>Your issue regarding your <strong>${typeLabel}</strong> has been <strong>${isDismissed ? 'dismissed' : 'resolved'}</strong>.</p>
+        ${refundLine}
+        ${adminNote ? `<p><strong>Admin note:</strong> ${adminNote}</p>` : ''}
+        <p style="color:#888;font-size:12px">Issue ID: ${issueId}</p>
+        <p>Best regards,<br>Briteside Team</p>
+      </div>
+      ${footer()}
     </div>`;
   const text = `${subject}\n\nYour ${typeLabel} issue has been ${isDismissed ? 'dismissed' : 'resolved'}.${refundIssued && refundAmountCents ? `\nRefund: $${(refundAmountCents / 100).toFixed(2)}` : ''}${adminNote ? `\nAdmin note: ${adminNote}` : ''}\n\nIssue ID: ${issueId}`;
   return sendMail(to, subject, html, text);
@@ -513,13 +543,17 @@ export const sendIssueWarningToTalentEmail = ({ to, talentName, entityType, admi
   const typeLabel = entityType === 'session' ? 'a session booking' : 'a priority message';
   const subject = 'Account Warning — Briteside';
   const html = `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
-      <h2 style="color:#e53e3e">Account Warning</h2>
-      <p>Hi <strong>${talentName}</strong>,</p>
-      <p>A customer raised an issue related to <strong>${typeLabel}</strong> on your account. After review, a warning has been issued.</p>
-      ${adminNote ? `<p><strong>Note:</strong> ${adminNote}</p>` : ''}
-      <p>Please ensure you respond to paid messages and attend confirmed sessions on time. Repeated issues may result in account suspension.</p>
-      <p>Best regards,<br>Briteside Team</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color:#e53e3e">Account Warning</h2>
+        <p>Hi <strong>${talentName}</strong>,</p>
+        <p>A customer raised an issue related to <strong>${typeLabel}</strong> on your account. After review, a warning has been issued.</p>
+        ${adminNote ? `<p><strong>Note:</strong> ${adminNote}</p>` : ''}
+        <p>Please ensure you respond to paid messages and attend confirmed sessions on time. Repeated issues may result in account suspension.</p>
+        <p>Best regards,<br>Briteside Team</p>
+      </div>
+      ${footer()}
     </div>`;
   const text = `Account Warning\n\nHi ${talentName},\n\nA customer raised an issue for ${typeLabel} on your account. A warning has been issued.${adminNote ? `\n\nNote: ${adminNote}` : ''}\n\nPlease ensure timely responses. Repeated issues may result in suspension.\n\nBriteside Team`;
   return sendMail(to, subject, html, text);

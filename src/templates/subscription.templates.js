@@ -3,19 +3,7 @@
  * Covers: Briteside Plus signup, cancellation, payment failed
  */
 
-const header = `
-  <div style="text-align:center;padding:20px 0;border-bottom:1px solid #eee;">
-    <strong>BRITESIDE</strong><br/>
-    <a href="https://www.briteside.app" style="color:#666;font-size:12px;">www.briteside.app</a>
-  </div>`;
-
-const footer = text => `
-  <div style="padding:15px 20px;border-top:1px solid #eee;font-size:12px;color:#999;text-align:center;">
-    ${text}
-  </div>`;
-
-const ctaButton = (label, href = '#') =>
-  `<a href="${href}" style="background:#6c47ff;color:#fff;padding:11px 22px;border-radius:6px;text-decoration:none;margin:0 6px;display:inline-block;">${label}</a>`;
+import { header, footer, ctaButton, infoBox, calloutBox } from './emailLayout.js';
 
 export const subscriptionTemplates = {
   // ── Briteside Plus Signup ───────────────────────────────────────────────
@@ -38,12 +26,12 @@ export const subscriptionTemplates = {
             <li>✅ Priority in search & discovery</li>
             <li>✅ Early access to new features</li>
           </ul>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>📋 <strong>Plan:</strong> Briteside Plus</div>
-            <div>💰 <strong>Amount:</strong> $35/month</div>
-            <div>📅 <strong>Next Billing Date:</strong> ${next_billing_date}</div>
-            <div>💎 <strong>Creator Earnings:</strong> You keep 95% of everything you earn</div>
-          </div>
+          ${infoBox([
+            ['Plan', '📋 Briteside Plus'],
+            ['Amount', '💰 $35/month'],
+            ['Next Billing Date', `📅 ${next_billing_date}`],
+            ['Creator Earnings', '💎 You keep 95% of everything you earn'],
+          ])}
           <p><strong>Quick Start:</strong></p>
           <div style="margin:16px 0;">
             <div style="margin-bottom:12px;">
@@ -80,11 +68,11 @@ export const subscriptionTemplates = {
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">We're sorry to see you go</h2>
           <p>Your Briteside Plus subscription has been cancelled.</p>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>📋 <strong>Plan:</strong> Briteside Plus</div>
-            <div>📅 <strong>Access Until:</strong> ${access_end_date}</div>
-            <div>💰 <strong>Final Charge:</strong> $35 (already billed)</div>
-          </div>
+          ${infoBox([
+            ['Plan', '📋 Briteside Plus'],
+            ['Access Until', `📅 ${access_end_date}`],
+            ['Final Charge', '💰 $35 (already billed)'],
+          ])}
           <p>✅ You'll keep full access to all Briteside Plus features until <strong>${access_end_date}</strong>.<br/>
           After that date, your account will revert to a free plan.</p>
           <p><strong>You'll Lose Access To:</strong></p>
@@ -127,13 +115,14 @@ export const subscriptionTemplates = {
           <p>Hi ${user_name},</p>
           <h2 style="color:#c0392b;">⚠️ Payment Failed</h2>
           <p>We were unable to process your payment for Briteside Plus.</p>
-          <div style="background:#fff3f3;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>📋 <strong>Plan:</strong> Briteside Plus</div>
-            <div>💰 <strong>Amount Due:</strong> $35.00</div>
-            <div>💳 <strong>Payment Method:</strong> ending in ${payment_method_last4}</div>
-            <div>📅 <strong>Failed On:</strong> ${failed_date}</div>
-            <div>🔄 <strong>Next Retry:</strong> ${next_retry_date}</div>
-          </div>
+          ${calloutBox(
+            `<div>📋 <strong>Plan:</strong> Briteside Plus</div>
+             <div>💰 <strong>Amount Due:</strong> $35.00</div>
+             <div>💳 <strong>Payment Method:</strong> ending in ${payment_method_last4}</div>
+             <div>📅 <strong>Failed On:</strong> ${failed_date}</div>
+             <div>🔄 <strong>Next Retry:</strong> ${next_retry_date}</div>`,
+            'danger'
+          )}
           <p>We'll automatically retry your payment on <strong>${next_retry_date}</strong>. If the payment continues to fail after <strong>${max_retries}</strong> attempts, your Briteside Plus subscription will be suspended on <strong>${suspension_date}</strong>.</p>
           <p><strong>Don't Lose Access To:</strong></p>
           <ul>

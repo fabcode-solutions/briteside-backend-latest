@@ -5,19 +5,7 @@
  *         priority message request/reply, notification digest, abandoned cart
  */
 
-const header = `
-  <div style="text-align:center;padding:20px 0;border-bottom:1px solid #eee;">
-    <strong>BRITESIDE</strong><br/>
-    <a href="https://www.briteside.app" style="color:#666;font-size:12px;">www.briteside.app</a>
-  </div>`;
-
-const footer = text => `
-  <div style="padding:15px 20px;border-top:1px solid #eee;font-size:12px;color:#999;text-align:center;">
-    ${text}
-  </div>`;
-
-const ctaButton = (label, href = '#') =>
-  `<a href="${href}" style="background:#6c47ff;color:#fff;padding:11px 22px;border-radius:6px;text-decoration:none;margin:0 6px;display:inline-block;">${label}</a>`;
+import { header, footer, ctaButton, infoBox, calloutBox } from './emailLayout.js';
 
 // ─── Moderation ──────────────────────────────────────────────────────────────
 
@@ -40,11 +28,12 @@ export const moderationTemplates = {
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#c0392b;">Your post has been removed</h2>
-          <div style="background:#fff3f3;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>📝 <strong>Post Content:</strong> "${post_excerpt}..."</div>
-            <div>📅 <strong>Posted on:</strong> ${post_date}</div>
-            <div>🚫 <strong>Violation Type:</strong> ${violation_type}</div>
-          </div>
+          ${calloutBox(
+            `<div>📝 <strong>Post Content:</strong> "${post_excerpt}..."</div>
+             <div>📅 <strong>Posted on:</strong> ${post_date}</div>
+             <div>🚫 <strong>Violation Type:</strong> ${violation_type}</div>`,
+            'danger'
+          )}
           <p><strong>Policy Violated:</strong> ${policy_description}</p>
           ${
             is_first_offense
@@ -69,14 +58,15 @@ export const moderationTemplates = {
         ${header}
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
-          <h2 style="color:#27ae60;">Appeal Approved ✅</h2>
+          <h2 style="color:#00D16E;">Appeal Approved ✅</h2>
           <p>We've reviewed your appeal and your content has been restored.</p>
-          <div style="background:#e8f5e9;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>📝 <strong>Original Post:</strong> "${post_excerpt}..."</div>
-            <div>📅 <strong>Appeal Submitted:</strong> ${appeal_date}</div>
-            <div>✅ <strong>Decision Date:</strong> ${decision_date}</div>
-            <div>🔍 <strong>Reviewed by:</strong> Briteside Trust & Safety Team</div>
-          </div>
+          ${calloutBox(
+            `<div>📝 <strong>Original Post:</strong> "${post_excerpt}..."</div>
+             <div>📅 <strong>Appeal Submitted:</strong> ${appeal_date}</div>
+             <div>✅ <strong>Decision Date:</strong> ${decision_date}</div>
+             <div>🔍 <strong>Reviewed by:</strong> Briteside Trust & Safety Team</div>`,
+            'success'
+          )}
           ${review_notes ? `<p><strong>Our Findings:</strong> ${review_notes}</p>` : ''}
           <p>Your post has been restored and is now visible. Any restrictions have been lifted. This incident will not count against your account standing.</p>
           <div style="text-align:center;margin:24px 0;">
@@ -109,11 +99,12 @@ export const moderationTemplates = {
           <p>Hi ${user_name},</p>
           <h2 style="color:#c0392b;">Appeal Denied ❌</h2>
           <p>After careful review, we've determined that our original decision was correct.</p>
-          <div style="background:#fff3f3;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>📝 <strong>Original Post:</strong> "${post_excerpt}..."</div>
-            <div>📅 <strong>Appeal Submitted:</strong> ${appeal_date}</div>
-            <div>❌ <strong>Decision Date:</strong> ${decision_date}</div>
-          </div>
+          ${calloutBox(
+            `<div>📝 <strong>Original Post:</strong> "${post_excerpt}..."</div>
+             <div>📅 <strong>Appeal Submitted:</strong> ${appeal_date}</div>
+             <div>❌ <strong>Decision Date:</strong> ${decision_date}</div>`,
+            'danger'
+          )}
           <p><strong>Policy Violated:</strong> ${policy_name} – ${policy_description}</p>
           ${detailed_explanation ? `<p><strong>Why this decision stands:</strong> ${detailed_explanation}</p>` : ''}
           ${
@@ -151,12 +142,13 @@ export const moderationTemplates = {
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#c0392b;">Account Suspended</h2>
-          <div style="background:#fff3f3;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>👤 <strong>Account:</strong> ${user_email}</div>
-            <div>🚫 <strong>Suspension Type:</strong> ${suspension_type}</div>
-            <div>📅 <strong>Effective Date:</strong> ${suspension_date}</div>
-            <div>⏱️ <strong>Duration:</strong> ${suspension_duration}</div>
-          </div>
+          ${calloutBox(
+            `<div>👤 <strong>Account:</strong> ${user_email}</div>
+             <div>🚫 <strong>Suspension Type:</strong> ${suspension_type}</div>
+             <div>📅 <strong>Effective Date:</strong> ${suspension_date}</div>
+             <div>⏱️ <strong>Duration:</strong> ${suspension_duration}</div>`,
+            'danger'
+          )}
           <p><strong>Reason:</strong> ${suspension_reason}</p>
           ${
             violations.length
@@ -190,12 +182,13 @@ export const moderationTemplates = {
         ${header}
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
-          <h2 style="color:#27ae60;">Welcome back to Briteside! 🎉</h2>
-          <div style="background:#e8f5e9;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>👤 <strong>Account:</strong> ${user_email}</div>
-            <div>📅 <strong>Reinstated on:</strong> ${reinstatement_date}</div>
-            <div>✅ <strong>Reason:</strong> ${appeal_approved ? 'Appeal approved' : 'Suspension period completed'}</div>
-          </div>
+          <h2 style="color:#00D16E;">Welcome back to Briteside! 🎉</h2>
+          ${calloutBox(
+            `<div>👤 <strong>Account:</strong> ${user_email}</div>
+             <div>📅 <strong>Reinstated on:</strong> ${reinstatement_date}</div>
+             <div>✅ <strong>Reason:</strong> ${appeal_approved ? 'Appeal approved' : 'Suspension period completed'}</div>`,
+            'success'
+          )}
           <p>You now have full access to your Briteside account. All previously hidden content has been restored.</p>
           <div style="text-align:center;margin:24px 0;">
             ${ctaButton('Log In to Your Account')}
@@ -224,11 +217,12 @@ export const moderationTemplates = {
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#c0392b;">Permanent Account Suspension</h2>
-          <div style="background:#fff3f3;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>👤 <strong>Account:</strong> ${user_email}</div>
-            <div>🚫 <strong>Status:</strong> Permanently Suspended</div>
-            <div>📅 <strong>Effective Date:</strong> ${suspension_date}</div>
-          </div>
+          ${calloutBox(
+            `<div>👤 <strong>Account:</strong> ${user_email}</div>
+             <div>🚫 <strong>Status:</strong> Permanently Suspended</div>
+             <div>📅 <strong>Effective Date:</strong> ${suspension_date}</div>`,
+            'danger'
+          )}
           <p><strong>Reason:</strong> ${suspension_reason}</p>
           ${severe_violations.length ? `<ul>${severe_violations.map(v => `<li>${v.description}</li>`).join('')}</ul>` : ''}
           ${
@@ -297,10 +291,7 @@ export const notificationTemplates = {
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">You have a priority message! ⭐</h2>
           <p><strong>${sender_name}</strong> sent you a priority message:</p>
-          <div style="border-left:3px solid #6c47ff;padding:12px 16px;background:#f8f8f8;border-radius:0 6px 6px 0;margin:16px 0;">
-            <p style="margin:0;">${message_content}</p>
-            <p style="margin:8px 0 0;font-size:12px;color:#666;">Sent: ${message_time}</p>
-          </div>
+          ${calloutBox(`<p style="margin:0;">${message_content}</p><p style="margin:8px 0 0;font-size:12px;color:#666;">Sent: ${message_time}</p>`, 'neutral')}
           <div style="text-align:center;margin:24px 0;">
             ${ctaButton(`Reply to ${sender_name}`)}
             ${ctaButton('View Full Message')}
@@ -337,13 +328,12 @@ export const notificationTemplates = {
           <h2 style="color:#333;">Your weekly Briteside digest! 📊</h2>
           <p><strong>Week of ${week_start} – ${week_end}</strong></p>
 
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <strong>Your Activity</strong><br/>
-            👁️ Profile views: ${profile_views}<br/>
-            👥 New followers: ${new_followers}<br/>
-            ❤️ Likes received: ${likes_received}<br/>
-            💬 Comments received: ${comments_received}
-          </div>
+          ${infoBox([
+            ['Profile views', `👁️ ${profile_views}`],
+            ['New followers', `👥 ${new_followers}`],
+            ['Likes received', `❤️ ${likes_received}`],
+            ['Comments received', `💬 ${comments_received}`],
+          ])}
 
           ${
             upcoming_events.length
@@ -413,12 +403,12 @@ export const notificationTemplates = {
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">Your cart is waiting! 🎟️</h2>
           <p>We noticed you left some amazing tickets in your cart. Don't let them slip away.</p>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>🎟️ <strong>${ticket_quantity}x ${ticket_type} tickets</strong></div>
-            <div>📅 <strong>${event_name}</strong></div>
-            <div>📍 ${event_location}</div>
-            <div>🗓️ ${event_date} at ${event_time}</div>
-          </div>
+          ${infoBox([
+            ['Tickets', `🎟️ ${ticket_quantity}x ${ticket_type}`],
+            ['Event', `📅 ${event_name}`],
+            ['Location', `📍 ${event_location}`],
+            ['Date', `🗓️ ${event_date} at ${event_time}`],
+          ])}
           <div style="background:#fff;border:1px solid #eee;border-radius:6px;padding:16px;margin:16px 0;font-size:14px;">
             ${cart_items.map(item => `<div>${item.quantity}x ${item.ticket_type} – ${item.price}</div>`).join('')}
             <hr style="border:none;border-top:1px solid #eee;margin:8px 0;"/>
