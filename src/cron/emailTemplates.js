@@ -1,4 +1,5 @@
 import dayjs from 'dayjs';
+import { FRONTEND_URL, BRAND_COLOR, header, footer, ctaButton, infoBox } from '../templates/emailLayout.js';
 
 /**
  * Email templates for cron job notifications
@@ -12,36 +13,36 @@ import dayjs from 'dayjs';
  * @returns {Object} - Email content object with html and text
  */
 export const generateEventReminderEmail = (event, user, hoursBefore) => {
-  const reminderType = hoursBefore === 24 ? '24-hour' : '1-hour';
-  const subject = `Event Reminder: ${event.title} starts in ${reminderType}`;
+  const subject = `Event Reminder: ${event.title} starts within ${hoursBefore} hours`;
 
   const eventDate = dayjs(event.startDate).format('dddd, MMMM D, YYYY');
   const eventTime = dayjs(event.startDate).format('h:mm A');
 
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #333;">Event Reminder</h2>
-      <p>Hi ${user.firstName},</p>
-      <p>This is a friendly reminder that the event you're attending is coming up soon!</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color: #333;">Event Reminder</h2>
+        <p>Hi ${user.firstName},</p>
+        <p>This is a friendly reminder that the event you're attending is coming up soon!</p>
 
-      <div style="background-color: #f8f9fa; padding: 20px; margin: 20px 0; border-radius: 8px;">
-        <h3 style="margin-top: 0; color: #007bff;">${event.title}</h3>
-        <p><strong>Date:</strong> ${eventDate}</p>
-        <p><strong>Time:</strong> ${eventTime}</p>
-        <p><strong>Venue:</strong> ${event.venue?.name || 'TBD'}</p>
-        <p><strong>Event Code:</strong> ${event.eventCode}</p>
+        ${infoBox([
+          ['Event', event.title],
+          ['Date', eventDate],
+          ['Time', eventTime],
+          ['Venue', event.venue?.name || 'TBD'],
+          ['Event Code', event.eventCode],
+        ])}
+
+        <p>We can't wait to see you there! Don't forget to bring your ticket.</p>
+
+        <div style="text-align: center; margin: 30px 0;">
+          ${ctaButton('View Event Details', `${FRONTEND_URL}/events/${event.slug}`)}
+        </div>
+
+        <p>Best regards,<br>The Briteside Team</p>
       </div>
-
-      <p>We can't wait to see you there! Don't forget to bring your ticket.</p>
-
-      <p style="text-align: center; margin: 30px 0;">
-        <a href="${process.env.FRONTEND_URL || 'https://gokyro.com'}/events/${event.slug}"
-           style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
-          View Event Details
-        </a>
-      </p>
-
-      <p>Best regards,<br>The Briteside Team</p>
+      ${footer()}
     </div>
   `;
 
@@ -94,12 +95,12 @@ export const generateMerchandiseUpsellEmail = (event, user, merchandise, ticketC
           <p style="margin: 0 0 8px 0; color: #666; font-size: 14px;">${
             item.description || 'Limited edition merchandise'
           }</p>
-          <p style="margin: 0; font-weight: bold; color: #007bff; font-size: 16px;">$${
+          <p style="margin: 0; font-weight: bold; color: ${BRAND_COLOR}; font-size: 16px;">$${
             item.price
           }</p>
           ${
             item.quantityAvailable > 0
-              ? `<p style="margin: 5px 0 0 0; color: #28a745; font-size: 12px;">${item.quantityAvailable} available</p>`
+              ? `<p style="margin: 5px 0 0 0; color: ${BRAND_COLOR}; font-size: 12px;">${item.quantityAvailable} available</p>`
               : '<p style="margin: 5px 0 0 0; color: #dc3545; font-size: 12px;">Limited stock!</p>'
           }
         </div>
@@ -110,36 +111,37 @@ export const generateMerchandiseUpsellEmail = (event, user, merchandise, ticketC
     .join('');
 
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #333;">Exclusive Event Merchandise Available!</h2>
-      <p>Hi ${user.firstName},</p>
-      <p>Since you're attending <strong>${
-        event.title
-      }</strong>, we thought you'd love these exclusive merchandise items!</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color: #333;">Exclusive Event Merchandise Available!</h2>
+        <p>Hi ${user.firstName},</p>
+        <p>Since you're attending <strong>${
+          event.title
+        }</strong>, we thought you'd love these exclusive merchandise items!</p>
 
-      ${
-        ticketCount > 1
-          ? `<div style="background-color: #e8f5e8; padding: 15px; border-radius: 5px; margin: 20px 0;">
-        <p style="margin: 0; color: #2e7d32;"><strong>🎉 Bulk Purchase Bonus:</strong> As a valued attendee with ${ticketCount} tickets, enjoy special pricing on merchandise!</p>
-      </div>`
-          : ''
-      }
+        ${
+          ticketCount > 1
+            ? `<div style="background-color: #f8f9fa; border-left: 4px solid ${BRAND_COLOR}; border-radius: 0 8px 8px 0; padding: 15px 20px; margin: 20px 0;">
+          <p style="margin: 0; color: #333;"><strong>🎉 Bulk Purchase Bonus:</strong> As a valued attendee with ${ticketCount} tickets, enjoy special pricing on merchandise!</p>
+        </div>`
+            : ''
+        }
 
-      <h3 style="color: #007bff; margin-top: 30px;">Available Merchandise:</h3>
-      ${merchandiseHtml}
+        <h3 style="color: ${BRAND_COLOR}; margin-top: 30px;">Available Merchandise:</h3>
+        ${merchandiseHtml}
 
-      <p style="text-align: center; margin: 30px 0;">
-        <a href="${process.env.FRONTEND_URL || 'https://gokyro.com'}/events/${event.slug}/merchandise"
-           style="background-color: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
-          Shop Merchandise Now
-        </a>
-      </p>
+        <div style="text-align: center; margin: 30px 0;">
+          ${ctaButton('Shop Merchandise Now', `${FRONTEND_URL}/events/${event.slug}/merchandise`)}
+        </div>
 
-      <p style="font-size: 12px; color: #666; text-align: center;">
-        Limited quantities available. Prices may change. Don't miss out on these exclusive items!
-      </p>
+        <p style="font-size: 12px; color: #666; text-align: center;">
+          Limited quantities available. Prices may change. Don't miss out on these exclusive items!
+        </p>
 
-      <p>Best regards,<br>The Briteside Team</p>
+        <p>Best regards,<br>The Briteside Team</p>
+      </div>
+      ${footer()}
     </div>
   `;
 
@@ -154,7 +156,7 @@ export const generateMerchandiseUpsellEmail = (event, user, merchandise, ticketC
       .map(item => `- ${item.name}: $${item.price} (${item.quantityAvailable} available)`)
       .join('\n')}
 
-    Shop now: ${process.env.FRONTEND_URL || 'https://gokyro.com'}/events/${event.slug}/merchandise
+    Shop now: ${FRONTEND_URL}/events/${event.slug}/merchandise
 
     Best regards,
     The Briteside Team
@@ -200,25 +202,26 @@ export const generatePromotionalEmail = (user, events) => {
     .join('');
 
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #333;">Discover Amazing Events Near You!</h2>
-      <p>Hi ${user.firstName},</p>
-      <p>We noticed you haven't purchased tickets for any upcoming events. Here are some exciting events happening soon that you might enjoy:</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color: #333;">Discover Amazing Events Near You!</h2>
+        <p>Hi ${user.firstName},</p>
+        <p>We noticed you haven't purchased tickets for any upcoming events. Here are some exciting events happening soon that you might enjoy:</p>
 
-      ${eventsHtml}
+        ${eventsHtml}
 
-      <p style="text-align: center; margin: 30px 0;">
-        <a href="${process.env.FRONTEND_URL || 'https://gokyro.com'}/events"
-           style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
-          Browse All Events
-        </a>
-      </p>
+        <div style="text-align: center; margin: 30px 0;">
+          ${ctaButton('Browse All Events', `${FRONTEND_URL}/events`)}
+        </div>
 
-      <p style="font-size: 12px; color: #666; text-align: center;">
-        Don't miss out on these amazing experiences! Early bird pricing available on select events.
-      </p>
+        <p style="font-size: 12px; color: #666; text-align: center;">
+          Don't miss out on these amazing experiences! Early bird pricing available on select events.
+        </p>
 
-      <p>Best regards,<br>The Briteside Team</p>
+        <p>Best regards,<br>The Briteside Team</p>
+      </div>
+      ${footer()}
     </div>
   `;
 
@@ -237,7 +240,7 @@ export const generatePromotionalEmail = (user, events) => {
       })
       .join('\n')}
 
-    Browse all events: ${process.env.FRONTEND_URL || 'https://gokyro.com'}/events
+    Browse all events: ${FRONTEND_URL}/events
 
     Best regards,
     The Briteside Team

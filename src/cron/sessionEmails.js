@@ -1,60 +1,27 @@
 import dayjs from 'dayjs';
+import { FRONTEND_URL, BRAND_COLOR, BRAND_NAME, emailWrapper, infoBox, ctaRow, ctaButton as ctaLink } from '../templates/emailLayout.js';
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://briteside.app';
-const BRAND_COLOR = '#00D16E';
-const BRAND_NAME = 'Briteside';
-
-const LOGO_URL = `${FRONTEND_URL}/assets/logo/logo.png`;  
-const LOGO_HEIGHT = 36;
-
-const baseLayout = content => `
-<div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
-  <div style="background-color: #F0FDF4; padding: 24px; text-align: center;">
-    <img
-      src="${LOGO_URL}"
-      alt="${BRAND_NAME}"
-      height="${LOGO_HEIGHT}"
-      style="height: ${LOGO_HEIGHT}px; width: auto; display: inline-block; border: 0;"
-    />
-  </div>
-  <div style="padding: 32px 40px;">
-    ${content}
-  </div>
-  <div style="background: #f5f5f5; padding: 16px 40px; text-align: center;">
-    <p style="color: #999; font-size: 12px; margin: 0;">
-      ${BRAND_NAME} · 1:1 Sessions Platform ·
-      <a href="${FRONTEND_URL}" style="color: ${BRAND_COLOR}; text-decoration: none;">briteside.app</a>
-    </p>
-  </div>
-</div>
-`;
+const baseLayout = content =>
+  emailWrapper(
+    content,
+    `${BRAND_NAME} · 1:1 Sessions Platform · <a href="${FRONTEND_URL}" style="color: ${BRAND_COLOR}; text-decoration: none;">briteside.app</a>`
+  );
 
 const sessionInfoBlock = (session, tz = 'UTC') => {
   const date = dayjs(session.scheduledAt).tz(tz).format('dddd, MMMM D, YYYY');
   const time = `${dayjs(session.scheduledAt).tz(tz).format('h:mm A')} (${tz})`;
   const price = `$${(session.priceCents / 100).toFixed(2)}`;
 
-  return `
-  <div style="background: #f8f9fa; border-left: 4px solid ${BRAND_COLOR}; padding: 20px 24px; border-radius: 0 8px 8px 0; margin: 20px 0;">
-    <table style="width:100%; border-collapse: collapse;">
-      <tr><td style="padding: 6px 0; color: #888; font-size: 13px; width: 130px;">Date</td><td style="font-weight: 600; color: #333;">${date}</td></tr>
-      <tr><td style="padding: 6px 0; color: #888; font-size: 13px;">Time</td><td style="font-weight: 600; color: #333;">${time}</td></tr>
-      <tr><td style="padding: 6px 0; color: #888; font-size: 13px;">Duration</td><td style="font-weight: 600; color: #333;">${session.durationMins} minutes</td></tr>
-      <tr><td style="padding: 6px 0; color: #888; font-size: 13px;">Subject</td><td style="font-weight: 600; color: #333;">${session.subject}</td></tr>
-      <tr><td style="padding: 6px 0; color: #888; font-size: 13px;">Price</td><td style="font-weight: 600; color: #333;">${price}</td></tr>
-    </table>
-  </div>
-  `;
+  return infoBox([
+    ['Date', date],
+    ['Time', time],
+    ['Duration', `${session.durationMins} minutes`],
+    ['Subject', session.subject],
+    ['Price', price],
+  ]);
 };
 
-const ctaButton = (label, url) => `
-<p style="text-align: center; margin: 28px 0;">
-  <a href="${url}" style="background-color: ${BRAND_COLOR}; color: #fff; padding: 14px 32px;
-     text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px; display: inline-block;">
-    ${label}
-  </a>
-</p>
-`;
+const ctaButton = (label, url) => ctaRow(ctaLink(label, url));
 
 // ─── BOOKING CONFIRMATION ─────────────────────────────────────────────────────
 

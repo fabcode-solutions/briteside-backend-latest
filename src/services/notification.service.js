@@ -9,7 +9,9 @@ import {
   talentSessions,
   userNotificationSettings,
 } from '../db/schema/index.js';
-import { eq, desc, and, sql } from 'drizzle-orm';
+import { eq, desc, and, gte, sql } from 'drizzle-orm';
+
+const NOTIFICATION_RETENTION_DAYS = 30;
 import { getIO } from '../utils/io.js';
 import { emitNotification } from '../socket/emitter.js';
 import { getActorProfiles } from '../utils/helper.js';
@@ -170,8 +172,9 @@ const addResolvedActorMetadata = async data => {
 };
 
 export const getNotificationsByUserId = async userId => {
+  const cutoff = new Date(Date.now() - NOTIFICATION_RETENTION_DAYS * 24 * 60 * 60 * 1000);
   const result = await db.query.notifications.findMany({
-    where: eq(notifications.userId, userId),
+    where: and(eq(notifications.userId, userId), gte(notifications.createdAt, cutoff)),
     orderBy: [desc(notifications.createdAt)],
   });
 

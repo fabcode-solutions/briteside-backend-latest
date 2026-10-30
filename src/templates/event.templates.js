@@ -4,29 +4,17 @@
  *         invitations, cancellations, rescheduled, virtual events
  */
 
+import { header, footer, ctaButton, infoBox, calloutBox } from './emailLayout.js';
+
 const divider = `<hr style="border:none;border-top:1px solid #eee;margin:20px 0;"/>`;
 
-const eventDetailsBlock = ({ event_date, event_time, event_location, organizer_name }) => `
-  <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-    <div>📅 <strong>Date:</strong> ${event_date}</div>
-    <div>🕐 <strong>Time:</strong> ${event_time}</div>
-    <div>📍 <strong>Location:</strong> ${event_location}</div>
-    ${organizer_name ? `<div>👤 <strong>Organizer:</strong> ${organizer_name}</div>` : ''}
-  </div>`;
-
-const ctaButton = (label, href = '#') =>
-  `<a href="${href}" style="background:#6c47ff;color:#fff;padding:11px 22px;border-radius:6px;text-decoration:none;margin:0 6px;display:inline-block;">${label}</a>`;
-
-const header = `
-  <div style="text-align:center;padding:20px 0;border-bottom:1px solid #eee;">
-    <strong>BRITESIDE</strong><br/>
-    <a href="https://www.briteside.app" style="color:#666;font-size:12px;">www.briteside.app</a>
-  </div>`;
-
-const footer = text => `
-  <div style="padding:15px 20px;border-top:1px solid #eee;font-size:12px;color:#999;text-align:center;">
-    ${text}
-  </div>`;
+const eventDetailsBlock = ({ event_date, event_time, event_location, organizer_name }) =>
+  infoBox([
+    ['Date', `📅 ${event_date}`],
+    ['Time', `🕐 ${event_time}`],
+    ['Location', `📍 ${event_location}`],
+    organizer_name && ['Organizer', `👤 ${organizer_name}`],
+  ]);
 
 export const eventTemplates = {
   // ── Free Event Registration ─────────────────────────────────────────────
@@ -169,12 +157,12 @@ export const eventTemplates = {
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">This is it! ${event_name} is TOMORROW! 🎉</h2>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>📅 <strong>Date:</strong> ${event_date}</div>
-            <div>🕐 <strong>Time:</strong> ${event_time}</div>
-            <div>📍 <strong>Location:</strong> ${event_location}</div>
-            <div>🚪 <strong>Doors Open:</strong> ${doors_open_time}</div>
-          </div>
+          ${infoBox([
+            ['Date', `📅 ${event_date}`],
+            ['Time', `🕐 ${event_time}`],
+            ['Location', `📍 ${event_location}`],
+            ['Doors Open', `🚪 ${doors_open_time}`],
+          ])}
           <p><strong>Don't Forget to Bring:</strong></p>
           <ul>
             <li>Your ticket or confirmation QR code</li>
@@ -215,15 +203,13 @@ export const eventTemplates = {
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">You're invited! 🎉</h2>
           <p><strong>${inviter_name}</strong> thinks you'd love this event:</p>
-          <h3 style="color:#6c47ff;">${event_name}</h3>
+          <h3 style="color:#00D16E;">${event_name}</h3>
           ${eventDetailsBlock({ event_date, event_time, event_location })}
           <div style="background:#f8f8f8;border-radius:6px;padding:12px;margin:12px 0;">
             🎟️ <strong>Price:</strong> ${ticket_price}
           </div>
           <p>${event_description}</p>
-          <div style="border-left:3px solid #6c47ff;padding-left:12px;margin:16px 0;font-style:italic;">
-            "${personal_message}"<br/><small>– ${inviter_name}</small>
-          </div>
+          ${calloutBox(`"${personal_message}"<br/><small>– ${inviter_name}</small>`, 'neutral')}
           ${attending_friends_count ? `<p>👥 <strong>${attending_friends_count}</strong> of your connections are attending this event.</p>` : ''}
           <div style="text-align:center;margin:24px 0;">
             ${ctaButton('View Event')}
@@ -259,14 +245,13 @@ export const eventTemplates = {
           <p>We're sorry to inform you that <strong>${event_name}</strong> has been cancelled.</p>
           ${eventDetailsBlock({ event_date, event_time, event_location })}
           <p><strong>Reason for Cancellation:</strong> ${cancellation_reason}</p>
-          ${organizer_message ? `<div style="border-left:3px solid #ccc;padding-left:12px;margin:16px 0;font-style:italic;">"${organizer_message}"</div>` : ''}
+          ${organizer_message ? calloutBox(`"${organizer_message}"`, 'neutral') : ''}
           ${
             is_paid_event
-              ? `<div style="background:#fff8e1;border-radius:6px;padding:16px;margin:16px 0;">
-                <strong>Refund Information:</strong><br/>
-                Your ticket purchase of <strong>${amount}</strong> will be automatically refunded within 5–10 business days.<br/>
-                Refund Reference: ${refund_reference}
-               </div>`
+              ? calloutBox(
+                  `<strong>Refund Information:</strong><br/>Your ticket purchase of <strong>${amount}</strong> will be automatically refunded within 5–10 business days.<br/>Refund Reference: ${refund_reference}`,
+                  'warning'
+                )
               : `<p>As this was a free event, no refund is necessary.</p>`
           }
           <div style="text-align:center;margin:24px 0;">
@@ -298,13 +283,13 @@ export const eventTemplates = {
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">Important update: ${event_name} has been rescheduled</h2>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>❌ <strong>Original:</strong> ${old_date} at ${old_time}</div>
-            <div>✅ <strong>New Date:</strong> ${new_date} at ${new_time}</div>
-            <div>📍 <strong>Location:</strong> ${event_location} (unchanged)</div>
-          </div>
+          ${infoBox([
+            ['Original', `❌ ${old_date} at ${old_time}`],
+            ['New Date', `✅ ${new_date} at ${new_time}`],
+            ['Location', `📍 ${event_location} (unchanged)`],
+          ])}
           <p><strong>Reason:</strong> ${reschedule_reason}</p>
-          ${organizer_message ? `<div style="border-left:3px solid #6c47ff;padding-left:12px;margin:16px 0;font-style:italic;">"${organizer_message}"</div>` : ''}
+          ${organizer_message ? calloutBox(`"${organizer_message}"`, 'neutral') : ''}
           <p>✅ Your registration is still valid for the new date. No action required unless you need to cancel.</p>
           <div style="text-align:center;margin:24px 0;">
             ${ctaButton('Update Calendar')}
@@ -340,20 +325,21 @@ export const eventTemplates = {
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">You're registered for ${event_name}! 🎉</h2>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>📅 <strong>Date:</strong> ${event_date}</div>
-            <div>🕐 <strong>Time:</strong> ${event_time} (${timezone})</div>
-            <div>⏱️ <strong>Duration:</strong> ${event_duration}</div>
-            <div>👤 <strong>Host:</strong> ${host_name}</div>
-          </div>
-          <div style="background:#eef2ff;border-radius:6px;padding:16px;margin:16px 0;">
-            <strong>🔗 Your Access Link:</strong><br/>
+          ${infoBox([
+            ['Date', `📅 ${event_date}`],
+            ['Time', `🕐 ${event_time} (${timezone})`],
+            ['Duration', `⏱️ ${event_duration}`],
+            ['Host', `👤 ${host_name}`],
+          ])}
+          ${calloutBox(
+            `<strong>🔗 Your Access Link:</strong><br/>
             <div style="text-align:center;margin:12px 0;">
               ${ctaButton('Join Virtual Event', access_link)}
             </div>
-            <p style="font-size:12px;color:#666;word-break:break-all;">${access_link}</p>
-            ${requires_password ? `<p>🔐 <strong>Event Password:</strong> ${event_password}</p>` : ''}
-          </div>
+            <p style="font-size:12px;color:#666;word-break:break-all;margin:0;">${access_link}</p>
+            ${requires_password ? `<p style="margin:8px 0 0;">🔐 <strong>Event Password:</strong> ${event_password}</p>` : ''}`,
+            'neutral'
+          )}
           ${event_description ? `<p>${event_description}</p>` : ''}
           <p><strong>Before the Event:</strong></p>
           <ul>
@@ -389,17 +375,18 @@ export const eventTemplates = {
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">Just a reminder – ${event_name} is in 1 week! 📅</h2>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>📅 <strong>Date:</strong> ${event_date}</div>
-            <div>🕐 <strong>Time:</strong> ${event_time} (${timezone})</div>
-            <div>⏱️ <strong>Duration:</strong> ${event_duration}</div>
-            <div>👤 <strong>Host:</strong> ${host_name}</div>
-          </div>
-          <div style="background:#eef2ff;border-radius:6px;padding:16px;margin:16px 0;">
-            <strong>🔗 Your Access Link:</strong><br/>
+          ${infoBox([
+            ['Date', `📅 ${event_date}`],
+            ['Time', `🕐 ${event_time} (${timezone})`],
+            ['Duration', `⏱️ ${event_duration}`],
+            ['Host', `👤 ${host_name}`],
+          ])}
+          ${calloutBox(
+            `<strong>🔗 Your Access Link:</strong><br/>
             <div style="text-align:center;margin:12px 0;">${ctaButton('Join Virtual Event', access_link)}</div>
-            ${requires_password ? `<p>🔐 <strong>Event Password:</strong> ${event_password}</p>` : ''}
-          </div>
+            ${requires_password ? `<p style="margin:0;">🔐 <strong>Event Password:</strong> ${event_password}</p>` : ''}`,
+            'neutral'
+          )}
           ${event_description ? `<p>${event_description}</p>` : ''}
           <div style="text-align:center;margin:24px 0;">${ctaButton('Cancel Registration', '#')}</div>
           <p>See you in 1 week!<br/><strong>The Briteside Team</strong></p>
@@ -431,17 +418,18 @@ export const eventTemplates = {
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">Your virtual event is TOMORROW! 🎉</h2>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>📅 <strong>Date:</strong> ${event_date}</div>
-            <div>🕐 <strong>Time:</strong> ${event_time} (${timezone})</div>
-            <div>⏱️ <strong>Duration:</strong> ${event_duration}</div>
-            <div>👤 <strong>Host:</strong> ${host_name}</div>
-          </div>
-          <div style="background:#eef2ff;border-radius:6px;padding:16px;margin:16px 0;">
-            <strong>🔗 Your Access Link:</strong><br/>
+          ${infoBox([
+            ['Date', `📅 ${event_date}`],
+            ['Time', `🕐 ${event_time} (${timezone})`],
+            ['Duration', `⏱️ ${event_duration}`],
+            ['Host', `👤 ${host_name}`],
+          ])}
+          ${calloutBox(
+            `<strong>🔗 Your Access Link:</strong><br/>
             <div style="text-align:center;margin:12px 0;">${ctaButton('Join Virtual Event', access_link)}</div>
-            ${requires_password ? `<p>🔐 <strong>Event Password:</strong> ${event_password}</p>` : ''}
-          </div>
+            ${requires_password ? `<p style="margin:0;">🔐 <strong>Event Password:</strong> ${event_password}</p>` : ''}`,
+            'neutral'
+          )}
           <p><strong>Last-Minute Checklist:</strong></p>
           <ul>
             <li>☑️ Test your camera and microphone</li>

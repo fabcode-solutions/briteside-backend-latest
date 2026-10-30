@@ -270,8 +270,14 @@ export const buildPaginationResponse = (page, limit, total) => {
 export const enhanceEventData = async (event, lat, lng, distanceQuery) => {
   const eventData = { ...event };
 
-  // Add lowest ticket price
-  eventData.lowestTicketPrice = await getLowestTicketPrice(event.id, event.isFree);
+  // Add lowest ticket price — imported events have no Briteside tickets, so
+  // use the price range synced from the source listing instead.
+  eventData.lowestTicketPrice =
+    event.source && event.source !== 'briteside'
+      ? event.isFree
+        ? '0.00'
+        : event.externalPriceMin
+      : await getLowestTicketPrice(event.id, event.isFree);
 
   // Add tickets
   eventData.tickets = await db.query.eventTickets.findMany({

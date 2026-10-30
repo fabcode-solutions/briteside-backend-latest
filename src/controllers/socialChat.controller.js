@@ -382,7 +382,9 @@ export const sharePostToUsers = catchAsync(async (req, res) => {
         ? 'social:group:shared'
         : contentType === 'story'
           ? 'social:story:shared'
-          : contentType === 'profile'
+          : contentType === 'event'
+            ? 'social:event:shared'
+            : contentType === 'profile'
             ? 'social:profile:shared'
             : 'social:post:shared';
     const notifTitleVerb =
@@ -390,7 +392,9 @@ export const sharePostToUsers = catchAsync(async (req, res) => {
         ? 'shared a group'
         : contentType === 'story'
           ? 'shared a story'
-          : contentType === 'profile'
+          : contentType === 'event'
+            ? 'shared an event'
+            : contentType === 'profile'
             ? 'shared a profile'
             : 'shared a post';
     const notifType =
@@ -398,7 +402,9 @@ export const sharePostToUsers = catchAsync(async (req, res) => {
         ? 'group_share'
         : contentType === 'story'
           ? 'story_share'
-          : contentType === 'profile'
+          : contentType === 'event'
+            ? 'event_share'
+            : contentType === 'profile'
             ? 'profile_share'
             : 'post_share';
     const defaultMessage =
@@ -406,7 +412,9 @@ export const sharePostToUsers = catchAsync(async (req, res) => {
         ? 'Shared a group with you'
         : contentType === 'story'
           ? 'Shared a story with you'
-          : contentType === 'profile'
+          : contentType === 'event'
+            ? 'Shared an event with you'
+            : contentType === 'profile'
             ? 'Shared a profile with you'
             : 'Shared a post with you';
 

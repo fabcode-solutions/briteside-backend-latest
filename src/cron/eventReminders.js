@@ -1,5 +1,11 @@
 import { db } from '../db/index.js';
-import { events, purchasedTickets, eventMerchandise, users } from '../db/schema/index.js';
+import {
+  events,
+  purchasedTickets,
+  eventMerchandise,
+  users,
+  eventReminderLog,
+} from '../db/schema/index.js';
 import { eq, and, gte, lte, sql, count, desc, asc } from 'drizzle-orm';
 import { cronLogger as logger } from '../config/logger.js';
 import { createNotification } from '../services/notification.service.js';
@@ -16,8 +22,7 @@ import {
  * @param {number} hoursBefore - Hours before event
  */
 const createEventReminderNotification = async (event, userId, hoursBefore) => {
-  const reminderType = hoursBefore === 24 ? '24-hour' : '1-hour';
-  const message = `${event.title} starts in ${reminderType}. Don't miss it!`;
+  const message = `${event.title} starts within ${hoursBefore} hours. Don't miss it!`;
 
   try {
     await createNotification({
@@ -25,13 +30,15 @@ const createEventReminderNotification = async (event, userId, hoursBefore) => {
       type: 'event_reminder',
       title: 'Event Reminder',
       message,
-      data: {
+      redirectTo: `/events/${event.slug}`,
+      relatedId: event.id,
+      metadata: {
         eventId: event.id,
+        eventSlug: event.slug,
         eventTitle: event.title,
         eventStartDate: event.startDate,
         hoursBefore,
       },
-      metadata: { eventId: event.id, eventTitle: event.title },
     });
     logger.info('[Cron] Event reminder notification created', { userId, eventTitle: event.title });
   } catch (error) {
@@ -76,6 +83,26 @@ const createBulkPurchaseNotification = async (event, user, ticketCount) => {
   }
 };
 
+// Reminder stages, largest first. Each stage only covers events starting
+// between the next-smaller stage and itself, so a ticket bought 3h before the
+// event gets just the 6h reminder instead of the 24h and 6h ones together.
+const REMINDER_STAGES = [24, 6];
+
+/**
+ * Record that `userId` got the `hoursBefore` reminder for `eventId`.
+ * Returns false when it was already sent — the crons re-scan their whole
+ * window every run, so without this a ticket holder got the same reminder
+ * (notification and email) every hour until the event started.
+ */
+const claimReminder = async (eventId, userId, hoursBefore) => {
+  const inserted = await db
+    .insert(eventReminderLog)
+    .values({ eventId, userId, hoursBefore })
+    .onConflictDoNothing()
+    .returning({ id: eventReminderLog.id });
+  return inserted.length > 0;
+};
+
 /**
  * Process reminders for upcoming events
  * @param {number} hoursBefore - Hours before event to send reminder
@@ -84,17 +111,12 @@ export const processEventReminders = async hoursBefore => {
   logger.info('[Cron] Processing event reminders', { hoursBefore });
 
   try {
-    // Calculate the time window for events
+    // Events starting within the next `hoursBefore` hours, but after the
+    // next-smaller stage (that stage's own run handles those).
     const now = new Date();
-    const futureTime = new Date(now.getTime() + hoursBefore * 60 * 60 * 1000);
-
-    // We want events starting within the next `hoursBefore` hours.
-    // Previously this code matched events starting between `futureTime` and
-    // `futureTime + buffer`, which only caught events that start roughly exactly
-    // `hoursBefore` hours from now. That caused many events within the next
-    // 24 hours to be missed. Use a window from `now` -> `futureTime` instead.
-    const windowStart = now;
-    const windowEnd = futureTime;
+    const nextStage = REMINDER_STAGES.find(h => h < hoursBefore) ?? 0;
+    const windowStart = new Date(now.getTime() + nextStage * 60 * 60 * 1000);
+    const windowEnd = new Date(now.getTime() + hoursBefore * 60 * 60 * 1000);
 
     // Find events starting within the time window (now .. futureTime)
     const upcomingEvents = await db.query.events.findMany({
@@ -161,6 +183,8 @@ export const processEventReminders = async hoursBefore => {
       for (const [userId, userData] of Object.entries(userTickets)) {
         const { user, tickets: userTicketList } = userData;
         const ticketCount = userTicketList.length;
+
+        if (!(await claimReminder(event.id, user.id, hoursBefore))) continue;
 
         // Send event reminder (email and notification)
         await sendEventReminderEmail(event, user, hoursBefore);

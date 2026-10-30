@@ -81,6 +81,36 @@ const EnvVariables = z.object({
   ACRCLOUD_HOST: z.string().optional(),
   ACRCLOUD_ACCESS_KEY: z.string().optional(),
   ACRCLOUD_ACCESS_SECRET: z.string().optional(),
+
+  // Imported event listings (src/services/externalEvents). Each source only
+  // syncs when its key is set.
+  TICKETMASTER_API_KEY: z.string().optional(),
+  // Optional affiliate wrapper for Ticketmaster links; "{url}" is replaced
+  // with the URL-encoded event URL.
+  TICKETMASTER_AFFILIATE_URL_TEMPLATE: z.string().optional(),
+  VENUNITE_API_KEY: z.string().optional(),
+  // VenuNite lookahead override — the REST trial only serves the next 30 days.
+  VENUNITE_DAYS_AHEAD: z.preprocess(
+    a => (a === undefined ? undefined : +a),
+    z.number().int().min(1).optional()
+  ),
+  // Rows per VenuNite request: 100 on paid plans, 25 on the REST trial.
+  VENUNITE_PAGE_SIZE: z.preprocess(
+    a => (a === undefined ? undefined : +a),
+    z.number().int().min(1).max(100).optional().default(100)
+  ),
+  // Comma-separated USPS state codes to import, e.g. "CT" or "CT,NY"
+  EXTERNAL_EVENTS_STATES: z.string().optional().default('CT'),
+  EXTERNAL_EVENTS_DAYS_AHEAD: z.preprocess(
+    a => (a === undefined ? undefined : +a),
+    z.number().optional().default(90)
+  ),
+  // Existing organizer that owns imported events. When unset a dedicated
+  // system organizer is created on the first sync.
+  EXTERNAL_EVENTS_ORGANIZER_ID: z.string().uuid().optional(),
+  // Cover used when a listing has no image (events need at least one).
+  // Listings without an image are skipped when this is unset.
+  EXTERNAL_EVENTS_DEFAULT_IMAGE: z.string().optional(),
 });
 
 let envVars;
@@ -190,6 +220,20 @@ const env = {
       envVars.ACRCLOUD_ACCESS_KEY &&
       envVars.ACRCLOUD_ACCESS_SECRET
     ),
+  },
+  externalEvents: {
+    ticketmasterApiKey: envVars.TICKETMASTER_API_KEY,
+    ticketmasterAffiliateUrlTemplate: envVars.TICKETMASTER_AFFILIATE_URL_TEMPLATE,
+    venuniteApiKey: envVars.VENUNITE_API_KEY,
+    venunitePageSize: envVars.VENUNITE_PAGE_SIZE,
+    venuniteDaysAhead: envVars.VENUNITE_DAYS_AHEAD,
+    states: envVars.EXTERNAL_EVENTS_STATES.split(',')
+      .map(s => s.trim().toUpperCase())
+      .filter(Boolean),
+    daysAhead: envVars.EXTERNAL_EVENTS_DAYS_AHEAD,
+    organizerId: envVars.EXTERNAL_EVENTS_ORGANIZER_ID,
+    defaultImage: envVars.EXTERNAL_EVENTS_DEFAULT_IMAGE,
+    configured: !!(envVars.TICKETMASTER_API_KEY || envVars.VENUNITE_API_KEY),
   },
 };
 

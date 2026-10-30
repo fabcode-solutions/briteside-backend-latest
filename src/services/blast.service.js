@@ -4,6 +4,7 @@ import { eq, and, count } from 'drizzle-orm';
 import { sendSMS, sendEventBlast } from '../utils/aws.util.js';
 import { sendMail } from './mail.service.js';
 import ApiError from '../utils/api-error.js';
+import { header, footer } from '../templates/emailLayout.js';
 
 const DAILY_LIMITS = { sms: 2, email: 2 };
 const MAX_RECIPIENTS = 1000;
@@ -131,7 +132,14 @@ export class BlastService {
       sendMail(
         a.email,
         resolvedSubject,
-        `<p>Hi ${a.firstName || 'there'},</p><p>${message}</p>`,
+        `<div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+          ${header}
+          <div style="padding: 32px 40px;">
+            <p>Hi ${a.firstName || 'there'},</p>
+            <p>${message}</p>
+          </div>
+          ${footer()}
+        </div>`,
         message
       )
     );

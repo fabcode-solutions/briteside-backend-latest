@@ -2,6 +2,7 @@ import httpStatus from 'http-status';
 import { sendMail } from '../services/mail.service.js';
 import { contactService } from '../services/index.js';
 import ApiError from '../utils/api-error.js';
+import { header, footer, ctaButton, calloutBox } from '../templates/emailLayout.js';
 
 // Simple HTML escape to avoid injection in the email body
 const escapeHtml = str =>
@@ -38,12 +39,10 @@ export const sendContactMessage = async (req, res, next) => {
     const adminEmail = 'admin@briteside.app';
     const mailSubject = `☀️ [Briteside] New Inquiry: ${escapeHtml(subject)} — ${escapeHtml(senderName)}`;
     const html = `
-  <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 20px auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-    <div style="background-color: #00D16E; padding: 20px; text-align: center;">
-      <h2 style="color: #ffffff; margin: 0; font-size: 20px; letter-spacing: 1px;">NEW INQUIRY RECEIVED</h2>
-    </div>
-
-    <div style="padding: 30px; background-color: #ffffff;">
+  <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+    ${header}
+    <div style="padding: 32px 40px;">
+      <h2 style="color: #333; margin-top: 0;">New Inquiry Received</h2>
       <p style="color: #666; font-size: 14px; margin-bottom: 25px;">You have a new message from the <strong>Briteside</strong> contact form.</p>
 
       <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px;">
@@ -61,22 +60,13 @@ export const sendContactMessage = async (req, res, next) => {
         </tr>
       </table>
 
-      <div style="background-color: #f9f9f9; border-left: 4px solid #00D16E; padding: 20px; border-radius: 4px;">
-        <p style="margin: 0 0 10px 0; font-size: 12px; color: #aaa; text-transform: uppercase; font-weight: bold;">Message:</p>
-        <div style="white-space: pre-wrap; color: #444; line-height: 1.6; font-size: 15px;">${escapeHtml(message)}</div>
+      ${calloutBox(`<p style="margin: 0 0 10px 0; font-size: 12px; color: #aaa; text-transform: uppercase; font-weight: bold;">Message:</p><div style="white-space: pre-wrap; color: #444; line-height: 1.6; font-size: 15px;">${escapeHtml(message)}</div>`)}
+
+      <div style="margin-top: 30px; text-align: center;">
+        ${ctaButton('Go to Briteside', 'https://www.briteside.app/')}
       </div>
-
-    <div style="margin-top: 30px; text-align: center;">
-  <a href="https://www.briteside.app/"
-     style="background-color: #00D16E; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 15px; display: inline-block;">
-     BRITESIDE
-  </a>
-</div>
     </div>
-
-    <div style="background-color: #f4f4f4; padding: 15px; text-align: center; border-top: 1px solid #eeeeee;">
-      <p style="color: #999; font-size: 11px; margin: 0;">This is an automated notification from the Briteside Contact System.</p>
-    </div>
+    ${footer('This is an automated notification from the Briteside Contact System.')}
   </div>
 `;
 

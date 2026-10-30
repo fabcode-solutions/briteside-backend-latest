@@ -31,6 +31,8 @@ import { processCustomOfferAutoApprove } from './customOfferAutoApprove.js';
 import { ensureAnalyticsPartitions } from './analyticsPartitionMaintenance.cron.js';
 import { runAnalyticsRollup } from './analyticsRollup.cron.js';
 import { deliverScheduledGifts } from './deliverScheduledGifts.js';
+import { syncExternalEvents } from '../services/externalEvents/externalEventSync.service.js';
+import env from '../config/config.js';
 // Wraps a cron callback — catches any top-level uncaught throw and logs it.
 const runCron = (name, fn) => async () => {
   try {
@@ -154,6 +156,12 @@ export const initializeCronJobs = () => {
 
   // Every 10 minutes — roll raw analytics_events up into the *_analytics_daily tables
   cron.schedule('*/10 * * * *', runCron('analyticsRollup', runAnalyticsRollup));
+
+  // Every 6 hours — import Ticketmaster / VenuNite listings for the configured
+  // states. Only scheduled once at least one source's API key is set.
+  if (env.externalEvents.configured) {
+    cron.schedule('20 */6 * * *', runCron('externalEventSync', () => syncExternalEvents()));
+  }
 
   logger.info('[Cron] All cron jobs initialized');
 };

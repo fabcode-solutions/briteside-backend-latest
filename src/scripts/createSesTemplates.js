@@ -5,24 +5,11 @@
  */
 import 'dotenv/config';
 import { SESClient, CreateTemplateCommand, DeleteTemplateCommand } from '@aws-sdk/client-ses';
+import { BRAND_COLOR, header, footer as sharedFooter, ctaButton } from '../templates/emailLayout.js';
 
 const sesClient = new SESClient({ region: process.env.AWS_SES_REGION || 'us-east-2' });
 
-const year = new Date().getFullYear();
-
-const footer = `
-  <div style="padding:20px;border-top:2px solid #f0f0f0;font-size:12px;color:#999;text-align:center;margin-top:32px;">
-    <p style="margin:0 0 4px;">&copy; ${year} Briteside. All rights reserved.</p>
-    <p style="margin:0;">You received this email because you are a member of Briteside.</p>
-  </div>`;
-
-const header = `
-  <div style="background:#6c47ff;padding:24px;text-align:center;border-radius:8px 8px 0 0;">
-    <strong style="font-size:22px;color:#fff;letter-spacing:1px;">BRITESIDE</strong>
-  </div>`;
-
-const ctaButton = (label, urlVar) =>
-  `<a href="${urlVar}" style="background:#6c47ff;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;display:inline-block;font-weight:bold;font-size:15px;">${label}</a>`;
+const footer = sharedFooter();
 
 const infoRow = (icon, label, value) =>
   `<tr>
@@ -31,7 +18,7 @@ const infoRow = (icon, label, value) =>
   </tr>`;
 
 const alertBanner = (color, icon, message) =>
-  `<div style="background:${color};border-radius:6px;padding:14px 18px;margin:20px 0;">
+  `<div style="background:${color};border-left:4px solid ${BRAND_COLOR};border-radius:0 6px 6px 0;padding:14px 18px;margin:20px 0;">
     <span style="font-size:20px;">${icon}</span>
     <span style="color:#333;font-size:14px;line-height:1.5;margin-left:8px;">${message}</span>
   </div>`;
@@ -48,8 +35,8 @@ const templates = [
           <h2 style="color:#333;margin:0 0 8px;">You're Invited! 🎉</h2>
           <p style="color:#555;margin:0 0 24px;">Hi {{user_name}},</p>
           <p style="color:#555;"><strong>{{organizer_name}}</strong> has personally invited you to attend <strong>{{event_name}}</strong>. We'd love to see you there!</p>
-          <div style="background:#f8f6ff;border:1px solid #e0d7ff;border-radius:8px;padding:20px;margin:24px 0;">
-            <h3 style="margin:0 0 14px;color:#6c47ff;font-size:15px;text-transform:uppercase;letter-spacing:0.5px;">Event Details</h3>
+          <div style="background:#f8f9fa;border-left:4px solid ${BRAND_COLOR};border-radius:0 8px 8px 0;padding:20px;margin:24px 0;">
+            <h3 style="margin:0 0 14px;color:${BRAND_COLOR};font-size:15px;text-transform:uppercase;letter-spacing:0.5px;">Event Details</h3>
             <table style="width:100%;border-collapse:collapse;">
               ${infoRow('📅', 'Date', '{{event_date}}')}
               ${infoRow('📍', 'Location', '{{event_location}}')}
@@ -78,8 +65,8 @@ const templates = [
           <h2 style="color:#333;margin:0 0 8px;">You've Been Invited to a Group! 👥</h2>
           <p style="color:#555;margin:0 0 24px;">Hi {{user_name}},</p>
           <p style="color:#555;"><strong>{{organizer_name}}</strong> has invited you to join the <strong>{{group_name}}</strong> community on Briteside.</p>
-          <div style="background:#f8f6ff;border:1px solid #e0d7ff;border-radius:8px;padding:20px;margin:24px 0;">
-            <h3 style="margin:0 0 14px;color:#6c47ff;font-size:15px;text-transform:uppercase;letter-spacing:0.5px;">Group Details</h3>
+          <div style="background:#f8f9fa;border-left:4px solid ${BRAND_COLOR};border-radius:0 8px 8px 0;padding:20px;margin:24px 0;">
+            <h3 style="margin:0 0 14px;color:${BRAND_COLOR};font-size:15px;text-transform:uppercase;letter-spacing:0.5px;">Group Details</h3>
             <table style="width:100%;border-collapse:collapse;">
               ${infoRow('👥', 'Group', '{{group_name}}')}
               ${infoRow('✉️', 'Invited by', '{{organizer_name}}')}
@@ -108,8 +95,8 @@ const templates = [
           <h2 style="color:#333;margin:0 0 8px;">Event Rescheduled 📅</h2>
           <p style="color:#555;margin:0 0 24px;">Hi {{user_name}},</p>
           ${alertBanner('#fff8e1', '⚠️', '<strong>{{event_name}}</strong> has been rescheduled by the organizer. Please update your calendar with the new date and time below.')}
-          <div style="background:#f8f6ff;border:1px solid #e0d7ff;border-radius:8px;padding:20px;margin:24px 0;">
-            <h3 style="margin:0 0 14px;color:#6c47ff;font-size:15px;text-transform:uppercase;letter-spacing:0.5px;">New Schedule</h3>
+          <div style="background:#f8f9fa;border-left:4px solid ${BRAND_COLOR};border-radius:0 8px 8px 0;padding:20px;margin:24px 0;">
+            <h3 style="margin:0 0 14px;color:${BRAND_COLOR};font-size:15px;text-transform:uppercase;letter-spacing:0.5px;">New Schedule</h3>
             <table style="width:100%;border-collapse:collapse;">
               ${infoRow('📅', 'New Start', '{{new_start_date}}')}
               ${infoRow('🏁', 'New End', '{{new_end_date}}')}
@@ -138,8 +125,8 @@ const templates = [
           <h2 style="color:#333;margin:0 0 8px;">Venue Change 📍</h2>
           <p style="color:#555;margin:0 0 24px;">Hi {{user_name}},</p>
           ${alertBanner('#e8f5e9', '📍', '<strong>{{event_name}}</strong> has moved to a new venue. Please update your travel plans.')}
-          <div style="background:#f8f6ff;border:1px solid #e0d7ff;border-radius:8px;padding:20px;margin:24px 0;">
-            <h3 style="margin:0 0 14px;color:#6c47ff;font-size:15px;text-transform:uppercase;letter-spacing:0.5px;">New Venue</h3>
+          <div style="background:#f8f9fa;border-left:4px solid ${BRAND_COLOR};border-radius:0 8px 8px 0;padding:20px;margin:24px 0;">
+            <h3 style="margin:0 0 14px;color:${BRAND_COLOR};font-size:15px;text-transform:uppercase;letter-spacing:0.5px;">New Venue</h3>
             <table style="width:100%;border-collapse:collapse;">
               ${infoRow('📍', 'Location', '{{new_venue}}')}
               ${infoRow('🎟️', 'Organised by', '{{organizer_name}}')}
@@ -167,8 +154,8 @@ const templates = [
           <h2 style="color:#333;margin:0 0 8px;">Event Updated 🔔</h2>
           <p style="color:#555;margin:0 0 24px;">Hi {{user_name}},</p>
           ${alertBanner('#fff3e0', '🔔', '<strong>{{event_name}}</strong> has been updated with a new date and venue. Please review the changes below and update your plans.')}
-          <div style="background:#f8f6ff;border:1px solid #e0d7ff;border-radius:8px;padding:20px;margin:24px 0;">
-            <h3 style="margin:0 0 14px;color:#6c47ff;font-size:15px;text-transform:uppercase;letter-spacing:0.5px;">Updated Details</h3>
+          <div style="background:#f8f9fa;border-left:4px solid ${BRAND_COLOR};border-radius:0 8px 8px 0;padding:20px;margin:24px 0;">
+            <h3 style="margin:0 0 14px;color:${BRAND_COLOR};font-size:15px;text-transform:uppercase;letter-spacing:0.5px;">Updated Details</h3>
             <table style="width:100%;border-collapse:collapse;">
               ${infoRow('📅', 'New Start', '{{new_start_date}}')}
               ${infoRow('🏁', 'New End', '{{new_end_date}}')}

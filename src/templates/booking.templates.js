@@ -3,19 +3,7 @@
  * Covers: booking confirmation, reminder (1 hr), cancellation, rescheduled
  */
 
-const header = `
-  <div style="text-align:center;padding:20px 0;border-bottom:1px solid #eee;">
-    <strong>BRITESIDE</strong><br/>
-    <a href="https://www.briteside.app" style="color:#666;font-size:12px;">www.briteside.app</a>
-  </div>`;
-
-const footer = text => `
-  <div style="padding:15px 20px;border-top:1px solid #eee;font-size:12px;color:#999;text-align:center;">
-    ${text}
-  </div>`;
-
-const ctaButton = (label, href = '#') =>
-  `<a href="${href}" style="background:#6c47ff;color:#fff;padding:11px 22px;border-radius:6px;text-decoration:none;margin:0 6px;display:inline-block;">${label}</a>`;
+import { header, footer, ctaButton } from './emailLayout.js';
 
 export const bookingTemplates = {
   // ── Booking Confirmation ────────────────────────────────────────────────

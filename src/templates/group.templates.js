@@ -4,19 +4,7 @@
  *         group payment failed, group fee change
  */
 
-const header = `
-  <div style="text-align:center;padding:20px 0;border-bottom:1px solid #eee;">
-    <strong>BRITESIDE</strong><br/>
-    <a href="https://www.briteside.app" style="color:#666;font-size:12px;">www.briteside.app</a>
-  </div>`;
-
-const footer = text => `
-  <div style="padding:15px 20px;border-top:1px solid #eee;font-size:12px;color:#999;text-align:center;">
-    ${text}
-  </div>`;
-
-const ctaButton = (label, href = '#') =>
-  `<a href="${href}" style="background:#6c47ff;color:#fff;padding:11px 22px;border-radius:6px;text-decoration:none;margin:0 6px;display:inline-block;">${label}</a>`;
+import { header, footer, ctaButton, infoBox, calloutBox } from './emailLayout.js';
 
 export const groupTemplates = {
   // ── Group Invitation ────────────────────────────────────────────────────
@@ -41,20 +29,13 @@ export const groupTemplates = {
           <h2 style="color:#333;">You've been invited to join a group! 👥</h2>
           <p><strong>${inviter_name}</strong> thinks you'd be a great addition to:</p>
           <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <h3 style="margin:0 0 8px;color:#6c47ff;">${group_name}</h3>
+            <h3 style="margin:0 0 8px;color:#00D16E;">${group_name}</h3>
             <p style="margin:0 0 12px;">${group_description}</p>
             <div>👥 ${member_count} members</div>
             <div>📍 ${group_location}</div>
             <div>🏷️ ${group_category}</div>
           </div>
-          ${
-            personal_message
-              ? `
-          <div style="border-left:3px solid #6c47ff;padding-left:12px;margin:16px 0;font-style:italic;">
-            "${personal_message}"<br/><small>– ${inviter_name}</small>
-          </div>`
-              : ''
-          }
+          ${personal_message ? calloutBox(`"${personal_message}"<br/><small>– ${inviter_name}</small>`, 'neutral') : ''}
           <div style="text-align:center;margin:24px 0;">
             ${ctaButton('Accept Invitation')}
             ${ctaButton('View Group')}
@@ -78,12 +59,12 @@ export const groupTemplates = {
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">Welcome to ${group_name}! 🎉</h2>
           <p>Your membership is now active and you have full access to everything this group has to offer.</p>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>👥 <strong>Group:</strong> ${group_name}</div>
-            <div>📋 <strong>Organized by:</strong> ${organizer_name}</div>
-            <div>💰 <strong>Membership:</strong> ${membership_price}/month</div>
-            <div>📅 <strong>Next Billing Date:</strong> ${next_billing_date}</div>
-          </div>
+          ${infoBox([
+            ['Group', `👥 ${group_name}`],
+            ['Organized by', `📋 ${organizer_name}`],
+            ['Membership', `💰 ${membership_price}/month`],
+            ['Next Billing Date', `📅 ${next_billing_date}`],
+          ])}
           <p><strong>What's Included:</strong></p>
           <ul>
             <li>✅ Access to all group posts & discussions</li>
@@ -114,11 +95,11 @@ export const groupTemplates = {
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">Membership Cancelled</h2>
           <p>Your membership to <strong>${group_name}</strong> has been cancelled.</p>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>👥 <strong>Group:</strong> ${group_name}</div>
-            <div>📅 <strong>Access Until:</strong> ${access_end_date}</div>
-            <div>💰 <strong>Final Charge:</strong> ${final_charge} (already billed)</div>
-          </div>
+          ${infoBox([
+            ['Group', `👥 ${group_name}`],
+            ['Access Until', `📅 ${access_end_date}`],
+            ['Final Charge', `💰 ${final_charge} (already billed)`],
+          ])}
           <p>✅ You'll keep full access to <strong>${group_name}</strong> until <strong>${access_end_date}</strong>.<br/>
           After that date, you'll lose access to member-only content and features.</p>
           <p><strong>You'll Lose Access To:</strong></p>
@@ -159,13 +140,14 @@ export const groupTemplates = {
           <p>Hi ${user_name},</p>
           <h2 style="color:#c0392b;">⚠️ Payment Failed</h2>
           <p>We were unable to process your membership payment for <strong>${group_name}</strong>.</p>
-          <div style="background:#fff3f3;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>👥 <strong>Group:</strong> ${group_name}</div>
-            <div>💰 <strong>Amount Due:</strong> ${membership_price}</div>
-            <div>💳 <strong>Payment Method:</strong> ending in ${payment_method_last4}</div>
-            <div>📅 <strong>Failed On:</strong> ${failed_date}</div>
-            <div>🔄 <strong>Next Retry:</strong> ${next_retry_date}</div>
-          </div>
+          ${calloutBox(
+            `<div>👥 <strong>Group:</strong> ${group_name}</div>
+             <div>💰 <strong>Amount Due:</strong> ${membership_price}</div>
+             <div>💳 <strong>Payment Method:</strong> ending in ${payment_method_last4}</div>
+             <div>📅 <strong>Failed On:</strong> ${failed_date}</div>
+             <div>🔄 <strong>Next Retry:</strong> ${next_retry_date}</div>`,
+            'danger'
+          )}
           <p>We'll automatically retry on <strong>${next_retry_date}</strong>. If payment continues to fail after <strong>${max_retries}</strong> attempts, your membership will be suspended on <strong>${suspension_date}</strong>.</p>
           <div style="text-align:center;margin:24px 0;">
             ${ctaButton('Update Payment Method')}
@@ -201,12 +183,12 @@ export const groupTemplates = {
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">Membership Fee Update for ${group_name}</h2>
-          <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
-            <div>👥 <strong>Group:</strong> ${group_name}</div>
-            <div>📅 <strong>Effective Date:</strong> ${effective_date}</div>
-            <div>💰 <strong>Previous Fee:</strong> ${old_fee}/${billing_cycle}</div>
-            <div>💰 <strong>New Fee:</strong> ${new_fee}/${billing_cycle}</div>
-          </div>
+          ${infoBox([
+            ['Group', `👥 ${group_name}`],
+            ['Effective Date', `📅 ${effective_date}`],
+            ['Previous Fee', `💰 ${old_fee}/${billing_cycle}`],
+            ['New Fee', `💰 ${new_fee}/${billing_cycle}`],
+          ])}
           <p>${
             is_price_increase
               ? `This represents a <strong>${change_percentage}% increase</strong> from your current rate.`
@@ -215,7 +197,7 @@ export const groupTemplates = {
           <p><strong>Why this change?</strong> ${fee_change_reason}</p>
           ${
             is_grandfathered
-              ? `<div style="background:#e8f5e9;border-radius:6px;padding:12px;margin:12px 0;">✅ As a valued existing member, you'll continue paying <strong>${old_fee}/${billing_cycle}</strong> until ${grandfather_end_date}.</div>`
+              ? calloutBox(`✅ As a valued existing member, you'll continue paying <strong>${old_fee}/${billing_cycle}</strong> until ${grandfather_end_date}.`, 'success')
               : `<p>Your next billing on <strong>${next_billing_date}</strong> will reflect the new fee of <strong>${new_fee}</strong>.</p>`
           }
           ${

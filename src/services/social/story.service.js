@@ -333,6 +333,10 @@ export class StoryService {
       for (const story of storyList) {
         if (blockedIds.has(story.userId)) continue;
         if (!isFollowerSet && setAUserIds.has(story.userId)) continue;
+        // Set B is everyone the viewer doesn't follow: a private account's
+        // stories are for its followers only, even when the story itself is
+        // marked 'public'.
+        if (!isFollowerSet && story.user?.socialProfile?.isPublic === false) continue;
 
         if (!grouped[story.userId]) {
           grouped[story.userId] = {

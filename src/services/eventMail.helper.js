@@ -6,8 +6,7 @@ import {
   generateMerchandiseUpsellEmail,
   generatePromotionalEmail,
 } from '../cron/emailTemplates.js';
-
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://briteside.app';
+import { FRONTEND_URL, BRAND_COLOR, header, footer, infoBox } from '../templates/emailLayout.js';
 
 /**
  * Send email to organizer when event is published
@@ -15,15 +14,19 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'https://briteside.app';
 export async function sendEventPublishedEmail(organizerEmail, event) {
   const subject = `Your event "${event.title}" is now published!`;
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #333;">Event Published</h2>
-      <p>Dear Organizer,</p>
-      <p>Your event <strong>${
-        event.title
-      }</strong> has been published and is now visible to users on GoKyro.</p>
-      <p>Event Date: <strong>${new Date(event.startDate).toLocaleString()}</strong></p>
-      <p>Thank you for using GoKyro!</p>
-      <p>Best regards,<br>Briteside Team</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color: #333;">Event Published</h2>
+        <p>Dear Organizer,</p>
+        <p>Your event <strong>${
+          event.title
+        }</strong> has been published and is now visible to users on Briteside.</p>
+        <p>Event Date: <strong>${new Date(event.startDate).toLocaleString()}</strong></p>
+        <p>Thank you for using Briteside!</p>
+        <p>Best regards,<br>Briteside Team</p>
+      </div>
+      ${footer()}
     </div>
   `;
   const text = `Your event "${event.title}" is now published!\nEvent Date: ${new Date(
@@ -64,11 +67,10 @@ export async function sendTicketPurchaseEmail(
     )
     .join('');
 
-  const BRAND_GREEN = '#09c375';
+  const BRAND_GREEN = BRAND_COLOR;
   const TEXT_DARK = '#1a1a1a';
   const TEXT_MUTED = '#6b7280';
   const BORDER = '#e5e7eb';
-  const LOGO_URL = `${FRONTEND_URL}/assets/logo/logo.png`;
 
   const ticketCardsHtml = Object.entries(ticketsByHolder)
     .map(
@@ -110,9 +112,7 @@ export async function sendTicketPurchaseEmail(
   <div style="background: #f3f4f6; padding: 32px 16px; font-family: 'Inter', Arial, sans-serif;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto;">
       <tr>
-        <td align="center" style="padding-bottom: 24px;">
-          <img src="${LOGO_URL}" alt="Briteside" height="32" style="height: 32px; width: auto; display: inline-block;" />
-        </td>
+        <td style="padding-bottom: 24px;">${header}</td>
       </tr>
       <tr>
         <td style="background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid ${BORDER};">
@@ -152,9 +152,7 @@ export async function sendTicketPurchaseEmail(
         </td>
       </tr>
       <tr>
-        <td align="center" style="padding: 24px 16px 0;">
-          <p style="margin: 0; font-family: 'Inter', Arial, sans-serif; font-size: 13px; color: ${TEXT_MUTED};">Best regards,<br/>Briteside Team</p>
-        </td>
+        <td style="padding-top: 24px;">${footer()}</td>
       </tr>
     </table>
   </div>
@@ -253,34 +251,31 @@ export async function sendRefundConfirmationEmail(userEmail, order, refund, even
     itemsSummary.push(`${merchCount} merchandise item${merchCount > 1 ? 's' : ''}`);
 
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #333;">Refund Confirmation</h2>
-      <p>Dear Customer,</p>
-      <p>Your refund has been successfully processed.</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color: #00D16E;">Refund Confirmation</h2>
+        <p>Dear Customer,</p>
+        <p>Your refund has been successfully processed.</p>
 
-      <div style="background-color: #f5f5f5; padding: 20px; margin: 20px 0; border-radius: 5px;">
-        <h3 style="margin-top: 0;">Refund Details:</h3>
-        <p><strong>Order ID:</strong> ${order.id}</p>
-        <p><strong>Refund Amount:</strong> $${refund.amount}</p>
-        <p><strong>Refund Type:</strong> ${
-          refund.refundType === 'full' ? 'Full Refund' : 'Partial Refund'
-        }</p>
-        <p><strong>Status:</strong> ${refund.status}</p>
-        ${event ? `<p><strong>Event:</strong> ${event.title}</p>` : ''}
-        ${
-          itemsSummary.length > 0
-            ? `<p><strong>Items Refunded:</strong> ${itemsSummary.join(' and ')}</p>`
-            : ''
-        }
+        ${infoBox([
+          ['Order ID', order.id],
+          ['Refund Amount', `$${refund.amount}`],
+          ['Refund Type', refund.refundType === 'full' ? 'Full Refund' : 'Partial Refund'],
+          ['Status', refund.status],
+          event && ['Event', event.title],
+          itemsSummary.length > 0 && ['Items Refunded', itemsSummary.join(' and ')],
+        ])}
+
+        <p>The refund will be credited back to your original payment method within 5-10 business days.</p>
+
+        ${refund.reason ? `<p><strong>Reason:</strong> ${refund.reason}</p>` : ''}
+
+        <p>If you have any questions about this refund, please contact our support team.</p>
+
+        <p>Best regards,<br/>Briteside Team</p>
       </div>
-
-      <p>The refund will be credited back to your original payment method within 5-10 business days.</p>
-
-      ${refund.reason ? `<p><strong>Reason:</strong> ${refund.reason}</p>` : ''}
-
-      <p>If you have any questions about this refund, please contact our support team.</p>
-
-      <p>Best regards,<br/>Briteside Team</p>
+      ${footer()}
     </div>
   `;
 
@@ -395,13 +390,17 @@ export async function sendEventDateAndVenueChangedEmail(recipients, event, venue
 export async function sendEventCancellationEmail(userEmail, event) {
   const subject = `Event Cancelled: ${event.title}`;
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #e53e3e;">Event Cancelled</h2>
-      <p>We're sorry to let you know that <strong>${event.title}</strong> has been cancelled by the organizer.</p>
-      <p>A <strong>full refund</strong> has been issued to your original payment method. Please allow 5–10 business days for the funds to appear.</p>
-      ${event.cancellationReason ? `<p><strong>Cancellation reason:</strong> ${event.cancellationReason}</p>` : ''}
-      <p>We apologize for any inconvenience.</p>
-      <p>Best regards,<br>The Briteside Team</p>
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff;">
+      ${header}
+      <div style="padding: 32px 40px;">
+        <h2 style="color: #e53e3e;">Event Cancelled</h2>
+        <p>We're sorry to let you know that <strong>${event.title}</strong> has been cancelled by the organizer.</p>
+        <p>A <strong>full refund</strong> has been issued to your original payment method. Please allow 5–10 business days for the funds to appear.</p>
+        ${event.cancellationReason ? `<p><strong>Cancellation reason:</strong> ${event.cancellationReason}</p>` : ''}
+        <p>We apologize for any inconvenience.</p>
+        <p>Best regards,<br>The Briteside Team</p>
+      </div>
+      ${footer()}
     </div>
   `;
   const text = `Event Cancelled: ${event.title}\n\nA full refund has been issued to your original payment method. Please allow 5–10 business days.${event.cancellationReason ? `\n\nCancellation reason: ${event.cancellationReason}` : ''}`;
