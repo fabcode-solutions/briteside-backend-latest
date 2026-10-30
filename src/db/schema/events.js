@@ -101,26 +101,16 @@ export const events = pgTable(
     presetId: uuid('preset_id').references(() => organizerPresets.id, { onDelete: 'set null' }),
     snsTopicArn: varchar('sns_topic_arn', { length: 255 }),
     showTicketsRemaining: boolean('show_tickets_remaining').default(true).notNull(),
-    // Client-generated key for one create-event submit attempt. Lets a request
-    // that's accidentally sent twice (network retry, double-click) resolve to
-    // the same event instead of creating a duplicate — see EventService.createEvent.
     clientRequestId: varchar('client_request_id', { length: 100 }),
-    // Organizer "Tax Tool" opt-in (TAX_STRATEGY.md §2.2/§2.3) — only
-    // meaningful/shown by the frontend in states where Briteside is NOT the
-    // required Marketplace Facilitator. Null when the organizer hasn't
-    // opted in (or the event is in a facilitator jurisdiction, where this
-    // is never collected). Set only at creation — updateEventSchema doesn't
-    // accept this field, so it can't be changed afterward. Shape, exactly
-    // as sent by the frontend:
-    //   { collectionEnabled, country, registrationId, name, ratePercent,
-    //     appliesToAllTickets }
-    // Older rows may still carry a legacy `absorbed` key from before that
-    // sub-toggle was removed — eventTax.service.js reads it defensively for
-    // backward compatibility only; it can no longer be set.
-    // NOT legally reviewed — see src/lib/tax/eventTaxJurisdictions.js. The
-    // checkout path re-derives the event's actual jurisdiction status from
-    // the venue rather than trusting this object's mere presence.
     tax: jsonb('tax'),
+    source: varchar('source', { length: 20 }).notNull().default('briteside'),
+    externalId: varchar('external_id', { length: 255 }),
+    externalUrl: text('external_url'),
+    // Upstream status as last synced: active | postponed | cancelled | removed
+    externalStatus: varchar('external_status', { length: 20 }),
+    externalPriceMin: decimal('external_price_min', { precision: 10, scale: 2 }),
+    externalPriceMax: decimal('external_price_max', { precision: 10, scale: 2 }),
+    externalLastSeenAt: timestamp('external_last_seen_at', { withTimezone: true }),
   },
   table => [
     check('end_date_check', sql`${table.endDate} > ${table.startDate}`),
@@ -144,6 +134,10 @@ export const events = pgTable(
     uniqueIndex('uq_events_organizer_client_request')
       .on(table.organizerId, table.clientRequestId)
       .where(sql`client_request_id IS NOT NULL`),
+    uniqueIndex('uq_events_source_external_id')
+      .on(table.source, table.externalId)
+      .where(sql`external_id IS NOT NULL`),
+    index('idx_events_source').on(table.source),
   ]
 );
 
@@ -161,6 +155,10 @@ export const eventSchedules = pgTable(
     endTime: timestamp('end_time', { withTimezone: true }).notNull(),
     duration: integer('duration').notNull(), // Duration in minutes
     ticketsSold: integer('tickets_sold').notNull().default(0),
+    // Imported events only: one session per upstream performance, each with
+    // its own buy link (see src/services/externalEvents).
+    externalId: varchar('external_id', { length: 255 }),
+    externalUrl: text('external_url'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),

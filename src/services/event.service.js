@@ -2675,6 +2675,10 @@ export class EventService {
         throw new ApiError(400, 'This event has been cancelled');
       }
 
+      if (event.source && event.source !== 'briteside') {
+        throw new ApiError(400, 'Registration for this event is handled by the original seller');
+      }
+
       if (!event.isFree) {
         throw new ApiError(400, 'This is not a free event');
       }

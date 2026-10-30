@@ -6,10 +6,13 @@ import {
   boolean,
   timestamp,
   index,
+  uniqueIndex,
+  integer,
   jsonb,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { users } from './users.js';
+import { events } from './events.js';
 
 export const userNotificationSettings = pgTable('user_notification_settings', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -50,5 +53,28 @@ export const notifications = pgTable(
     index('idx_notifications_read')
       .on(table.isRead)
       .where(sql`${table.isRead} = FALSE`),
+  ]
+);
+
+// One row per event reminder actually sent (user × event × 24h/6h stage).
+// The reminder crons re-scan their whole window every run, so this is what
+// stops a ticket holder getting the same reminder each hour. Kept separate
+// from `notifications` because users can delete those (and may have in-app
+// reminders turned off while still getting the email).
+export const eventReminderLog = pgTable(
+  'event_reminder_log',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    eventId: uuid('event_id')
+      .notNull()
+      .references(() => events.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    hoursBefore: integer('hours_before').notNull(),
+    sentAt: timestamp('sent_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  table => [
+    uniqueIndex('uq_event_reminder_log').on(table.eventId, table.userId, table.hoursBefore),
   ]
 );

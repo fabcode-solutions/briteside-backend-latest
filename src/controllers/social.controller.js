@@ -211,7 +211,9 @@ export const getSocialProfile = catchAsync(async (req, res) => {
         isRequested,
         followStatus,
         isPinnedByMe,
-        hasStory,
+        // Private account → only the owner and followers get the story ring
+        // (the stories feed withholds the stories themselves from everyone else).
+        hasStory: hasStory && (currentUserId === userId || profile.isPublic || isFollowing),
         shopProductCount,
         dob: fullUser?.dob ?? null,
         profanityFilterEnabled: fullUser?.profanityFilterEnabled ?? false,

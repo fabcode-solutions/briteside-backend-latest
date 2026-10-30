@@ -13,8 +13,7 @@ import { FRONTEND_URL, BRAND_COLOR, header, footer, ctaButton, infoBox } from '.
  * @returns {Object} - Email content object with html and text
  */
 export const generateEventReminderEmail = (event, user, hoursBefore) => {
-  const reminderType = hoursBefore === 24 ? '24-hour' : '1-hour';
-  const subject = `Event Reminder: ${event.title} starts in ${reminderType}`;
+  const subject = `Event Reminder: ${event.title} starts within ${hoursBefore} hours`;
 
   const eventDate = dayjs(event.startDate).format('dddd, MMMM D, YYYY');
   const eventTime = dayjs(event.startDate).format('h:mm A');

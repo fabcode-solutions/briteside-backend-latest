@@ -826,7 +826,7 @@ export class SocialChatService {
   // ─── Sharing ─────────────────────────────────────────────────────────────────
 
   static async sharePostToUsers(currentUserId, postId, recipientUserIds, message = '') {
-    const { posts, stories, groups } = await import('../db/schema/index.js');
+    const { posts, stories, groups, events, venues } = await import('../db/schema/index.js');
 
     let post = await db.query.posts.findFirst({
       where: eq(posts.id, postId),
@@ -857,6 +857,7 @@ export class SocialChatService {
     let isStory = false;
     let isGroup = false;
     let isProfile = false;
+    let isEvent = false;
 
     if (!post) {
       const story = await db.query.stories.findFirst({
@@ -918,6 +919,35 @@ export class SocialChatService {
             _groupName: group.name,
           };
         } else {
+          // Fall back to a published event
+          const [event] = await db
+            .select({
+              id: events.id,
+              title: events.title,
+              slug: events.slug,
+              coverImages: events.coverImages,
+              startDate: events.startDate,
+              venueName: venues.name,
+              venueCity: venues.city,
+            })
+            .from(events)
+            .leftJoin(venues, eq(venues.id, events.venueId))
+            .where(
+              and(
+                eq(events.id, postId),
+                eq(events.eventStatus, 'published'),
+                sql`${events.deletedAt} IS NULL`
+              )
+            )
+            .limit(1);
+
+          if (event) {
+            isEvent = true;
+            post = { id: event.id, _event: event };
+          }
+        }
+
+        if (!post) {
           // NEW: fall back to sharing a user's profile
           const sharedUser = await db.query.users.findFirst({
             where: eq(users.id, postId),
@@ -926,7 +956,7 @@ export class SocialChatService {
             },
           });
 
-          if (!sharedUser) throw new ApiError(404, 'Post, story, group, or user not found');
+          if (!sharedUser) throw new ApiError(404, 'Post, story, group, event, or user not found');
 
           isProfile = true;
           post = {
@@ -963,16 +993,39 @@ export class SocialChatService {
 
         const conversation = await this.getOrCreateConversation(currentUserId, recipientId);
 
-        const messageType = isGroup ? 'group' : isStory ? 'story' : isProfile ? 'profile' : 'post';
+        const messageType = isGroup
+          ? 'group'
+          : isStory
+            ? 'story'
+            : isEvent
+              ? 'event'
+              : isProfile
+                ? 'profile'
+                : 'post';
         const defaultContent = isGroup
           ? 'Shared a group with you'
           : isStory
             ? 'Shared a story with you'
-            : isProfile
-              ? 'Shared a profile with you'
-              : 'Shared a post with you';
+            : isEvent
+              ? 'Shared an event with you'
+              : isProfile
+                ? 'Shared a profile with you'
+                : 'Shared a post with you';
 
-        const metadata = isGroup
+        const metadata = isEvent
+          ? {
+            eventId: post.id,
+            sharedEvent: {
+              id: post._event.id,
+              title: post._event.title,
+              slug: post._event.slug,
+              coverImageUrl: post._event.coverImages?.[0] ?? null,
+              startDate: post._event.startDate,
+              venueName: post._event.venueName ?? null,
+              venueCity: post._event.venueCity ?? null,
+            },
+          }
+          : isGroup
           ? {
             groupId: post.id,
             sharedGroup: {
@@ -1051,7 +1104,7 @@ export class SocialChatService {
         .update(stories)
         .set({ sharesCount: sql`${stories.sharesCount} + ${uniqueRecipients.length}` })
         .where(eq(stories.id, postId));
-    } else if (!isGroup && !isProfile) {
+    } else if (!isGroup && !isProfile && !isEvent) {
       await db
         .update(posts)
         .set({ sharesCount: sql`${posts.sharesCount} + ${uniqueRecipients.length}` })
@@ -1060,7 +1113,15 @@ export class SocialChatService {
 
     return {
       postId,
-      contentType: isGroup ? 'group' : isStory ? 'story' : isProfile ? 'profile' : 'post',
+      contentType: isGroup
+        ? 'group'
+        : isStory
+          ? 'story'
+          : isEvent
+            ? 'event'
+            : isProfile
+              ? 'profile'
+              : 'post',
       totalRecipients: uniqueRecipients.length,
       successCount: results.filter(r => r.success).length,
       results,

@@ -153,6 +153,9 @@ export class OrderService {
         where: eq(events.id, eventId),
       });
       if (!event) throw new ApiError(404, 'Event not found');
+      if (event.source && event.source !== 'briteside') {
+        throw new ApiError(400, 'Tickets for this event are sold by the original seller');
+      }
       if (event.isFree) throw new ApiError(400, 'Event is free. Use join flow instead');
 
       // Sales paused while the event has removed cover content (self-heals

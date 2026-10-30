@@ -35,6 +35,7 @@
     "seed:popular-covers": "node scripts/seed-popular-covers.js ./logos ",
     "seed:popular-covers:prod": "cross-env NODE_ENV=production USE_AWS_SECRETS=true node scripts/seed-popular-covers.js ./logos",
     "iap:sync-tiers": "node src/scripts/sync-iap-tiers.js",
+    "sync:external-events": "node scripts/with-secrets.js node scripts/sync-external-events.js",
     "seed:admin-account": "node scripts/seed-admin-account.js"
   },
   "dependencies": {
