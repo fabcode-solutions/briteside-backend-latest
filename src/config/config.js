@@ -89,6 +89,9 @@ const EnvVariables = z.object({
   // with the URL-encoded event URL.
   TICKETMASTER_AFFILIATE_URL_TEMPLATE: z.string().optional(),
   VENUNITE_API_KEY: z.string().optional(),
+  // Free VenuNite MCP key — evaluation only (scripts/test-venunite-mcp.js),
+  // never used by the scheduled sync.
+  VENUNITE_MCP_API_KEY: z.string().optional(),
   // VenuNite lookahead override — the REST trial only serves the next 30 days.
   VENUNITE_DAYS_AHEAD: z.preprocess(
     a => (a === undefined ? undefined : +a),
@@ -225,6 +228,7 @@ const env = {
     ticketmasterApiKey: envVars.TICKETMASTER_API_KEY,
     ticketmasterAffiliateUrlTemplate: envVars.TICKETMASTER_AFFILIATE_URL_TEMPLATE,
     venuniteApiKey: envVars.VENUNITE_API_KEY,
+    venuniteMcpApiKey: envVars.VENUNITE_MCP_API_KEY,
     venunitePageSize: envVars.VENUNITE_PAGE_SIZE,
     venuniteDaysAhead: envVars.VENUNITE_DAYS_AHEAD,
     states: envVars.EXTERNAL_EVENTS_STATES.split(',')
@@ -254,5 +258,45 @@ if (env.nodeEnv === 'production') {
     logger.error(`[config] In-app purchases are not fully configured — missing: ${missingIap.join(', ')}`);
   }
 }
+// TEMP DEBUG - remove after checking
+// TEMP DEBUG - remove after checkingvn_live_NEI-7bH8u7qBl81DesQvaUFWKSO37Jeg
+ 
+console.log('[VENUNITE CONFIG]', {
+  nodeEnv: env.nodeEnv,
+  hasKey: !!envVars.VENUNITE_API_KEY,
+  keyLength: envVars.VENUNITE_API_KEY?.length,
+  keyPreview: envVars.VENUNITE_API_KEY
+    ? `${envVars.VENUNITE_API_KEY.slice(0, 4)}...${envVars.VENUNITE_API_KEY}`
+    : undefined,
+  pageSize: env.externalEvents.venunitePageSize,
+  daysAhead: env.externalEvents.venuniteDaysAhead,
+  configured: env.externalEvents.configured,
+});
 
+const dbPass = env.db.password || '';
+console.log('[DB CONFIG]', {
+  host: env.db.host,
+  port: env.db.port,
+  database: env.db.database,
+  user: env.db.user,
+  nodeEnv: env.nodeEnv,
+  passwordLength: dbPass.length,
+  passwordPreview: dbPass ,
+  hasWhitespace: /\s/.test(dbPass),
+  hasQuotes: /["']/.test(dbPass),
+  hasSpecialChars: /[^A-Za-z0-9]/.test(dbPass),
+});
+
+
+// TEMP DEBUG - remove after checking Facebook login
+console.log('[FACEBOOK CONFIG]', {
+  appId: env.facebook.appId,
+  appIdFromEnvFile: fileEnv.FACEBOOK_APP_ID,
+  hasSecret: !!env.facebook.appSecret,
+  secretLength: env.facebook.appSecret?.length,
+  secretPreview: env.facebook.appSecret
+    ? `${env.facebook.appSecret.slice(0, 3)}...${env.facebook.appSecret.slice(-3)}`
+    : undefined,
+  callbackUrl: env.facebook.callbackUrl,
+});
 export default env;

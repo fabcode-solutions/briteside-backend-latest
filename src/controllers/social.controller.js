@@ -162,8 +162,8 @@ export const getSocialProfile = catchAsync(async (req, res) => {
   const coverUrls = Array.isArray(profile.coverMedia) ? profile.coverMedia.filter(Boolean) : [];
   const coverModerationStatus = coverUrls.length
     ? MediaModerationService.aggregateStatus(
-        await MediaModerationService.mediaRowsForUrls(coverUrls)
-      )
+      await MediaModerationService.mediaRowsForUrls(coverUrls)
+    )
     : 'approved';
 
   const profileFilterEnabled = await TextModerationService.getFilterEnabled(currentUserId);
@@ -261,7 +261,7 @@ export const updateSocialProfile = catchAsync(async (req, res) => {
     countryFlag1,
     countryFlag2,
     buttonMeta,
-     defaultLandingTab,
+    defaultLandingTab,
     firstName,
     lastName,
     profileSong,
@@ -310,7 +310,7 @@ export const updateSocialProfile = catchAsync(async (req, res) => {
     throw new ApiError(403, 'Cover button is a BriteSide Plus feature. Upgrade to add one.');
   }
 
-   const VALID_LANDING_TABS = ['posts', 'shop', 'wall'];
+  const VALID_LANDING_TABS = ['posts', 'shop', 'wall'];
   if (defaultLandingTab !== undefined && !VALID_LANDING_TABS.includes(defaultLandingTab)) {
     throw new ApiError(400, `defaultLandingTab must be one of: ${VALID_LANDING_TABS.join(', ')}`);
   }
@@ -416,7 +416,7 @@ export const updateSocialProfile = catchAsync(async (req, res) => {
     countryFlag2,
     buttonMeta,
     expiresAt,
-     defaultLandingTab,
+    defaultLandingTab,
     ...profileSongFields,
   });
 
