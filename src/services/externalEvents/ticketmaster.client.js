@@ -56,6 +56,21 @@ function resolveStart(dates) {
   return dayjs.tz(`${start.localDate}T${localTime}`, tz).toDate();
 }
 
+// Venues often paste the same text into both `info` and `pleaseNote`, so drop
+// a part that repeats (or is contained in) one already kept.
+function buildDescription(raw) {
+  const parts = [];
+  for (const text of [raw.info, raw.pleaseNote]) {
+    const trimmed = text?.trim();
+    if (!trimmed) continue;
+    const norm = trimmed.replace(/\s+/g, ' ').toLowerCase();
+    const dupIndex = parts.findIndex(p => p.norm.includes(norm) || norm.includes(p.norm));
+    if (dupIndex === -1) parts.push({ text: trimmed, norm });
+    else if (norm.length > parts[dupIndex].norm.length) parts[dupIndex] = { text: trimmed, norm };
+  }
+  return parts.map(p => p.text).join('\n\n') || null;
+}
+
 function mapStatus(code) {
   if (code === 'cancelled') return 'cancelled';
   if (code === 'postponed') return 'postponed';
@@ -79,7 +94,7 @@ export function normalizeTicketmasterEvent(raw) {
     source: 'ticketmaster',
     externalId: raw.id,
     title: raw.name.trim(),
-    description: [raw.info, raw.pleaseNote].filter(Boolean).join('\n\n') || null,
+    description: buildDescription(raw),
     url: raw.url,
     startDate,
     endDate: endDate > startDate ? endDate : new Date(startDate.getTime() + DEFAULT_DURATION_MS),

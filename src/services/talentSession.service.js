@@ -546,6 +546,18 @@ export class TalentProfileService {
     });
     if (!profile) throw new ApiError(404, 'Talent profile not found');
 
+    let isLiked = false;
+    if (userId) {
+      const fav = await db.query.talentFavorites.findFirst({
+        where: and(
+          eq(talentFavorites.userId, userId),
+          eq(talentFavorites.talentProfileId, profile.id)
+        ),
+        columns: { id: true },
+      });
+      isLiked = !!fav;
+    }
+
     const reviewStatus = await TalentProfileService._getReviewStatus(
       profile.id,
       userId,
@@ -568,6 +580,7 @@ export class TalentProfileService {
     return {
       ...profile,
       user: normalizeUserImage(profile.user),
+      isLiked,
       reviewStatus,
       ...featureFlags,
       // ← ADD THESE TWO LINES

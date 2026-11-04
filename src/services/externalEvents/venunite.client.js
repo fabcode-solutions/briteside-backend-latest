@@ -31,7 +31,7 @@ async function request(apiKey, params, attempt = 1) {
 }
 
 // cost is free-form text such as "$45", "$20 - $40", "Free" or "From $15".
-function parseCost(cost) {
+export function parseCost(cost) {
   if (!cost) return { priceMin: null, priceMax: null };
   const amounts = String(cost)
     .replace(/,/g, '')

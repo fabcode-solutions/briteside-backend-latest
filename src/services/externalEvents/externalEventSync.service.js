@@ -19,6 +19,7 @@ import { generateUniqueSlug } from '../../utils/event-helpers.js';
 import { STATE_NAME_TO_ABBR } from '../../lib/tax/usStates.js';
 import { fetchTicketmasterEvents } from './ticketmaster.client.js';
 import { fetchVenuniteEvents } from './venunite.client.js';
+import { fetchVenuniteMcpEvents } from './venuniteMcp.client.js';
 
 const SYSTEM_USER_EMAIL = 'external-events@system.briteside.local';
 const STATE_ABBR_TO_NAME = Object.fromEntries(
@@ -580,6 +581,14 @@ const SOURCES = [
     daysAhead: () => env.externalEvents.venuniteDaysAhead,
     fetch: opts => fetchVenuniteEvents({ ...opts, pageSize: env.externalEvents.venunitePageSize }),
   },
+  // Free MCP feed for evaluating VenuNite before paying — never part of the
+  // scheduled sync, only run when asked for by name (scripts/test-venunite-mcp.js).
+  {
+    name: 'venunite-mcp',
+    manualOnly: true,
+    apiKey: () => env.externalEvents.venuniteMcpApiKey,
+    fetch: fetchVenuniteMcpEvents,
+  },
 ];
 
 /**
@@ -606,6 +615,7 @@ export async function syncExternalEvents({ sources, maxPages } = {}) {
     for (const source of SOURCES) {
       const apiKey = source.apiKey();
       if (!apiKey || (sources && !sources.includes(source.name))) continue;
+      if (source.manualOnly && !sources?.includes(source.name)) continue;
 
       // Unlisting below uses the same window, so a shorter source lookahead
       // never hides events beyond what that source was asked for.
@@ -622,6 +632,7 @@ export async function syncExternalEvents({ sources, maxPages } = {}) {
           result = await source.fetch({ apiKey, stateCode, from: runStartedAt, to: windowEnd, maxPages });
         } catch (err) {
           complete = false;
+          console.error('[SYNC DEBUG] Fetch failed', source.name, stateCode, err);
           logger.error('[externalEvents] Fetch failed', { source: source.name, stateCode, error: err.message });
           continue;
         }

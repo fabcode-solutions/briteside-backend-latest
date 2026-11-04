@@ -964,6 +964,18 @@ export class EventService {
         conditions.push(inArray(events.id, filteredIds));
       }
 
+      // Multi-session events keep their first session's startDate, so once
+      // that session is over the event should be shown and sorted by the
+      // start of its next session that hasn't ended yet.
+      const nowTs = sql`${now.toISOString()}::timestamptz`;
+      const nextSessionStart = sql`(
+        SELECT MIN(${eventSchedules.startTime}) FROM ${eventSchedules}
+        WHERE ${eventSchedules.eventId} = ${events.id}
+          AND ${eventSchedules.deletedAt} IS NULL
+          AND ${eventSchedules.endTime} >= ${nowTs}
+      )`;
+      const isUpcoming = sql`COALESCE(${events.endDate}, ${events.startDate}) >= ${nowTs}`;
+
       // 4. MAIN QUERY
       const [eventsResult, totalCount] = await Promise.all([
         db
@@ -973,6 +985,7 @@ export class EventService {
             organizer: organizers,
             group: groups,
             isLiked: sql`CASE WHEN ${eventLikes.id} IS NOT NULL THEN true ELSE false END`,
+            nextSessionStart,
           })
           .from(events)
           .leftJoin(venues, eq(events.venueId, venues.id))
@@ -984,7 +997,15 @@ export class EventService {
             and(eq(eventLikes.eventId, events.id), eq(eventLikes.userId, userId))
           )
           .where(and(...conditions, ...venuesConditions))
-          .orderBy(desc(events.createdAt))
+          // Sort by event date: events that haven't ended yet come first,
+          // soonest (next session) first; past events (only present for
+          // timeFilter 'all') follow, most recent first.
+          .orderBy(
+            sql`CASE WHEN ${isUpcoming} THEN 0 ELSE 1 END`,
+            sql`CASE WHEN ${isUpcoming} THEN COALESCE(${nextSessionStart}, ${events.startDate}) END ASC`,
+            desc(events.startDate),
+            desc(events.createdAt)
+          )
           .limit(limit)
           .offset(offset),
 
@@ -1002,6 +1023,7 @@ export class EventService {
         organizer: row.organizer,
         group: row.group,
         isLiked: !!row.isLiked,
+        nextSessionStart: row.nextSessionStart ?? null,
       }));
 
       // 6. Fetch and attach categories to all events
