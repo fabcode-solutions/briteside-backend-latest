@@ -153,8 +153,9 @@ export const SearchService = {
         .innerJoin(users, eq(users.id, talentProfiles.userId))
         .where(
           and(
+            // isActive is only the talent's "Accept Bookings" switch — they stay
+            // searchable while not taking 1:1 bookings.
             isNull(talentProfiles.deletedAt),
-            eq(talentProfiles.isActive, true),
             isNull(users.deletedAt),
             blockedIds.length > 0 ? notInArray(users.id, blockedIds) : undefined,
             sql`${talentProfiles.talentSearch} @@ to_tsquery('simple', ${tsQuery})`

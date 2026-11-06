@@ -244,7 +244,9 @@ export class PriorityMessageService {
     }
 
     const profile = await db.query.talentProfiles.findFirst({
-      where: and(eq(talentProfiles.id, talentProfileId), eq(talentProfiles.isActive, true)),
+      // Not gated on isActive — that's the 1:1 "Accept Bookings" switch; paid
+      // messages have their own priorityMessagingEnabled switch, checked below.
+      where: and(eq(talentProfiles.id, talentProfileId), isNull(talentProfiles.deletedAt)),
       with: {
         user: {
           columns: { id: true, firstName: true, lastName: true, email: true, username: true },
@@ -253,6 +255,9 @@ export class PriorityMessageService {
     });
     if (!profile) throw new ApiError(404, 'Talent not found or not accepting messages');
     if (profile.userId === senderId) throw new ApiError(400, 'You cannot message yourself');
+    if (profile.priorityMessagingEnabled === false) {
+      throw new ApiError(403, 'This talent is not currently accepting priority messages');
+    }
 
     // Talent must have an active subscription with the priority_messaging feature,
     // otherwise they cannot read the message — don't take the sender's money.

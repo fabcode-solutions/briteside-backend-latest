@@ -45,6 +45,8 @@ export const subscriptionPlans = pgTable(
     price: decimal('price', { precision: 10, scale: 2 }).notNull(),
     currency: varchar('currency', { length: 3 }).notNull().default('usd'),
     interval: varchar('interval', { length: 20 }).notNull(), // 'month' | 'year'
+    // Free trial length offered to first-time subscribers; 0 = no trial
+    trialDays: integer('trial_days').notNull().default(0),
     stripePriceId: varchar('stripe_price_id', { length: 255 }).unique(),
     stripeProductId: varchar('stripe_product_id', { length: 255 }),
     isActive: boolean('is_active').default(true),

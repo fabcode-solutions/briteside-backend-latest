@@ -284,14 +284,21 @@ import { subscriptionTemplates } from './subscription.templates.js';
 
 /**
  * @param {string} to
- * @param {{ user_name, next_billing_date }} params
+ * @param {{ user_name, next_billing_date, trial_end_date? }} params
  */
 export const sendBridesidePlusSignupEmail = (to, params) =>
   sendTemplate(subscriptionTemplates.bridesidePlusSignup, to, params);
 
 /**
  * @param {string} to
- * @param {{ user_name, access_end_date }} params
+ * @param {{ user_name, trial_end_date, amount, billing_interval, payment_method_last4 }} params
+ */
+export const sendBridesidePlusTrialEndingEmail = (to, params) =>
+  sendTemplate(subscriptionTemplates.bridesidePlusTrialEnding, to, params);
+
+/**
+ * @param {string} to
+ * @param {{ user_name, access_end_date, is_trial? }} params
  */
 export const sendBridesidePlusCancellationEmail = (to, params) =>
   sendTemplate(subscriptionTemplates.bridesidePlusCancellation, to, params);

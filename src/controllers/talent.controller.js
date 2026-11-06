@@ -151,6 +151,15 @@ export const getAvailableSlots = catchAsync(async (req, res) => {
   const availWindows = await TalentAvailabilityService.getForProfile(profileId);
   const talentTimezone = availWindows[0]?.timezone || 'UTC';
 
+  // "Accept Bookings" off — offer no new slots (checkout rejects them anyway).
+  const profile = await db.query.talentProfiles.findFirst({
+    where: eq(talentProfiles.id, profileId),
+    columns: { isActive: true },
+  });
+  if (profile && !profile.isActive) {
+    return res.json({ success: true, data: { slots: [], talentTimezone, acceptingBookings: false } });
+  }
+
   const slots = await TalentAvailabilityService.getAvailableSlots(profileId, date, durationMins);
   res.json({ success: true, data: { slots, talentTimezone } });
 });
