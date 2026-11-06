@@ -4,11 +4,12 @@ import { SubscriptionService } from '../services/subscription.service.js';
 import { GroupSubscriptionService } from '../services/groupSubscription.service.js';
 
 /**
- * Get all active subscription plans (public)
+ * Get all active subscription plans (public) — each plan carries
+ * `trialAvailable` for the signed-in viewer, if any.
  * @route GET /api/subscriptions/plans
  */
 const getPlans = catchAsync(async (req, res) => {
-  const plans = await SubscriptionService.listPlans({ includeInactive: false });
+  const plans = await SubscriptionService.listPlansForViewer(req.user?.id);
 
   res.status(httpStatus.OK).json({
     success: true,
@@ -53,18 +54,20 @@ const createNativeSubscriptionIntent = catchAsync(async (req, res) => {
 });
 
 /**
- * Native checkout step 2 — verify the confirmed PaymentIntent and activate
- * the subscription.
+ * Native checkout step 2 — verify the confirmed PaymentIntent (or, for a free
+ * trial, the confirmed SetupIntent) and activate the subscription.
  * @route POST /api/subscriptions/native-finalize
  */
 const finalizeNativeSubscription = catchAsync(async (req, res) => {
-  const { subscriptionId, paymentIntentId } = req.body;
+  const { subscriptionId, paymentIntentId, setupIntentId } = req.body;
 
-  const result = await SubscriptionService.finalizeNativeSubscription(
-    req.user.id,
-    subscriptionId,
-    paymentIntentId
-  );
+  const result = setupIntentId
+    ? await SubscriptionService.finalizeNativeTrialSubscription(req.user.id, setupIntentId)
+    : await SubscriptionService.finalizeNativeSubscription(
+        req.user.id,
+        subscriptionId,
+        paymentIntentId
+      );
 
   res.status(httpStatus.OK).json({
     success: true,

@@ -650,6 +650,7 @@ const createSubscriptionPlanSchema = z.object({
   description: z.string().max(1000).optional(),
   price: z.number().nonnegative(),
   interval: z.enum(['month', 'year']),
+  trialDays: z.number().int().min(0).max(90).default(0),
   isActive: z.boolean().default(true),
   displayOrder: z.number().int().nonnegative().default(0),
   features: z
@@ -667,6 +668,7 @@ const updateSubscriptionPlanSchema = z.object({
   description: z.string().max(1000).optional(),
   price: z.number().nonnegative().optional(),
   interval: z.enum(['month', 'year']).optional(),
+  trialDays: z.number().int().min(0).max(90).optional(),
   isActive: z.boolean().optional(),
   displayOrder: z.number().int().nonnegative().optional(),
 });

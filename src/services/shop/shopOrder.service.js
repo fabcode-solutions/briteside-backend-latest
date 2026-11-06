@@ -31,7 +31,7 @@ const PAYOUT_NOTICE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 // The Earnings tab holds the Stripe onboarding button; the dashboard root opens
 // on Video Chat, so link deeper.
-const PAYOUT_SETUP_PATH = '/talent-dashboard?tab=earnings';
+const PAYOUT_SETUP_PATH = '/service-dashboard?tab=earnings';
 
 export class ShopOrderService {
   /**
@@ -274,8 +274,8 @@ export class ShopOrderService {
     const redirectUrls = getRedirectUrls(
       platform,
       FRONTEND_URL,
-      '/purchases?checkout_session_id={CHECKOUT_SESSION_ID}&status=success',
-      '/purchases?checkout_session_id={CHECKOUT_SESSION_ID}&status=cancelled'
+      '/digital-downloads?checkout_session_id={CHECKOUT_SESSION_ID}&status=success',
+      '/digital-downloads?checkout_session_id={CHECKOUT_SESSION_ID}&status=cancelled'
     );
     const nativeRedirect = isNativePlatform(platform);
 
@@ -743,7 +743,7 @@ export class ShopOrderService {
       message: `You now own "${order.productTitleSnapshot}".`,
       type: 'purchase_confirmation',
       relatedId: order.id,
-      redirectTo: '/purchases',
+      redirectTo: '/digital-downloads',
       metadata: { orderId: order.id, productId: order.productId },
     });
 
@@ -753,13 +753,13 @@ export class ShopOrderService {
       message: `${buyer?.firstName ?? 'Someone'} bought "${order.productTitleSnapshot}".`,
       type: 'payment',
       relatedId: order.id,
-      redirectTo: '/talent-dashboard?tab=shop',
+      redirectTo: '/service-dashboard?tab=shop',
       metadata: { orderId: order.id, productId: order.productId },
     });
 
     if (buyer?.email) {
       const sellerName = [seller?.firstName, seller?.lastName].filter(Boolean).join(' ');
-      // Links back to /purchases rather than embedding the file: download URLs
+      // Links back to /digital-downloads rather than embedding the file: download URLs
       // expire, and an emailed link would outlive them.
       await mailService.sendGeneralEmail({
         to: buyer.email,
@@ -768,7 +768,7 @@ export class ShopOrderService {
           `Thanks for your purchase${sellerName ? ` from ${sellerName}` : ''}.<br><br>` +
           `<strong>${order.productTitleSnapshot}</strong> is ready in your purchases, ` +
           `where you can download it any time.<br><br>` +
-          `<a href="${FRONTEND_URL}/purchases">View your purchases</a>`,
+          `<a href="${FRONTEND_URL}/digital-downloads">View your digital product downloads</a>`,
       });
     }
   }

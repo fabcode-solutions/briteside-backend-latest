@@ -87,7 +87,7 @@ export const sessionDeclinedForBooker = (booker, talent, session, tz = 'UTC') =>
     <p style="color: #555;">Unfortunately, <strong>${talent.name}</strong> was unable to accept your session request.
     A full refund has been issued to your original payment method and will appear within 3–5 business days.</p>
      ${sessionInfoBlock(session, tz)}
-    ${ctaButton('Discover Other Talent', `${FRONTEND_URL}/discover`)}
+    ${ctaButton('Discover Other Services', `${FRONTEND_URL}/services`)}
   `);
   return { subject, html };
 };
@@ -149,7 +149,7 @@ export const talentNoShowForBooker = (booker, talent, session, tz = 'UTC') => {
     Your session has been automatically cancelled and a <strong>full refund</strong> has been issued.</p>
     ${sessionInfoBlock(session, tz)}
     <p style="color: #555;">The refund will appear on your original payment method within 3–5 business days.</p>
-    ${ctaButton('Discover Other Talent', `${FRONTEND_URL}/discover`)}
+    ${ctaButton('Discover Other Services', `${FRONTEND_URL}/services`)}
   `);
   return { subject, html };
 };

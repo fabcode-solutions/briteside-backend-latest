@@ -244,7 +244,9 @@ export class PriorityMessageService {
     }
 
     const profile = await db.query.talentProfiles.findFirst({
-      where: and(eq(talentProfiles.id, talentProfileId), eq(talentProfiles.isActive, true)),
+      // Not gated on isActive — that's the 1:1 "Accept Bookings" switch; paid
+      // messages have their own priorityMessagingEnabled switch, checked below.
+      where: and(eq(talentProfiles.id, talentProfileId), isNull(talentProfiles.deletedAt)),
       with: {
         user: {
           columns: { id: true, firstName: true, lastName: true, email: true, username: true },
@@ -253,6 +255,9 @@ export class PriorityMessageService {
     });
     if (!profile) throw new ApiError(404, 'Talent not found or not accepting messages');
     if (profile.userId === senderId) throw new ApiError(400, 'You cannot message yourself');
+    if (profile.priorityMessagingEnabled === false) {
+      throw new ApiError(403, 'This talent is not currently accepting priority messages');
+    }
 
     // Talent must have an active subscription with the priority_messaging feature,
     // otherwise they cannot read the message — don't take the sender's money.
@@ -591,14 +596,14 @@ export class PriorityMessageService {
     // Native: land on the app's /message tab with a status flag — the app's
     // in-app checkout session (openAuthSessionAsync) waits for exactly this
     // briteside://message URL and reads `status` to know whether payment went
-    // through. Web keeps redirecting to the talent's public pages.
+    // through. Web keeps redirecting to the talent's public /services page.
     const nativeRedirect = isNativePlatform(platform);
     const { successUrl, cancelUrl } = getRedirectUrls(
       platform,
       FRONTEND_URL,
       nativeRedirect
         ? '/message?checkout_session_id={CHECKOUT_SESSION_ID}&status=success'
-        : `/talent/${profile.user.username}`,
+        : `/services/${profile.user.username}`,
       nativeRedirect
         ? '/message?checkout_session_id={CHECKOUT_SESSION_ID}&status=cancelled'
         : `/profile/${profile.user.username}`

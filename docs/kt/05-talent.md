@@ -347,7 +347,7 @@ worst-status-wins on the session's `moderationStatus`.
 4. On insert, `TalentReviewService._recomputeRating` recalculates `talentProfiles.rating` (avg of all
    `isVisible=true` reviews) and `reviewCount` — this happens on **every** create/update(rating
    change)/admin-remove, not cached or batched.
-5. Talent gets a notification + `/talent-dashboard` redirect ("New review received ⭐").
+5. Talent gets a notification + `/service-dashboard` redirect ("New review received ⭐").
 6. Reviewer can edit their own review (`PATCH /reviews/:reviewId`) — re-triggers moderation on
    changed text and rating recompute if `rating` changed.
 7. Talent can report a review on their own profile as wrong/fake (`POST /reviews/:reviewId/report`)

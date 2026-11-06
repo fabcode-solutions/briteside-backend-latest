@@ -151,6 +151,15 @@ export const getAvailableSlots = catchAsync(async (req, res) => {
   const availWindows = await TalentAvailabilityService.getForProfile(profileId);
   const talentTimezone = availWindows[0]?.timezone || 'UTC';
 
+  // "Accept Bookings" off — offer no new slots (checkout rejects them anyway).
+  const profile = await db.query.talentProfiles.findFirst({
+    where: eq(talentProfiles.id, profileId),
+    columns: { isActive: true },
+  });
+  if (profile && !profile.isActive) {
+    return res.json({ success: true, data: { slots: [], talentTimezone, acceptingBookings: false } });
+  }
+
   const slots = await TalentAvailabilityService.getAvailableSlots(profileId, date, durationMins);
   res.json({ success: true, data: { slots, talentTimezone } });
 });
@@ -887,7 +896,7 @@ export const createSessionTipCheckout = catchAsync(async (req, res) => {
 export const shareTalentProfile = catchAsync(async (req, res) => {
   const { profileId } = req.params;
   const result = await TalentProfileShareService.recordShare(profileId);
-  const shareUrl = `${process.env.FRONTEND_URL || 'https://briteside.app'}/talent/${profileId}`;
+  const shareUrl = `${process.env.FRONTEND_URL || 'https://briteside.app'}/services/${profileId}`;
   res.json({ success: true, data: { ...result, shareUrl } });
 });
 

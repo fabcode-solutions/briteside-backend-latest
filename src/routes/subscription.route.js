@@ -1,6 +1,6 @@
 import express from 'express';
 import { z } from 'zod';
-import { authMiddleware } from '../middlewares/auth.middleware.js';
+import { authMiddleware, optionalAuthMiddleware } from '../middlewares/auth.middleware.js';
 import { subscriptionController } from '../controllers/subscription.controller.js';
 
 const router = express.Router();
@@ -28,10 +28,16 @@ const nativeIntentSchema = z.object({
   planId: z.string().uuid('Plan ID must be a valid UUID'),
 });
 
-const nativeFinalizeSchema = z.object({
-  subscriptionId: z.string().min(1, 'subscriptionId is required'),
-  paymentIntentId: z.string().min(1, 'paymentIntentId is required'),
-});
+// Paid checkout sends subscriptionId + paymentIntentId; a free trial sends setupIntentId
+const nativeFinalizeSchema = z.union([
+  z.object({
+    subscriptionId: z.string().min(1, 'subscriptionId is required'),
+    paymentIntentId: z.string().min(1, 'paymentIntentId is required'),
+  }),
+  z.object({
+    setupIntentId: z.string().min(1, 'setupIntentId is required'),
+  }),
+]);
 
 const portalSchema = z.object({
   returnUrl: z.string().url('Return URL must be a valid URL'),
@@ -39,8 +45,8 @@ const portalSchema = z.object({
 
 // ─── PUBLIC ROUTES ───────────────────────────────────────────────────────────
 
-// Get all active subscription plans (public)
-router.get('/plans', subscriptionController.getPlans);
+// Get all active subscription plans (public; auth optional so trial eligibility can be resolved)
+router.get('/plans', optionalAuthMiddleware, subscriptionController.getPlans);
 
 // ─── AUTHENTICATED ROUTES ────────────────────────────────────────────────────
 

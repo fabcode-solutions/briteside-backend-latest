@@ -10,13 +10,21 @@ export const subscriptionTemplates = {
   bridesidePlusSignup: {
     id: 'briteside-plus-signup',
     subject: () => 'Welcome to Briteside Plus! 👑',
-    html: ({ user_name, next_billing_date }) => `
+    html: ({ user_name, next_billing_date, trial_end_date }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">Welcome to Briteside Plus! 👑</h2>
           <p>You've just unlocked the full suite of premium creator tools. We're excited to have you on board!</p>
+          ${
+            trial_end_date
+              ? calloutBox(
+                  `🎁 <strong>Your free trial is active until ${trial_end_date}.</strong><br/>
+                 You won't be charged until then. Cancel anytime before ${trial_end_date} and you won't be charged at all.`
+                )
+              : ''
+          }
           <p><strong>Here's what's now available to you:</strong></p>
           <ul>
             <li>✅ 1-on-1 video booking tools</li>
@@ -29,7 +37,7 @@ export const subscriptionTemplates = {
           ${infoBox([
             ['Plan', '📋 Briteside Plus'],
             ['Amount', '💰 $35/month'],
-            ['Next Billing Date', `📅 ${next_billing_date}`],
+            [trial_end_date ? 'First Charge' : 'Next Billing Date', `📅 ${next_billing_date}`],
             ['Creator Earnings', '💎 You keep 95% of everything you earn'],
           ])}
           <p><strong>Quick Start:</strong></p>
@@ -61,17 +69,19 @@ export const subscriptionTemplates = {
   bridesidePlusCancellation: {
     id: 'briteside-plus-cancellation',
     subject: () => 'Your Briteside Plus Subscription Has Been Cancelled',
-    html: ({ user_name, access_end_date }) => `
+    html: ({ user_name, access_end_date, is_trial }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
         <div style="padding:30px 20px;">
           <p>Hi ${user_name},</p>
           <h2 style="color:#333;">We're sorry to see you go</h2>
-          <p>Your Briteside Plus subscription has been cancelled.</p>
+          <p>Your Briteside Plus ${is_trial ? 'free trial' : 'subscription'} has been cancelled.</p>
           ${infoBox([
             ['Plan', '📋 Briteside Plus'],
             ['Access Until', `📅 ${access_end_date}`],
-            ['Final Charge', '💰 $35 (already billed)'],
+            is_trial
+              ? ['Charges', '💰 None — you will not be charged']
+              : ['Final Charge', '💰 $27 (already billed)'],
           ])}
           <p>✅ You'll keep full access to all Briteside Plus features until <strong>${access_end_date}</strong>.<br/>
           After that date, your account will revert to a free plan.</p>
@@ -94,6 +104,33 @@ export const subscriptionTemplates = {
           <p>We hope to see you back soon!<br/><strong>The Briteside Team</strong></p>
         </div>
         ${footer(`You cancelled your Briteside Plus subscription.<br/><a href="#">Manage subscription</a> | <a href="#">Billing history</a> | <a href="#">Unsubscribe</a>`)}
+      </div>`,
+  },
+
+  // ── Briteside Plus Trial Ending ─────────────────────────────────────────
+  bridesidePlusTrialEnding: {
+    id: 'briteside-plus-trial-ending',
+    subject: ({ trial_end_date }) => `Your Briteside Plus free trial ends on ${trial_end_date}`,
+    html: ({ user_name, trial_end_date, amount, billing_interval, payment_method_last4 }) => `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+        ${header}
+        <div style="padding:30px 20px;">
+          <p>Hi ${user_name},</p>
+          <h2 style="color:#333;">Your free trial ends soon ⏳</h2>
+          <p>Your Briteside Plus free trial ends on <strong>${trial_end_date}</strong>. To keep your premium tools, you don't need to do anything — your subscription will continue automatically.</p>
+          ${infoBox([
+            ['Plan', '📋 Briteside Plus'],
+            ['Trial Ends', `📅 ${trial_end_date}`],
+            ['First Charge', `💰 ${amount}/${billing_interval} on ${trial_end_date}`],
+            ['Payment Method', `💳 Card ending in ${payment_method_last4}`],
+          ])}
+          <p>Don't want to continue? Cancel before <strong>${trial_end_date}</strong> and you won't be charged.</p>
+          <div style="text-align:center;margin:24px 0;">
+            ${ctaButton('Manage Subscription')}
+          </div>
+          <p><strong>The Briteside Team</strong></p>
+        </div>
+        ${footer(`You're receiving this because you started a Briteside Plus free trial.<br/><a href="#">Manage subscription</a> | <a href="#">Billing history</a> | <a href="#">Unsubscribe</a>`)}
       </div>`,
   },
 

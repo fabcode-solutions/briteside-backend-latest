@@ -11,7 +11,18 @@ import {
   subscriptionAuditLogs,
   userSpends,
 } from '../db/schema/index.js';
-import { eq, and, desc, or, ilike, sql, count, inArray } from 'drizzle-orm';
+import {
+  eq,
+  and,
+  desc,
+  or,
+  ilike,
+  sql,
+  count,
+  inArray,
+  notInArray,
+  isNotNull,
+} from 'drizzle-orm';
 import { UserSpendService } from './userSpend.service.js';
 import ApiError from '../utils/api-error.js';
 import dayjs from 'dayjs';
@@ -19,6 +30,7 @@ import {
   sendBridesidePlusSignupEmail,
   sendBridesidePlusCancellationEmail,
   sendBridesidePlusPaymentFailedEmail,
+  sendBridesidePlusTrialEndingEmail,
 } from '../templates/index.js';
 
 let stripe = null;
@@ -72,6 +84,18 @@ const resolveSubPeriod = sub => {
   };
 };
 
+// Abandoned/never-paid attempts — they don't count as having used the trial
+const NEVER_STARTED_STATUSES = ['incomplete', 'incomplete_expired'];
+
+// If the card on file is gone by the time a trial ends, cancel instead of
+// leaving the subscription stuck unpaid.
+const TRIAL_SETTINGS = { end_behavior: { missing_payment_method: 'cancel' } };
+
+// Clover-and-later invoices carry the subscription under parent.subscription_details;
+// older API versions had it top-level.
+const invoiceSubscriptionId = invoice =>
+  invoice.subscription ?? invoice.parent?.subscription_details?.subscription ?? null;
+
 const writeSubscriptionAuditLog = async ({
   userSubscriptionId = null,
   planId = null,
@@ -114,6 +138,7 @@ export class SubscriptionService {
       price,
       currency = 'usd',
       interval,
+      trialDays = 0,
       displayOrder,
       metadata,
       features,
@@ -143,6 +168,7 @@ export class SubscriptionService {
         price,
         currency,
         interval,
+        trialDays,
         stripePriceId: stripePrice.id,
         stripeProductId: product.id,
         isActive: true,
@@ -175,28 +201,97 @@ export class SubscriptionService {
       actorId: adminId,
       actorType: 'admin',
       action: 'plan_created',
-      newValues: { name, price, currency, interval, features: features?.length || 0 },
+      newValues: { name, price, currency, interval, trialDays, features: features?.length || 0 },
     });
 
     return { ...plan, features: createdFeatures };
   }
 
+  /**
+   * Makes sure the plan's Stripe Product and Price exist in the Stripe account
+   * the current key points at. Plans created under different keys (test vs
+   * live, another developer's account) carry ids this account has never seen,
+   * which fails every edit and checkout with "No such product/price" — so
+   * recreate whichever is missing here and store the new ids. Subscribers
+   * already billed on the old Price aren't affected.
+   */
+  static async ensurePlanStripeIds(plan) {
+    this.ensureStripe();
+    const isMissing = err => err?.statusCode === 404 || err?.code === 'resource_missing';
+    const exists = async retrieve => {
+      try {
+        await retrieve();
+        return true;
+      } catch (err) {
+        if (isMissing(err)) return false;
+        throw err;
+      }
+    };
+
+    const productOk =
+      !!plan.stripeProductId && (await exists(() => stripe.products.retrieve(plan.stripeProductId)));
+    const priceOk =
+      productOk &&
+      !!plan.stripePriceId &&
+      (await exists(() => stripe.prices.retrieve(plan.stripePriceId)));
+    if (priceOk) return plan;
+
+    let stripeProductId = plan.stripeProductId;
+    if (!productOk) {
+      const product = await stripe.products.create({
+        name: plan.name,
+        description: plan.description || undefined,
+        metadata: { source: 'briteside_plus', planId: plan.id },
+      });
+      stripeProductId = product.id;
+    }
+    const stripePrice = await stripe.prices.create({
+      product: stripeProductId,
+      unit_amount: Math.round(parseFloat(plan.price) * 100),
+      currency: plan.currency,
+      recurring: { interval: plan.interval },
+    });
+
+    const [repaired] = await db
+      .update(subscriptionPlans)
+      .set({ stripeProductId, stripePriceId: stripePrice.id, updatedAt: new Date() })
+      .where(eq(subscriptionPlans.id, plan.id))
+      .returning();
+
+    console.warn(
+      `[Subscription] Plan ${plan.id} had Stripe ids missing from this account — recreated`,
+      { oldProductId: plan.stripeProductId, oldPriceId: plan.stripePriceId, stripeProductId, stripePriceId: stripePrice.id }
+    );
+    await writeSubscriptionAuditLog({
+      planId: plan.id,
+      actorType: 'system',
+      action: 'plan_stripe_ids_repaired',
+      previousValues: { stripeProductId: plan.stripeProductId, stripePriceId: plan.stripePriceId },
+      newValues: { stripeProductId, stripePriceId: stripePrice.id },
+    });
+
+    return { ...plan, ...repaired };
+  }
+
   static async updatePlan(planId, data, adminId) {
     this.ensureStripe();
 
-    const existingPlan = await db.query.subscriptionPlans.findFirst({
+    const foundPlan = await db.query.subscriptionPlans.findFirst({
       where: eq(subscriptionPlans.id, planId),
     });
 
-    if (!existingPlan) {
+    if (!foundPlan) {
       throw new ApiError(httpStatus.NOT_FOUND, 'Subscription plan not found');
     }
+
+    const existingPlan = await this.ensurePlanStripeIds(foundPlan);
 
     const previousValues = {
       name: existingPlan.name,
       description: existingPlan.description,
       price: existingPlan.price,
       interval: existingPlan.interval,
+      trialDays: existingPlan.trialDays,
       displayOrder: existingPlan.displayOrder,
       isActive: existingPlan.isActive,
     };
@@ -205,13 +300,17 @@ export class SubscriptionService {
 
     if (data.name !== undefined) updates.name = data.name;
     if (data.description !== undefined) updates.description = data.description;
+    // Trial length is passed per checkout, not stored on the Stripe Price — no
+    // new Price needed, and existing trials keep the length they started with.
+    if (data.trialDays !== undefined) updates.trialDays = data.trialDays;
     if (data.displayOrder !== undefined) updates.displayOrder = data.displayOrder;
     if (data.isActive !== undefined) updates.isActive = data.isActive;
     if (data.metadata !== undefined) updates.metadata = data.metadata;
 
     // If price or interval changed, create a new Stripe Price (prices are immutable)
+    // Compare numerically — the form sends 10 while the decimal column comes back as "10.00"
     const priceChanged =
-      data.price !== undefined && String(data.price) !== String(existingPlan.price);
+      data.price !== undefined && parseFloat(data.price) !== parseFloat(existingPlan.price);
     const intervalChanged = data.interval !== undefined && data.interval !== existingPlan.interval;
 
     if (priceChanged || intervalChanged) {
@@ -236,11 +335,16 @@ export class SubscriptionService {
       if (intervalChanged) updates.interval = newInterval;
     }
 
-    // Update Stripe Product metadata if name or description changed
-    if ((data.name || data.description) && existingPlan.stripeProductId) {
+    // Update Stripe Product only if name or description actually changed — the
+    // admin form resends both on every save, and a trial-days-only edit has no
+    // reason to touch Stripe at all.
+    const nameChanged = !!data.name && data.name !== existingPlan.name;
+    const descriptionChanged =
+      data.description !== undefined && (data.description || '') !== (existingPlan.description || '');
+    if ((nameChanged || descriptionChanged) && existingPlan.stripeProductId) {
       const productUpdate = {};
-      if (data.name) productUpdate.name = data.name;
-      if (data.description !== undefined) productUpdate.description = data.description || '';
+      if (nameChanged) productUpdate.name = data.name;
+      if (descriptionChanged) productUpdate.description = data.description || '';
       await stripe.products.update(existingPlan.stripeProductId, productUpdate);
     }
 
@@ -322,6 +426,41 @@ export class SubscriptionService {
     });
 
     return plans;
+  }
+
+  /**
+   * Public plan list with `trialAvailable` resolved for the viewer — true only
+   * when the plan offers a trial and this user has never had a paid or trial
+   * Plus subscription. Anonymous viewers see the trial as available; checkout
+   * re-checks eligibility once they're signed in.
+   */
+  static async listPlansForViewer(userId) {
+    const plans = await this.listPlans({ includeInactive: false });
+    const eligible = userId ? await this.isTrialEligible(userId) : true;
+    return plans.map(plan => ({ ...plan, trialAvailable: eligible && plan.trialDays > 0 }));
+  }
+
+  /**
+   * One trial per user, ever — any past Stripe-backed Plus subscription (paid,
+   * trialing, canceled, …) uses it up. Admin-granted comps have no Stripe
+   * subscription and abandoned checkouts never started, so neither counts.
+   */
+  static async isTrialEligible(userId) {
+    const previous = await db.query.userSubscriptions.findFirst({
+      where: and(
+        eq(userSubscriptions.userId, userId),
+        isNotNull(userSubscriptions.stripeSubscriptionId),
+        notInArray(userSubscriptions.status, NEVER_STARTED_STATUSES)
+      ),
+      columns: { id: true },
+    });
+    return !previous;
+  }
+
+  /** Trial length to apply to this user's checkout for `plan`, or 0 for none. */
+  static async resolveTrialDays(userId, plan) {
+    if (!plan.trialDays || plan.trialDays <= 0) return 0;
+    return (await this.isTrialEligible(userId)) ? plan.trialDays : 0;
   }
 
   static async addFeatureToPlan(planId, featureData, adminId) {
@@ -442,24 +581,26 @@ export class SubscriptionService {
   static async createCheckoutSession(userId, planId, successUrl, cancelUrl) {
     this.ensureStripe();
 
-    const plan = await db.query.subscriptionPlans.findFirst({
+    const foundPlan = await db.query.subscriptionPlans.findFirst({
       where: eq(subscriptionPlans.id, planId),
     });
 
-    if (!plan) {
+    if (!foundPlan) {
       throw new ApiError(httpStatus.NOT_FOUND, 'Subscription plan not found');
     }
 
-    if (!plan.isActive) {
+    if (!foundPlan.isActive) {
       throw new ApiError(httpStatus.BAD_REQUEST, 'This plan is no longer available');
     }
 
-    if (!plan.stripePriceId) {
+    if (!foundPlan.stripePriceId) {
       throw new ApiError(
         httpStatus.UNPROCESSABLE_ENTITY,
         'This plan is not yet configured for payment. Please contact support.'
       );
     }
+
+    const plan = await this.ensurePlanStripeIds(foundPlan);
 
     // Check DB for existing active subscription
     const existingSub = await db.query.userSubscriptions.findFirst({
@@ -499,6 +640,8 @@ export class SubscriptionService {
       columns: { email: true, firstName: true, lastName: true },
     });
 
+    const trialDays = await this.resolveTrialDays(userId, plan);
+
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       customer: stripeCustomerId,
@@ -509,6 +652,8 @@ export class SubscriptionService {
       // so an existing coupon has no way to be redeemed. BriteSide Plus only;
       // group subscriptions and courses deliberately don't accept promo codes.
       allow_promotion_codes: true,
+      // A $0 trial checkout would otherwise skip card collection entirely
+      payment_method_collection: 'always',
       metadata: {
         userId,
         planId,
@@ -524,6 +669,7 @@ export class SubscriptionService {
           billingInterval: plan.interval,
           userEmail: user?.email ?? '',
         },
+        ...(trialDays > 0 && { trial_period_days: trialDays, trial_settings: TRIAL_SETTINGS }),
       },
     });
 
@@ -539,24 +685,26 @@ export class SubscriptionService {
   static async createNativeSubscriptionIntent(userId, planId) {
     this.ensureStripe();
 
-    const plan = await db.query.subscriptionPlans.findFirst({
+    const foundPlan = await db.query.subscriptionPlans.findFirst({
       where: eq(subscriptionPlans.id, planId),
     });
 
-    if (!plan) {
+    if (!foundPlan) {
       throw new ApiError(httpStatus.NOT_FOUND, 'Subscription plan not found');
     }
 
-    if (!plan.isActive) {
+    if (!foundPlan.isActive) {
       throw new ApiError(httpStatus.BAD_REQUEST, 'This plan is no longer available');
     }
 
-    if (!plan.stripePriceId) {
+    if (!foundPlan.stripePriceId) {
       throw new ApiError(
         httpStatus.UNPROCESSABLE_ENTITY,
         'This plan is not yet configured for payment. Please contact support.'
       );
     }
+
+    const plan = await this.ensurePlanStripeIds(foundPlan);
 
     const existingSub = await db.query.userSubscriptions.findFirst({
       where: and(
@@ -590,15 +738,41 @@ export class SubscriptionService {
       );
     }
 
+    const stale = existingStripeSubs.data.find(sub => matchesPlan(sub) && sub.status === 'incomplete');
+
+    const trialDays = await this.resolveTrialDays(userId, plan);
+    if (trialDays > 0) {
+      // Stripe puts a trial subscription straight into 'trialing' on creation,
+      // before any card exists — so save the card first via a SetupIntent and
+      // only create the subscription in finalize once that has succeeded.
+      // Otherwise abandoning the card form would still hand out a trial.
+      if (stale) await stripe.subscriptions.cancel(stale.id).catch(() => { });
+      const setupIntent = await stripe.setupIntents.create({
+        customer: stripeCustomerId,
+        usage: 'off_session',
+        payment_method_types: ['card'],
+        metadata: { userId, planId, trialDays: String(trialDays) },
+      });
+      return {
+        paymentId: setupIntent.id,
+        clientSecret: setupIntent.client_secret,
+        intentType: 'setup',
+        trialDays,
+      };
+    }
+
     // A previous attempt may have left an unpaid 'incomplete' subscription
     // behind (e.g. the buyer never finished the card confirmation). Reuse it
     // instead of creating another one each retry, which would otherwise pile
     // up orphaned subscriptions in Stripe for the same customer/plan.
-    const stale = existingStripeSubs.data.find(sub => matchesPlan(sub) && sub.status === 'incomplete');
     if (stale) {
       const paymentIntent = await getInvoicePaymentIntent(stale.latest_invoice);
       if (paymentIntent?.client_secret) {
-        return { paymentId: stale.id, clientSecret: paymentIntent.client_secret };
+        return {
+          paymentId: stale.id,
+          clientSecret: paymentIntent.client_secret,
+          intentType: 'payment',
+        };
       }
       // Couldn't recover a usable PaymentIntent from the stale subscription —
       // cancel it so it doesn't keep shadowing future attempts, then fall
@@ -650,6 +824,7 @@ export class SubscriptionService {
     return {
       paymentId: subscription.id,
       clientSecret: paymentIntent.client_secret,
+      intentType: 'payment',
     };
   }
 
@@ -690,6 +865,98 @@ export class SubscriptionService {
     }
 
     await this._activateUserSubscription({ userId, planId }, stripeSubscription, subscriptionId);
+
+    return {
+      success: true,
+      subscriptionId: stripeSubscription.id,
+      status: stripeSubscription.status,
+    };
+  }
+
+  /**
+   * Native checkout step 2 for a free trial — call after Stripe.js has
+   * confirmed the SetupIntent from createNativeSubscriptionIntent. Creates the
+   * trialing subscription on the now-saved card; Stripe charges it
+   * automatically when the trial ends.
+   */
+  static async finalizeNativeTrialSubscription(userId, setupIntentId) {
+    this.ensureStripe();
+    const setupIntent = await stripe.setupIntents.retrieve(setupIntentId);
+
+    if (setupIntent.metadata?.userId !== userId) {
+      throw new ApiError(httpStatus.FORBIDDEN, 'This checkout does not belong to you');
+    }
+    if (setupIntent.status !== 'succeeded' || !setupIntent.payment_method) {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'Card setup has not been completed');
+    }
+
+    const { planId } = setupIntent.metadata;
+    const trialDays = parseInt(setupIntent.metadata.trialDays, 10);
+    if (!planId || !(trialDays > 0)) {
+      throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, 'Checkout is missing required metadata');
+    }
+
+    // Retried finalize (network drop, double submit) — reuse the subscription
+    // this SetupIntent already produced instead of failing the eligibility
+    // check its own first run just used up.
+    const existingStripeSubs = await stripe.subscriptions.list({
+      customer: setupIntent.customer,
+      status: 'all',
+      limit: 20,
+    });
+    let stripeSubscription = existingStripeSubs.data.find(
+      sub => sub.metadata?.setupIntentId === setupIntent.id
+    );
+
+    if (!stripeSubscription) {
+      const foundPlan = await db.query.subscriptionPlans.findFirst({
+        where: eq(subscriptionPlans.id, planId),
+      });
+      if (!foundPlan?.isActive || !foundPlan.stripePriceId) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'This plan is no longer available');
+      }
+      const plan = await this.ensurePlanStripeIds(foundPlan);
+
+      const existingSub = await db.query.userSubscriptions.findFirst({
+        where: and(
+          eq(userSubscriptions.userId, userId),
+          inArray(userSubscriptions.status, ACTIVE_STATUSES)
+        ),
+      });
+      if (existingSub) {
+        throw new ApiError(httpStatus.CONFLICT, 'User already has an active subscription');
+      }
+      if (!(await this.isTrialEligible(userId))) {
+        throw new ApiError(httpStatus.CONFLICT, 'You have already used your free trial');
+      }
+
+      const user = await db.query.users.findFirst({
+        where: eq(users.id, userId),
+        columns: { email: true },
+      });
+
+      stripeSubscription = await stripe.subscriptions.create(
+        {
+          customer: setupIntent.customer,
+          items: [{ price: plan.stripePriceId }],
+          default_payment_method: setupIntent.payment_method,
+          trial_period_days: trialDays,
+          trial_settings: TRIAL_SETTINGS,
+          metadata: {
+            userId,
+            planId,
+            planName: plan.name,
+            billingInterval: plan.interval,
+            userEmail: user?.email ?? '',
+            setupIntentId: setupIntent.id,
+          },
+        },
+        // Concurrent double-submit — Stripe returns the first call's subscription
+        { idempotencyKey: `plus-trial-${setupIntent.id}` }
+      );
+    }
+
+    await this._activateUserSubscription({ userId, planId }, stripeSubscription, setupIntent.id);
 
     return {
       success: true,
@@ -823,6 +1090,7 @@ export class SubscriptionService {
         await sendBridesidePlusCancellationEmail(user.email, {
           user_name: user.firstName,
           access_end_date: dayjs(subscription.currentPeriodEnd).format('MMMM D, YYYY'),
+          is_trial: subscription.status === 'trialing',
         });
       }
     } catch (emailErr) {
@@ -1247,13 +1515,18 @@ export class SubscriptionService {
     });
 
     const { periodStart, periodEnd } = resolveSubPeriod(stripeSubscription);
+    const isTrial = stripeSubscription.status === 'trialing';
+    const status = isTrial ? 'trialing' : 'active';
+    const trialEnd = isTrial && stripeSubscription.trial_end
+      ? new Date(stripeSubscription.trial_end * 1000)
+      : null;
 
     if (existing) {
       // Already processed, update if needed
       await db
         .update(userSubscriptions)
         .set({
-          status: 'active',
+          status,
           currentPeriodStart: periodStart,
           currentPeriodEnd: periodEnd,
           updatedAt: new Date(),
@@ -1269,7 +1542,7 @@ export class SubscriptionService {
         userId,
         planId,
         stripeSubscriptionId: stripeSubscription.id,
-        status: 'active',
+        status,
         currentPeriodStart: periodStart,
         currentPeriodEnd: periodEnd,
         createdAt: new Date(),
@@ -1282,33 +1555,40 @@ export class SubscriptionService {
       planId,
       actorId: userId,
       actorType: 'system',
-      action: 'subscribed',
-      newValues: { stripeSubscriptionId: stripeSubscription.id, status: 'active' },
+      action: isTrial ? 'trial_started' : 'subscribed',
+      newValues: {
+        stripeSubscriptionId: stripeSubscription.id,
+        status,
+        ...(trialEnd && { trialEnd: trialEnd.toISOString() }),
+      },
     });
 
-    // Record initial subscription spend
-    try {
-      const plan = await db.query.subscriptionPlans.findFirst({
-        where: eq(subscriptionPlans.id, planId),
-        columns: { name: true, price: true, interval: true },
-      });
-      await UserSpendService.recordSpend({
-        userId,
-        spendType: 'platform_subscription',
-        amountCents: plan ? Math.round(parseFloat(plan.price) * 100) : 0,
-        referenceId: subscription.id,
-        referenceType: 'user_subscription',
-        metadata: {
-          planName: plan?.name ?? null,
-          interval: plan?.interval ?? null,
-          periodStart: periodStart?.toISOString() ?? null,
-          periodEnd: periodEnd?.toISOString() ?? null,
-        },
-        stripeSessionId: stripeSourceId,
-        paidAt: new Date(),
-      });
-    } catch (spendErr) {
-      console.error('[UserSpend] platform_subscription initial record failed:', spendErr.message);
+    // Record initial subscription spend — a trial has charged nothing yet; its
+    // first real charge is recorded by handleInvoicePaid when the trial ends.
+    if (!isTrial) {
+      try {
+        const plan = await db.query.subscriptionPlans.findFirst({
+          where: eq(subscriptionPlans.id, planId),
+          columns: { name: true, price: true, interval: true },
+        });
+        await UserSpendService.recordSpend({
+          userId,
+          spendType: 'platform_subscription',
+          amountCents: plan ? Math.round(parseFloat(plan.price) * 100) : 0,
+          referenceId: subscription.id,
+          referenceType: 'user_subscription',
+          metadata: {
+            planName: plan?.name ?? null,
+            interval: plan?.interval ?? null,
+            periodStart: periodStart?.toISOString() ?? null,
+            periodEnd: periodEnd?.toISOString() ?? null,
+          },
+          stripeSessionId: stripeSourceId,
+          paidAt: new Date(),
+        });
+      } catch (spendErr) {
+        console.error('[UserSpend] platform_subscription initial record failed:', spendErr.message);
+      }
     }
 
     try {
@@ -1316,7 +1596,8 @@ export class SubscriptionService {
       if (user) {
         await sendBridesidePlusSignupEmail(user.email, {
           user_name: user.firstName,
-          next_billing_date: dayjs(subscription.currentPeriodEnd).format('MMMM D, YYYY'),
+          next_billing_date: dayjs(trialEnd ?? subscription.currentPeriodEnd).format('MMMM D, YYYY'),
+          trial_end_date: trialEnd ? dayjs(trialEnd).format('MMMM D, YYYY') : null,
         });
       }
     } catch (emailErr) {
@@ -1499,11 +1780,62 @@ export class SubscriptionService {
     await this._syncPlusFlag(existing.userId);
   }
 
-  static async handleInvoicePaid(invoice) {
-    if (!invoice.subscription) return;
+  /**
+   * customer.subscription.trial_will_end — Stripe fires this 3 days before a
+   * trial ends. The Terms promise users notice of the upcoming charge, so this
+   * emails the date, amount and card that will be billed.
+   */
+  static async handleTrialWillEnd(stripeSubscription) {
+    if (stripeSubscription.status !== 'trialing' || stripeSubscription.cancel_at_period_end) return;
 
     const existing = await db.query.userSubscriptions.findFirst({
-      where: eq(userSubscriptions.stripeSubscriptionId, invoice.subscription),
+      where: eq(userSubscriptions.stripeSubscriptionId, stripeSubscription.id),
+      with: { plan: true },
+    });
+    if (!existing) return;
+
+    try {
+      const user = await db.query.users.findFirst({ where: eq(users.id, existing.userId) });
+      if (!user) return;
+
+      let last4 = '****';
+      const paymentMethodId = stripeSubscription.default_payment_method;
+      if (paymentMethodId) {
+        this.ensureStripe();
+        const pm = await stripe.paymentMethods
+          .retrieve(typeof paymentMethodId === 'string' ? paymentMethodId : paymentMethodId.id)
+          .catch(() => null);
+        last4 = pm?.card?.last4 ?? last4;
+      }
+
+      const amount = new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: (existing.plan?.currency ?? 'usd').toUpperCase(),
+      }).format(parseFloat(existing.plan?.price ?? '0'));
+
+      await sendBridesidePlusTrialEndingEmail(user.email, {
+        user_name: user.firstName,
+        trial_end_date: dayjs(stripeSubscription.trial_end * 1000).format('MMMM D, YYYY'),
+        amount,
+        billing_interval: existing.plan?.interval ?? 'month',
+        payment_method_last4: last4,
+      });
+    } catch (emailErr) {
+      console.error('[Subscription] Trial ending email failed:', emailErr.message);
+    }
+  }
+
+  static async handleInvoicePaid(invoice) {
+    const subscriptionId = invoiceSubscriptionId(invoice);
+    if (!subscriptionId) return;
+
+    // The $0 invoice that opens a free trial isn't a payment — leave the row
+    // 'trialing'. The opening invoice of a paid subscription is already
+    // recorded by _activateUserSubscription, so skip it to avoid double-counting.
+    if (!invoice.amount_paid || invoice.billing_reason === 'subscription_create') return;
+
+    const existing = await db.query.userSubscriptions.findFirst({
+      where: eq(userSubscriptions.stripeSubscriptionId, subscriptionId),
     });
 
     if (!existing) return;
@@ -1548,10 +1880,11 @@ export class SubscriptionService {
   }
 
   static async handleInvoicePaymentFailed(invoice) {
-    if (!invoice.subscription) return;
+    const subscriptionId = invoiceSubscriptionId(invoice);
+    if (!subscriptionId) return;
 
     const existing = await db.query.userSubscriptions.findFirst({
-      where: eq(userSubscriptions.stripeSubscriptionId, invoice.subscription),
+      where: eq(userSubscriptions.stripeSubscriptionId, subscriptionId),
     });
 
     if (!existing) return;

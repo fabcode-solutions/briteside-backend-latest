@@ -432,14 +432,15 @@ export class TalentProfileService {
   }
 
   // Feature availability flags for a single talent — same shape the list sends.
-  // Frontend uses these to disable "book session" / "priority message".
-  static async _featureFlags(talentUserId, priorityMessagingEnabled = true) {
+  // Frontend uses these to hide "book 1:1" / "priority message". `isActive` is
+  // the talent's own "Accept Bookings" switch.
+  static async _featureFlags(talentUserId, priorityMessagingEnabled = true, isActive = true) {
     const featureMap = await SubscriptionService.getActiveFeaturesForUsers([talentUserId]);
     const feats = featureMap.get(talentUserId);
     return {
       priorityMessagingAvailable:
         (feats?.has(FEATURES.PRIORITY_MESSAGING) ?? false) && priorityMessagingEnabled !== false,
-      videoBookingAvailable: feats?.has(FEATURES.VIDEO_BOOKING) ?? false,
+      videoBookingAvailable: (feats?.has(FEATURES.VIDEO_BOOKING) ?? false) && isActive !== false,
     };
   }
 
@@ -497,7 +498,8 @@ export class TalentProfileService {
     );
     const featureFlags = await TalentProfileService._featureFlags(
       profile.userId,
-      profile.priorityMessagingEnabled
+      profile.priorityMessagingEnabled,
+      profile.isActive
     );
     const talentFilterEnabled = await TextModerationService.getFilterEnabled(userId);
     await TextModerationService.maskFlaggedTextSingle(profile, {
@@ -565,7 +567,8 @@ export class TalentProfileService {
     );
     const featureFlags = await TalentProfileService._featureFlags(
       profile.userId,
-      profile.priorityMessagingEnabled
+      profile.priorityMessagingEnabled,
+      profile.isActive
     );
     const talentFilterEnabled = await TextModerationService.getFilterEnabled(userId);
     await TextModerationService.maskFlaggedTextSingle(profile, {
@@ -685,7 +688,8 @@ export class TalentProfileService {
     if (!profile) throw new ApiError(404, 'Talent profile not found');
     const featureFlags = await TalentProfileService._featureFlags(
       profile.userId,
-      profile.priorityMessagingEnabled
+      profile.priorityMessagingEnabled,
+      profile.isActive
     );
     const talentFilterEnabled = await TextModerationService.getFilterEnabled(userId);
     await TextModerationService.maskFlaggedTextSingle(profile, {
@@ -1311,12 +1315,12 @@ export class TalentSessionService {
     });
     if (!profile) throw new ApiError(404, 'Talent not found');
 
-    // Talent must have an active subscription with the video_booking feature,
-    // otherwise they cannot confirm the session — don't take the booker's money.
-    const canBook = await SubscriptionService.checkFeatureAccess(
-      profile.userId,
-      FEATURES.VIDEO_BOOKING
-    );
+    // Talent must have switched "Accept Bookings" on and hold an active
+    // subscription with the video_booking feature — otherwise they cannot
+    // confirm the session, so don't take the booker's money.
+    const canBook =
+      profile.isActive &&
+      (await SubscriptionService.checkFeatureAccess(profile.userId, FEATURES.VIDEO_BOOKING));
     if (!canBook) {
       throw new ApiError(403, 'This talent is not currently accepting video bookings');
     }
@@ -2033,12 +2037,11 @@ export class TalentSessionService {
     });
     if (!profile) throw new ApiError(404, 'Talent not found');
 
-    // Talent must have an active subscription with the video_booking feature,
-    // otherwise they cannot confirm the session — don't take the booker's money.
-    const canBook = await SubscriptionService.checkFeatureAccess(
-      profile.userId,
-      FEATURES.VIDEO_BOOKING
-    );
+    // Same gate as _prepareSessionBooking — "Accept Bookings" on, plus the
+    // video_booking subscription feature.
+    const canBook =
+      profile.isActive &&
+      (await SubscriptionService.checkFeatureAccess(profile.userId, FEATURES.VIDEO_BOOKING));
     if (!canBook) {
       throw new ApiError(403, 'This talent is not currently accepting video bookings');
     }
@@ -3984,8 +3987,10 @@ export async function listTalentProfiles({
   page = Math.max(Number(page) || 1, 1);
 
   // ── 1. DB query — filters that can go to SQL ────────────────────────────────
+  // No isActive filter: that's the talent's "Accept Bookings" switch, and a
+  // talent not taking 1:1 bookings is still listed (videoBookingAvailable
+  // below hides their Book button).
   const whereClause = and(
-    eq(talentProfiles.isActive, true),
     isNull(talentProfiles.deletedAt),
     category ? eq(talentProfiles.category, category) : undefined,
     minRating ? gte(talentProfiles.rating, String(minRating)) : undefined
@@ -4095,7 +4100,7 @@ export async function listTalentProfiles({
       ...p,
       priorityMessagingAvailable:
         (feats?.has(FEATURES.PRIORITY_MESSAGING) ?? false) && p.priorityMessagingEnabled !== false,
-      videoBookingAvailable: feats?.has(FEATURES.VIDEO_BOOKING) ?? false,
+      videoBookingAvailable: (feats?.has(FEATURES.VIDEO_BOOKING) ?? false) && p.isActive !== false,
     };
   });
 
@@ -4441,7 +4446,7 @@ export class TalentReviewService {
       title: 'New review received ⭐',
       message: `${reviewer.firstName} ${reviewer.lastName} left you a ${rating}-star review.`,
       type: 'social_update',
-      redirectTo: '/talent-dashboard',
+      redirectTo: '/service-dashboard',
       relatedId: review.id,
       actorUserId: reviewerId,
     });

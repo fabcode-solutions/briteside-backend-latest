@@ -219,6 +219,13 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
       } else {
         await SubscriptionService.handleSubscriptionUpdated(sub);
       }
+    } else if (event.type === 'customer.subscription.trial_will_end') {
+      // BriteSide Plus only — group subscriptions don't offer trials.
+      // Requires trial_will_end enabled for this endpoint in the Stripe Dashboard.
+      const sub = event.data.object;
+      if (sub.metadata?.type !== 'group_subscription') {
+        await SubscriptionService.handleTrialWillEnd(sub);
+      }
     } else if (event.type === 'customer.subscription.deleted') {
       const sub = event.data.object;
       if (sub.metadata?.type === 'group_subscription') {
