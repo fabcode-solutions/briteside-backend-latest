@@ -30,7 +30,7 @@ const RESERVED_USERNAMES = new Set([
   'manage-schedule', 'member-events', 'messages', 'notifications',
   'organizer', 'organizer-portal', 'organizer-presets', 'profile',
   'purchases', 'settings', 'spend-log', 'subscriptions', 'talent',
-  'talent-dashboard', 'user-profile',
+  'talent-dashboard', 'user-profile', 'service-dashboard', 'digital-downloads', 'services',
   // (auth) group
   'forgot-password', 'login', 'register', 'reset-password',
   // Common words worth blocking pre-emptively even without a route today

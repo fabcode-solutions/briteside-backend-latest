@@ -99,7 +99,7 @@ export class ShopRefundService {
       message: `A buyer requested a refund for "${order.productTitleSnapshot}".`,
       type: 'payment',
       relatedId: request.id,
-      redirectTo: '/talent-dashboard?tab=shop',
+      redirectTo: '/service-dashboard?tab=shop',
       metadata: { requestId: request.id, orderId },
     }).catch(err => logger.error(`[ShopRefund] seller notify failed: ${err.message}`));
 
@@ -264,7 +264,7 @@ export class ShopRefundService {
         : `Your refund request for "${title}" was declined.`,
       type: 'purchase_confirmation',
       relatedId: request.id,
-      redirectTo: '/purchases',
+      redirectTo: '/digital-downloads',
       metadata: { requestId: request.id, orderId: request.orderId },
     });
 
@@ -278,7 +278,7 @@ export class ShopRefundService {
           : `An admin declined the refund request for "${title}".`,
         type: 'payment',
         relatedId: request.id,
-        redirectTo: '/talent-dashboard?tab=shop',
+        redirectTo: '/service-dashboard?tab=shop',
         metadata: { requestId: request.id, orderId: request.orderId },
       });
     }

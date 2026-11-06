@@ -596,14 +596,14 @@ export class PriorityMessageService {
     // Native: land on the app's /message tab with a status flag — the app's
     // in-app checkout session (openAuthSessionAsync) waits for exactly this
     // briteside://message URL and reads `status` to know whether payment went
-    // through. Web keeps redirecting to the talent's public pages.
+    // through. Web keeps redirecting to the talent's public /services page.
     const nativeRedirect = isNativePlatform(platform);
     const { successUrl, cancelUrl } = getRedirectUrls(
       platform,
       FRONTEND_URL,
       nativeRedirect
         ? '/message?checkout_session_id={CHECKOUT_SESSION_ID}&status=success'
-        : `/talent/${profile.user.username}`,
+        : `/services/${profile.user.username}`,
       nativeRedirect
         ? '/message?checkout_session_id={CHECKOUT_SESSION_ID}&status=cancelled'
         : `/profile/${profile.user.username}`

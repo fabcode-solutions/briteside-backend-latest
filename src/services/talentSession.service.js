@@ -4446,7 +4446,7 @@ export class TalentReviewService {
       title: 'New review received ⭐',
       message: `${reviewer.firstName} ${reviewer.lastName} left you a ${rating}-star review.`,
       type: 'social_update',
-      redirectTo: '/talent-dashboard',
+      redirectTo: '/service-dashboard',
       relatedId: review.id,
       actorUserId: reviewerId,
     });

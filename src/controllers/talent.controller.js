@@ -896,7 +896,7 @@ export const createSessionTipCheckout = catchAsync(async (req, res) => {
 export const shareTalentProfile = catchAsync(async (req, res) => {
   const { profileId } = req.params;
   const result = await TalentProfileShareService.recordShare(profileId);
-  const shareUrl = `${process.env.FRONTEND_URL || 'https://briteside.app'}/talent/${profileId}`;
+  const shareUrl = `${process.env.FRONTEND_URL || 'https://briteside.app'}/services/${profileId}`;
   res.json({ success: true, data: { ...result, shareUrl } });
 });
 
