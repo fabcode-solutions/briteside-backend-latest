@@ -981,6 +981,20 @@
       "when": 1793182358491,
       "tag": "0147_reflective_stepford_cuckoos",
       "breakpoints": true
+    },
+    {
+      "idx": 148,
+      "version": "7",
+      "when": 1793957956071,
+      "tag": "0148_empty_boomerang",
+      "breakpoints": true
+    },
+    {
+      "idx": 149,
+      "version": "7",
+      "when": 1794307561188,
+      "tag": "0149_certain_longshot",
+      "breakpoints": true
     }
   ]
 }

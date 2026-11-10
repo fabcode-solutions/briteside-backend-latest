@@ -8,12 +8,16 @@ import { users } from '../db/schema/users.js';
 import { eq } from 'drizzle-orm';
 
 // Enforced web-only (see X-Client-Platform check below) — the Expo mobile app
-// has no DOB-collection UI yet, so enforcing this backend-wide would lock out
-// existing mobile/OAuth users with no way to self-resolve. Paths a
-// not-yet-verified web user must still be able to hit: the session check
-// (so the frontend can even learn it needs to show the gate), logout (escape
-// hatch), and the profile update endpoint that lets them submit their DOB.
-const AGE_VERIFICATION_EXEMPT_PATHS = ['/api/auth/session', '/api/auth/logout', '/api/users/profile'];
+// has no Didit flow yet, so enforcing this backend-wide would lock out
+// existing mobile users with no way to self-resolve. Paths a not-yet-verified
+// web user must still be able to hit: the session check (so the frontend can
+// learn it needs to show the gate), logout (escape hatch), and the Didit
+// session/status endpoints that perform the verification.
+const AGE_VERIFICATION_EXEMPT_PATHS = [
+  '/api/auth/session',
+  '/api/auth/logout',
+  '/api/age-verification',
+];
 
 function isAgeVerificationExempt(req, user) {
   const isWebClient = req.headers['x-client-platform'] === 'web';

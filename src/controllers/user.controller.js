@@ -125,14 +125,8 @@ export const updateUserProfile = catchAsync(async (req, res) => {
     });
   }
 
+  // A typed dob no longer verifies age — only an Approved Didit session does.
   const { userInformation, ...userData } = validatedData;
-
-  // dob passed the 18+ refine above — record it as the verification source
-  // (covers OAuth signups, which don't collect dob at registration)
-  if (userData.dob) {
-    userData.isVerifiedAdult = true;
-    userData.ageVerificationSource = 'dob_profile_update';
-  }
 
   // Update users table if there are user fields
   if (Object.keys(userData).length > 0) {

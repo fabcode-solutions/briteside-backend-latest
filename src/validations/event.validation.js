@@ -62,7 +62,12 @@ export const eventFiltersSchema = z.object({
     organizerId: z.string().uuid().optional(),
     // New enhanced filters
     location: z.string().optional(),
-    dateRange: z.enum(['tomorrow', 'this_week', 'this_weekend']).optional(),
+    dateRange: z
+      .union([
+        z.enum(['today', 'tomorrow', 'this_week', 'this_weekend']),
+        z.string().regex(/^\d{4}-\d{2}-\d{2}(_\d{4}-\d{2}-\d{2})?$/),
+      ])
+      .optional(),
     priceFilter: z
       .union([
         z.enum(['free', 'paid']),

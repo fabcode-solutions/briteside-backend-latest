@@ -44,10 +44,47 @@ export function parseCost(cost) {
 
 const categoryName = c => (typeof c === 'string' ? c : c?.name || c?.label || c?.slug);
 
+const isVenuniteHost = u => {
+  try {
+    return /(^|\.)venunite\.com$/i.test(new URL(u).hostname);
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * VenuNite ticket links are often redirects of the form
+ * https://venunite.com/api/tickets/go?event=...&url=<real page>. Returns the
+ * real page, or the link unchanged when it isn't one.
+ */
+export function unwrapVenuniteRedirect(u) {
+  if (!u) return null;
+  try {
+    const parsed = new URL(u);
+    if (isVenuniteHost(u) && parsed.pathname.startsWith('/api/tickets/go')) {
+      const target = parsed.searchParams.get('url');
+      if (target && /^https?:\/\//i.test(target)) return target;
+    }
+  } catch {
+    return null;
+  }
+  return u;
+}
+
+/**
+ * The page where the event is actually hosted (ticket seller or the host's own
+ * site), rather than VenuNite's listing page. VenuNite's own page is only used
+ * when nothing else is available.
+ */
+export function pickVenuniteHostUrl(candidates) {
+  const links = candidates.map(unwrapVenuniteRedirect).filter(Boolean);
+  return links.find(u => !isVenuniteHost(u)) || links[0] || null;
+}
+
 /** Converts a VenuNite event into the shared shape used by the sync service. */
 export function normalizeVenuniteEvent(raw) {
   const venue = raw.venue;
-  const url = raw.ticketUrl || raw.eventUrl || raw.website;
+  const url = pickVenuniteHostUrl([raw.ticketUrl, raw.website, raw.eventUrl]);
   const startDate = raw.startDate ? new Date(raw.startDate) : null;
   if (!raw.id || !raw.title || !url || !venue?.name || !startDate || isNaN(startDate)) {
     return null;
