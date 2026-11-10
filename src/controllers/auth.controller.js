@@ -44,6 +44,7 @@ const toPublicUser = user => {
     isPlus: user?.isBritesidePlus ?? false,
     isEmailVerified: user?.isEmailVerified ?? false,
     isVerifiedAdult: user?.isVerifiedAdult ?? false,
+    ageVerificationStatus: user?.diditSessionStatus ?? null,
     isSuspended,
     suspendedUntil: isSuspended ? until : null,
     suspensionReason: isSuspended ? (user?.suspensionReason ?? null) : null,

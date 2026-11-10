@@ -137,16 +137,24 @@ export const buildDateConditions = (timeFilter, dateRange) => {
 
   /* ------------------ DATE RANGE (API #2) ------------------ */
   if (dateRange) {
-    // ✅ Single date (YYYY-MM-DD)
-    if (dayjs(dateRange, 'YYYY-MM-DD', true).isValid()) {
-      const selectedDay = dayjs(dateRange).startOf('day');
-      const nextDay = selectedDay.add(1, 'day');
+    // Custom date picked by the user: "YYYY-MM-DD" (one day) or
+    // "YYYY-MM-DD_YYYY-MM-DD" (range, inclusive). Matches events that START
+    // within the chosen days, so long-running events that began earlier don't
+    // show up with a start date outside what the user picked.
+    const customMatch = /^(\d{4}-\d{2}-\d{2})(?:_(\d{4}-\d{2}-\d{2}))?$/.exec(dateRange);
+    if (customMatch) {
+      let from = dayjs(customMatch[1]);
+      let to = dayjs(customMatch[2] || customMatch[1]);
+      if (from.isValid() && to.isValid()) {
+        if (to.isBefore(from)) [from, to] = [to, from];
+        const rangeStart = from.startOf('day');
+        const rangeEnd = to.startOf('day').add(1, 'day');
 
-      conditions.push(
-        and(lt(events.startDate, nextDay.toDate()), gte(events.endDate, selectedDay.toDate()))
-      );
-
-      return conditions;
+        conditions.push(
+          and(gte(events.startDate, rangeStart.toDate()), lt(events.startDate, rangeEnd.toDate()))
+        );
+        return conditions;
+      }
     }
 
     switch (dateRange) {

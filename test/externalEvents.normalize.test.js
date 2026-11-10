@@ -118,6 +118,24 @@ describe('normalizeVenuniteEvent', () => {
     expect(e).toMatchObject({ isFree: true, priceMin: 0, priceMax: 0 });
   });
 
+  it("prefers the host's website over VenuNite's own page", () => {
+    const e = normalizeVenuniteEvent(
+      vnEvent({ website: 'https://library.example/event/42' })
+    );
+    expect(e.url).toBe('https://library.example/event/42');
+  });
+
+  it('unwraps VenuNite ticket redirects to the real page', () => {
+    const e = normalizeVenuniteEvent(
+      vnEvent({
+        website: 'https://bar.example/shows/1',
+        ticketUrl:
+          'https://venunite.com/api/tickets/go?event=x&url=https%3A%2F%2Fwww.eventbrite.com%2Fe%2Fx-123&placement=data_api_events',
+      })
+    );
+    expect(e.url).toBe('https://www.eventbrite.com/e/x-123');
+  });
+
   it('drops events without a link or venue', () => {
     expect(normalizeVenuniteEvent(vnEvent({ eventUrl: null }))).toBeNull();
     expect(normalizeVenuniteEvent(vnEvent({ venue: null }))).toBeNull();

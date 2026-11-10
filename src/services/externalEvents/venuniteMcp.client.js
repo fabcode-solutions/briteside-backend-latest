@@ -1,5 +1,5 @@
 import logger from '../../config/logger.js';
-import { parseCost } from './venunite.client.js';
+import { parseCost, pickVenuniteHostUrl } from './venunite.client.js';
 
 // VenuNite's free MCP server, for EVALUATION ONLY. Their terms allow free MCP
 // for "personal discovery ... and product evaluation"; production imports and
@@ -85,8 +85,9 @@ function createSession(apiKey) {
 /** Converts an MCP search_events result into the shared shape used by the sync service. */
 export function normalizeVenuniteMcpEvent(raw) {
   const venue = raw.venue;
-  // Their terms require keeping the published source/ticket link.
-  const url = raw.url || raw.source_url || raw.event_url;
+  // Their terms require keeping the published source/ticket link. Prefer the
+  // host's page; event_url (VenuNite's own page) is only a last resort.
+  const url = pickVenuniteHostUrl([raw.url, raw.source_url, raw.event_url]);
   const startDate = raw.start ? new Date(raw.start) : null;
   if (!raw.event_id || !raw.title || !url || !venue?.name || !startDate || isNaN(startDate)) {
     return null;

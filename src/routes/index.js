@@ -45,6 +45,7 @@ import importRoute from './import.route.js';
 import shopRoute from './shop.route.js';
 import impersonationRoutes from './impersonation.routes.js';
 import inviteRoute from './invite.route.js';
+import ageVerificationRoute from './ageVerification.route.js';
 const router = Router();
 
 // contact form (public)
@@ -71,6 +72,9 @@ router.use('/reservations', reservationRoutes);
 
 // user routes
 router.use('/users', authMiddleware, userRoutes);
+
+// age verification (Didit)
+router.use('/age-verification', authMiddleware, ageVerificationRoute);
 
 // event routes
 router.use('/events', eventRoute);

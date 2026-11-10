@@ -80,11 +80,15 @@ export const users = pgTable(
     isSuspended: boolean('is_suspended').default(false),
     suspendedUntil: timestamp('suspended_until', { withTimezone: true }),
     suspensionReason: text('suspension_reason'),
-    // Age verification (18+ policy) — set from dob at registration today;
-    // reserved so a future native age-signal check (mobile) can populate it
-    // without a schema change.
+    // Age verification (18+ policy) — set only by an Approved Didit session
+    // (ageVerificationSource = 'didit'). Older rows may carry the legacy
+    // 'dob_registration' / 'dob_profile_update' sources.
     isVerifiedAdult: boolean('is_verified_adult').default(false),
     ageVerificationSource: varchar('age_verification_source', { length: 50 }).default('pending'),
+    // Latest Didit verification session for this user + its last known status
+    // ('Not Started', 'In Progress', 'In Review', 'Approved', 'Declined', …).
+    diditSessionId: varchar('didit_session_id', { length: 64 }),
+    diditSessionStatus: varchar('didit_session_status', { length: 30 }),
     // Generated column — stored tsvector, recomputed by PG on every insert/update.
     // Searched via the GIN index below; never read directly by the app.
     userSearch: tsvector('user_search').generatedAlwaysAs(

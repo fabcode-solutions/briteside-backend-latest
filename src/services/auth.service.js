@@ -100,9 +100,11 @@ export async function registerUser(data, { allowEmptyEmail = false } = {}) {
     username,
     dob: new Date(dob).toDateString(),
     name: `${firstName} ${lastName}`,
-    // dobSchema in auth.route.js already enforced 18+ before this ran
-    isVerifiedAdult: true,
-    ageVerificationSource: 'dob_registration',
+    // dobSchema in auth.route.js rejects self-declared under-18s, but a typed
+    // DOB isn't proof of age — the user still verifies through Didit
+    // (see didit.service.js) before the web gate lets them in.
+    isVerifiedAdult: false,
+    ageVerificationSource: 'pending',
   });
 
   // Create required user information if provided

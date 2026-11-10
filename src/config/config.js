@@ -114,6 +114,13 @@ const EnvVariables = z.object({
   // Cover used when a listing has no image (events need at least one).
   // Listings without an image are skipped when this is unset.
   EXTERNAL_EVENTS_DEFAULT_IMAGE: z.string().optional(),
+
+  // Didit — age verification (web gate). Endpoints answer 503 until the
+  // API key + workflow are set.
+  DIDIT_API_KEY: z.string().optional(),
+  DIDIT_WORKFLOW_ID: z.string().optional(),
+  DIDIT_WEBHOOK_SECRET: z.string().optional(),
+  DIDIT_API_BASE_URL: z.string().optional().default('https://verification.didit.me'),
 });
 
 let envVars;
@@ -238,6 +245,13 @@ const env = {
     organizerId: envVars.EXTERNAL_EVENTS_ORGANIZER_ID,
     defaultImage: envVars.EXTERNAL_EVENTS_DEFAULT_IMAGE,
     configured: !!(envVars.TICKETMASTER_API_KEY || envVars.VENUNITE_API_KEY),
+  },
+  didit: {
+    apiKey: envVars.DIDIT_API_KEY,
+    workflowId: envVars.DIDIT_WORKFLOW_ID,
+    webhookSecret: envVars.DIDIT_WEBHOOK_SECRET,
+    apiBaseUrl: envVars.DIDIT_API_BASE_URL.replace(/\/+$/, ''),
+    configured: !!(envVars.DIDIT_API_KEY && envVars.DIDIT_WORKFLOW_ID),
   },
 };
 
