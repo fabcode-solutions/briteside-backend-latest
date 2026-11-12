@@ -7,6 +7,7 @@ import {
   GroupDiscussionNotificationService,
   GroupInvitationService,
 } from '../services/group.service.js';
+import { OnboardingService } from '../services/onboarding.service.js';
 import ApiError from '../utils/api-error.js';
 import { catchAsync } from '../utils/catch-async.js';
 
@@ -43,6 +44,13 @@ export const getGroups = catchAsync(async (req, res) => {
     isFree: req.query.isFree,
     priceRange: req.query.priceRange,
   };
+
+  // "For you": rank groups in the user's setup-flow categories first. Uses the
+  // authenticated user only (never the userId query param). Skipped when a
+  // category is filtered explicitly or the caller opts out (?forYou=false).
+  if (req.user?.id && !filters.categoryId && req.query.forYou !== 'false') {
+    filters.preferredCategoryIds = await OnboardingService.getGroupCategoryIds(req.user.id);
+  }
 
   const result = await GroupService.getGroups(filters, req.query.userId);
 

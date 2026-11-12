@@ -1,5 +1,5 @@
 import express from 'express';
-import { authMiddleware } from '../middlewares/auth.middleware.js';
+import { authMiddleware, optionalAuthMiddleware } from '../middlewares/auth.middleware.js';
 import { checkBlockedUrl } from '../middlewares/checkBlockedUrl.js';
 import {
   createGroups,
@@ -106,7 +106,8 @@ import groupResourceRouter from './groupResource.route.js';
 const router = express.Router();
 
 // Public routes
-router.get('/', getGroups);
+// Optional auth: a logged-in user's setup-flow group interests rank first.
+router.get('/', optionalAuthMiddleware, getGroups);
 router.get('/categories', getGroupCategories);
 router.get('/getGroupsInfo/:slug', getGroupsInfo);
 router.get('/groupLocations', getGroupsLocation);

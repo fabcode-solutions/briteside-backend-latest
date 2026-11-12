@@ -378,8 +378,14 @@ export class GroupService {
       city,
       isFree,
       priceRange,
+      preferredCategoryIds = [],
     } = filters || {};
     const offset = (page - 1) * limit;
+
+    // Groups in the user's setup-flow categories ("for you") rank first.
+    const matchesInterests = preferredCategoryIds.length
+      ? inArray(groups.categoryId, preferredCategoryIds)
+      : sql`false`;
 
     let conditions = [];
 
@@ -433,6 +439,7 @@ export class GroupService {
         categoryName: groupCategories.name,
         creatorFirstName: users.firstName,
         creatorLastName: users.lastName,
+        matchesInterests: sql`(${matchesInterests})`,
         nextEvent: sql`(
           SELECT json_build_object(
             'id', e.id,
@@ -454,7 +461,7 @@ export class GroupService {
       .leftJoin(groupCategories, eq(groups.categoryId, groupCategories.id))
       .leftJoin(users, eq(groups.createdBy, users.id))
       .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(groups.createdAt))
+      .orderBy(sql`CASE WHEN ${matchesInterests} THEN 0 ELSE 1 END`, desc(groups.createdAt))
       .limit(limit)
       .offset(offset);
 
@@ -484,6 +491,7 @@ export class GroupService {
       deletedAt: group.deletedAt,
       category: group.categoryName ? { id: group.categoryId, name: group.categoryName } : null,
       nextEvent: group.nextEvent || null,
+      matchesInterests: !!group.matchesInterests,
     }));
 
     if (userId && groupsResult.length > 0) {
