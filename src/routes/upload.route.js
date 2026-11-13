@@ -1,7 +1,13 @@
 import express from 'express';
 import multer from 'multer';
 import { authMiddleware } from '../middlewares/auth.middleware.js';
-import { uploadFile, deleteFile, getUserFiles } from '../controllers/upload.controller.js';
+import {
+  uploadFile,
+  deleteFile,
+  getUserFiles,
+  createDirectUpload,
+  completeDirectUpload,
+} from '../controllers/upload.controller.js';
 import { bulkInviteFromCsv } from '../controllers/bulkMail.controller.js';
 import { bulkInviteLimiter } from '../middlewares/rateLimiter.js';
 import ApiError from '../utils/api-error.js';
@@ -132,6 +138,9 @@ router.use(authMiddleware);
 router.get('/my-files', getUserFiles);
 router.post('/', upload.single('file'), handleMulterError, uploadFile);
 router.post('/multiple', upload.array('files', 10), handleMulterError, uploadFile);
+// Large media straight to S3 (no request-size limit) — see upload.controller.js
+router.post('/direct', createDirectUpload);
+router.post('/direct/complete', completeDirectUpload);
 router.delete('/:fileId', deleteFile);
 
 // Bulk invite: upload CSV of emails → send templated SES emails to all recipients

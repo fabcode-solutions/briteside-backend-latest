@@ -37,12 +37,10 @@ const recurrenceRuleSchema = z
     }),
   ])
   .refine(
-    data => {
-      const [sh, sm] = data.startTime.split(':').map(Number);
-      const [eh, em] = data.endTime.split(':').map(Number);
-      return eh * 60 + em > sh * 60 + sm;
-    },
-    { message: 'endTime must be after startTime' }
+    // An end time earlier than the start time is an overnight session (it ends
+    // the next day); only an identical start and end time is invalid.
+    data => data.startTime !== data.endTime,
+    { message: 'endTime must be different from startTime' }
   );
 
 // Filter validation schema for discover and my events

@@ -12,7 +12,8 @@
  *   dayOfMonth  : number          – monthly only: 1–31
  *   startDate   : string          – 'YYYY-MM-DD'
  *   startTime   : string          – 'HH:MM'  (24-hour)
- *   endTime     : string          – 'HH:MM'  (24-hour, must be > startTime)
+ *   endTime     : string          – 'HH:MM'  (24-hour; at or before startTime =
+ *                                   ends the next day, e.g. 22:00 → 02:00)
  *   occurrences : number          – total sessions to generate (1–365)
  * }
  *
@@ -63,6 +64,9 @@ function buildSession(dayDate, startTimeStr, endTimeStr) {
 
   const endDt = new Date(dayDate);
   endDt.setUTCHours(eh, em, 0, 0);
+  // An end time at or before the start time ends on the next day
+  // (e.g. 22:00 → 02:00 is a 4-hour overnight session).
+  if (endDt <= startDt) endDt.setUTCDate(endDt.getUTCDate() + 1);
 
   return {
     date: new Date(

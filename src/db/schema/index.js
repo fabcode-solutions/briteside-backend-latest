@@ -42,6 +42,7 @@ export * from './payments.js';
 
 // Community groups
 export * from './groups.js';
+export * from './onboardingPreferences.js';
 
 // Media and directions
 export * from './media.js';

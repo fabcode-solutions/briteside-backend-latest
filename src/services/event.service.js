@@ -197,9 +197,11 @@ export class EventService {
         await OrganizerPresetService.validatePresetOwnership(organizerId, presetId);
       }
 
-      // Resolve sessions — either expand the recurring rule or use the direct array
+      // Resolve sessions — prefer the concrete array (the web forms expand a
+      // recurring series in the organizer's own time zone and send it along
+      // with the rule); only expand the rule here when no sessions came with it.
       let resolvedSessions = sessions;
-      if (recurrenceRule) {
+      if (recurrenceRule && !(Array.isArray(sessions) && sessions.length > 0)) {
         resolvedSessions = generateOccurrences(recurrenceRule);
       }
 
@@ -255,7 +257,7 @@ export class EventService {
         presetId: presetId || null,
         showLikeCount: rest.showLikeCount !== undefined ? rest.showLikeCount : true,
         showTicketsRemaining:
-          rest.showTicketsRemaining !== undefined ? rest.showTicketsRemaining : true,
+          rest.showTicketsRemaining !== undefined ? rest.showTicketsRemaining : false,
         clientRequestId: rest.clientRequestId || null,
         // Organizer "Tax Tool" opt-in — TAX_STRATEGY.md §2.2/§2.3, NOT
         // legally reviewed. Only meaningful in non-Marketplace-Facilitator
@@ -877,7 +879,16 @@ export class EventService {
         state,
         eventMode,
         distance,
+        preferredCategoryIds = [],
       } = filters;
+
+      // Events in the user's setup-flow categories ("for you") rank first.
+      const matchesInterests = preferredCategoryIds.length
+        ? sql`(${events.categoryIds}::jsonb ?| ARRAY[${sql.join(
+            preferredCategoryIds.map(id => sql`${id}`),
+            sql`, `
+          )}]::text[])`
+        : sql`false`;
 
       // Local variables to hold coordinates for distance logic
       let { lat, lng } = filters;
@@ -986,6 +997,7 @@ export class EventService {
             group: groups,
             isLiked: sql`CASE WHEN ${eventLikes.id} IS NOT NULL THEN true ELSE false END`,
             nextSessionStart,
+            matchesInterests,
           })
           .from(events)
           .leftJoin(venues, eq(events.venueId, venues.id))
@@ -1000,8 +1012,10 @@ export class EventService {
           // Sort by event date: events that haven't ended yet come first,
           // soonest (next session) first; past events (only present for
           // timeFilter 'all') follow, most recent first.
+          // Within upcoming events, ones matching the user's interests come first.
           .orderBy(
             sql`CASE WHEN ${isUpcoming} THEN 0 ELSE 1 END`,
+            sql`CASE WHEN ${matchesInterests} THEN 0 ELSE 1 END`,
             sql`CASE WHEN ${isUpcoming} THEN COALESCE(${nextSessionStart}, ${events.startDate}) END ASC`,
             desc(events.startDate),
             desc(events.createdAt)
@@ -1024,6 +1038,7 @@ export class EventService {
         group: row.group,
         isLiked: !!row.isLiked,
         nextSessionStart: row.nextSessionStart ?? null,
+        matchesInterests: !!row.matchesInterests,
       }));
 
       // 6. Fetch and attach categories to all events

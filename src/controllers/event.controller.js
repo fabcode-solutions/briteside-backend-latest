@@ -1,5 +1,6 @@
 import { EventService } from '../services/event.service.js';
 import { OrganizerService } from '../services/organizer.service.js';
+import { OnboardingService } from '../services/onboarding.service.js';
 import ApiError from '../utils/api-error.js';
 import { catchAsync } from '../utils/catch-async.js';
 
@@ -44,6 +45,11 @@ export const getDiscoverEvents = catchAsync(async (req, res) => {
     distance: req.query.distance,
   };
   const userId = req.user?.id ?? null;
+  // "For you": rank events in the user's setup-flow categories first. Skipped
+  // when the user filters by a category explicitly or opts out (?forYou=false).
+  if (userId && !filters.categoryId && req.query.forYou !== 'false') {
+    filters.preferredCategoryIds = await OnboardingService.getEventCategoryIds(userId);
+  }
   const result = await EventService.getDiscoverEvents(filters, userId);
 
   res.json({

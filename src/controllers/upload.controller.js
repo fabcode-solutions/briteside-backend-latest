@@ -182,3 +182,31 @@ export const getUserFiles = catchAsync(async (req, res) => {
     data: result,
   });
 });
+
+// ── Direct-to-S3 uploads (large media, e.g. cover videos) ─────────────────
+// 1. POST /upload/direct            → signed S3 PUT URL
+// 2. browser PUTs the file to that URL
+// 3. POST /upload/direct/complete   → verified, tracked, moderated; same
+//                                     response shape as POST /upload
+export const createDirectUpload = catchAsync(async (req, res) => {
+  const { filename, contentType, size, folder = 'general' } = req.body || {};
+  validateFolder(folder);
+  const result = await UploadService.createDirectUpload({
+    userId: req.user?.id,
+    filename,
+    contentType,
+    size,
+    folder,
+  });
+  res.json({ success: true, data: result });
+});
+
+export const completeDirectUpload = catchAsync(async (req, res) => {
+  const { s3Key, originalName } = req.body || {};
+  const result = await UploadService.completeDirectUpload({
+    userId: req.user?.id,
+    s3Key,
+    originalName,
+  });
+  res.json({ success: true, message: 'File uploaded successfully', data: result });
+});

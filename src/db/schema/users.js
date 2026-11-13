@@ -89,6 +89,9 @@ export const users = pgTable(
     // ('Not Started', 'In Progress', 'In Review', 'Approved', 'Declined', …).
     diditSessionId: varchar('didit_session_id', { length: 64 }),
     diditSessionStatus: varchar('didit_session_status', { length: 30 }),
+    // Set when the user finishes the app setup flow (event + group category
+    // interests). Null → the web app shows the setup screens.
+    onboardingCompletedAt: timestamp('onboarding_completed_at', { withTimezone: true }),
     // Generated column — stored tsvector, recomputed by PG on every insert/update.
     // Searched via the GIN index below; never read directly by the app.
     userSearch: tsvector('user_search').generatedAlwaysAs(

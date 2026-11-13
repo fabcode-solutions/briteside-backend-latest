@@ -995,6 +995,13 @@
       "when": 1794307561188,
       "tag": "0149_certain_longshot",
       "breakpoints": true
+    },
+    {
+      "idx": 150,
+      "version": "7",
+      "when": 1794460367586,
+      "tag": "0150_glossy_blindfold",
+      "breakpoints": true
     }
   ]
 }
