@@ -20,6 +20,7 @@ import { STATE_NAME_TO_ABBR } from '../../lib/tax/usStates.js';
 import { fetchTicketmasterEvents } from './ticketmaster.client.js';
 import { fetchVenuniteEvents } from './venunite.client.js';
 import { fetchVenuniteMcpEvents } from './venuniteMcp.client.js';
+import { cleanDescription, createDescriptionFetcher, mayBeIncomplete } from './pageDescription.js';
 
 const SYSTEM_USER_EMAIL = 'external-events@system.briteside.local';
 const STATE_ABBR_TO_NAME = Object.fromEntries(
@@ -121,7 +122,12 @@ function createImageChecker() {
   };
 }
 
-// Most Ticketmaster listings carry no info text — give the About section
+// Matches the fallback text describe() writes below, so a later run can tell
+// it apart from a real description and try the listing page again.
+const GENERATED_DESCRIPTION = /^[^\n]+ at [^\n]+\. Tickets are sold by [^\n]+\.$/;
+const isGeneratedDescription = text => !text?.trim() || GENERATED_DESCRIPTION.test(text.trim());
+
+// Many listings carry no description text — give the About section
 // something better than blank, e.g. "Comedy at Ridgefield Playhouse in
 // Ridgefield, CT. Tickets are sold by Ticketmaster."
 function describe(item) {
@@ -500,6 +506,14 @@ async function upsertShow(performances, venueId, ctx) {
   const existing = await findShowEvent(source, key, performances.map(p => p.externalId));
   const show = buildShow(allDuplicates ? performances : kept, ctx.now);
   show.imageUrl = await ctx.checkImage(show.imageUrl);
+  // No description in the feed, or only a cut-off excerpt → the listing
+  // page's (or one kept from an earlier run) when it's fuller, before
+  // describe() falls back to generic text.
+  show.description = cleanDescription(show.description);
+  const fromPage = ctx.pageDescriptions.get(key);
+  if (fromPage && (!show.description || fromPage.length > show.description.length)) {
+    show.description = fromPage;
+  }
 
   if (existing) {
     await updateShow(existing, show, key, venueId, ctx, allDuplicates);
@@ -532,6 +546,7 @@ async function syncPerformances(performances, ctx, stats) {
   }
 
   stats.shows += shows.size;
+  ctx.pageDescriptions = await loadPageDescriptions(shows, ctx);
   for (const { venueId, performances: group } of shows.values()) {
     try {
       stats[await upsertShow(group, venueId, ctx)]++;
@@ -544,6 +559,56 @@ async function syncPerformances(performances, ctx, stats) {
       });
     }
   }
+}
+
+/**
+ * Descriptions for shows whose feed has none, keyed by show key: a real one
+ * already saved by an earlier run is reused; otherwise the listing page is
+ * read (in parallel, within the per-run fetch limit). Ticketmaster pages are
+ * never fetched — their terms forbid it.
+ */
+async function loadPageDescriptions(shows, ctx) {
+  const found = new Map();
+  const needed = [];
+  for (const [key, { performances }] of shows) {
+    const first = performances[0];
+    if (first.source === 'ticketmaster') continue;
+    // A full description in the feed needs nothing; an excerpt ("…", "[…]")
+    // or a one-line summary may have a fuller version on the page.
+    const feed = performances.find(p => p.description?.trim())?.description;
+    if (feed && !mayBeIncomplete(cleanDescription(feed))) continue;
+    needed.push({ key, source: first.source, url: buildShow(performances, ctx.now).url, title: first.title });
+  }
+  if (!needed.length) return found;
+
+  for (let i = 0; i < needed.length; i += 500) {
+    const chunk = needed.slice(i, i + 500);
+    const rows = await db
+      .select({ externalId: events.externalId, description: events.description })
+      .from(events)
+      .where(
+        and(
+          eq(events.source, chunk[0].source),
+          inArray(events.externalId, chunk.map(n => n.key))
+        )
+      );
+    for (const row of rows) {
+      // Reuse a full description saved earlier; a generic, cut-off or very
+      // short one is checked against the page again.
+      const saved = cleanDescription(row.description);
+      if (!isGeneratedDescription(saved) && !mayBeIncomplete(saved)) found.set(row.externalId, saved);
+    }
+  }
+
+  await Promise.all(
+    needed
+      .filter(n => !found.has(n.key))
+      .map(async n => {
+        const description = await ctx.fetchDescription(n.url, n.title);
+        if (description) found.set(n.key, description);
+      })
+  );
+  return found;
 }
 
 /**
@@ -610,6 +675,9 @@ export async function syncExternalEvents({ sources, maxPages } = {}) {
     const resolveCategories = await loadCategoryResolver();
     const resolveVenue = createVenueResolver(organizer.userId);
     const checkImage = createImageChecker();
+    const fetchDescription = createDescriptionFetcher({
+      limit: env.externalEvents.descriptionFetchLimit,
+    });
     const summary = {};
 
     for (const source of SOURCES) {
@@ -645,6 +713,8 @@ export async function syncExternalEvents({ sources, maxPages } = {}) {
           resolveVenue,
           resolveCategories,
           checkImage,
+          fetchDescription,
+          pageDescriptions: new Map(),
           complete: result.complete,
           now: new Date(),
         };
@@ -660,6 +730,8 @@ export async function syncExternalEvents({ sources, maxPages } = {}) {
       logger.info('[externalEvents] Source synced', { source: source.name, complete, ...stats });
     }
 
+    // Listing pages read for missing descriptions this run.
+    summary.pageDescriptions = { ...fetchDescription.counts };
     return summary;
   } finally {
     syncInProgress = false;

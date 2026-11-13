@@ -1,4 +1,11 @@
-import { S3Client, PutObjectCommand, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectsCommand,
+  HeadObjectCommand,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import crypto from 'crypto';
 import path from 'path';
 import { and, eq, sql } from 'drizzle-orm';
 import ApiError from '../utils/api-error.js';
@@ -22,6 +29,20 @@ const s3Client = new S3Client({
 
 // Configuration constants
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+
+// Direct-to-S3 uploads (large media). Generous ceiling only as a safety net —
+// cover videos are limited by length (30s) in the app, not by size.
+const DIRECT_UPLOAD_MAX_BYTES = 2 * 1024 * 1024 * 1024; // 2GB
+const DIRECT_UPLOAD_URL_TTL_SECONDS = 30 * 60;
+// Videos: mp4/mov only — the formats Stream moderation can analyze.
+const DIRECT_UPLOAD_TYPES = new Set([
+  'video/mp4',
+  'video/quicktime',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+]);
 const DANGEROUS_EXTENSIONS = ['.exe', '.bat', '.cmd', '.scr', '.vbs', '.jar'];
 
 export class UploadService {
@@ -401,6 +422,162 @@ export class UploadService {
     } catch (error) {
       logger.error('Error fetching user files:', error);
       throw new ApiError(500, `Failed to fetch files: ${error.message}`);
+    }
+  }
+
+  // ── Direct-to-S3 uploads ────────────────────────────────────────────────
+  // Large media (videos) skip the API server: the browser PUTs the file
+  // straight to S3 with a short-lived signed URL, then calls complete() so it
+  // is tracked and moderated exactly like a regular upload. No request-body
+  // or proxy size limit applies, so file size stops mattering.
+
+  /**
+   * Signed PUT URL for one file.
+   * @returns {{ uploadUrl: string, s3Key: string, url: string, expiresIn: number }}
+   */
+  static async createDirectUpload({ userId, filename, contentType, size, folder = 'general' }) {
+    if (!userId) throw new ApiError(401, 'Authentication required');
+    if (!filename || !contentType) {
+      throw new ApiError(400, 'filename and contentType are required');
+    }
+    if (!DIRECT_UPLOAD_TYPES.has(contentType)) {
+      throw new ApiError(
+        400,
+        'Only MP4 and MOV videos, and JPEG, PNG, WebP or GIF images can be uploaded this way'
+      );
+    }
+    if (size != null && (!Number.isFinite(Number(size)) || Number(size) <= 0)) {
+      throw new ApiError(400, 'Invalid file size');
+    }
+    if (Number(size) > DIRECT_UPLOAD_MAX_BYTES) {
+      throw new ApiError(400, 'File is too large to upload');
+    }
+    const extension = path.extname(filename).toLowerCase();
+    if (DANGEROUS_EXTENSIONS.includes(extension)) {
+      throw new ApiError(400, 'File type not allowed');
+    }
+
+    const sanitizedFolder = folder
+      .replace(/[^a-zA-Z0-9/_-]/g, '_')
+      .replace(/\/{2,}/g, '/')
+      .replace(/^\/|\/$/g, '');
+    const base = this.sanitizeFilename(path.basename(filename, path.extname(filename)));
+    const unique = `${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+    // Same layout as uploadFile(): folder/userId/filename
+    const s3Key = `${sanitizedFolder}/${userId}/${base}_${unique}${extension}`;
+
+    const command = new PutObjectCommand({
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key: s3Key,
+      ContentType: contentType,
+      ACL: 'public-read',
+      Metadata: {
+        'original-name': encodeURIComponent(filename),
+        'uploaded-by': String(userId),
+        'upload-timestamp': new Date().toISOString(),
+      },
+    });
+    const uploadUrl = await getSignedUrl(s3Client, command, {
+      expiresIn: DIRECT_UPLOAD_URL_TTL_SECONDS,
+    });
+
+    return {
+      uploadUrl,
+      s3Key,
+      url: FileManagementService.buildPublicUrl(s3Key),
+      expiresIn: DIRECT_UPLOAD_URL_TTL_SECONDS,
+    };
+  }
+
+  /**
+   * Confirms a direct upload landed in S3, then tracks and moderates it.
+   * Returns the same shape as uploadFile().
+   */
+  static async completeDirectUpload({ userId, s3Key, originalName }) {
+    if (!userId) throw new ApiError(401, 'Authentication required');
+    // Only keys issued to this user (folder/userId/…) can be completed.
+    if (typeof s3Key !== 'string' || !s3Key.includes(`/${userId}/`) || s3Key.includes('..')) {
+      throw new ApiError(403, 'Not allowed to complete this upload');
+    }
+
+    let head;
+    try {
+      head = await s3Client.send(
+        new HeadObjectCommand({ Bucket: process.env.AWS_S3_BUCKET, Key: s3Key })
+      );
+    } catch (error) {
+      if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) {
+        throw new ApiError(400, 'Upload not found — the file did not reach storage');
+      }
+      throw new ApiError(500, `Could not verify upload: ${error.message}`);
+    }
+
+    const size = Number(head.ContentLength ?? 0);
+    const mimetype = head.ContentType || 'application/octet-stream';
+    if (size <= 0 || size > DIRECT_UPLOAD_MAX_BYTES || !DIRECT_UPLOAD_TYPES.has(mimetype)) {
+      await s3Client
+        .send(
+          new DeleteObjectsCommand({
+            Bucket: process.env.AWS_S3_BUCKET,
+            Delete: { Objects: [{ Key: s3Key }] },
+          })
+        )
+        .catch(() => {});
+      throw new ApiError(400, 'Uploaded file was rejected (empty, too large or wrong type)');
+    }
+
+    const publicUrl = FileManagementService.buildPublicUrl(s3Key);
+    const extension = path.extname(s3Key);
+    const name = originalName || path.basename(s3Key);
+    // The bytes never pass through the API, so the dedupe hash is derived
+    // from the (unique) key instead of the content.
+    const fileHash = crypto.createHash('sha256').update(`direct:${s3Key}`).digest('hex');
+
+    const trackedFile = await FileManagementService.createOrIncrementReference({
+      fileHash,
+      s3Key,
+      s3Bucket: process.env.AWS_S3_BUCKET,
+      url: publicUrl,
+      mimetype,
+      size,
+      folder: s3Key.split(`/${userId}/`)[0],
+      originalName: name,
+      extension,
+      properties: { directUpload: true },
+      uploadedBy: userId,
+    });
+
+    await this.enqueueModeration(trackedFile, publicUrl, userId);
+    logger.info(`Direct upload completed: ${s3Key} (${size} bytes)`);
+
+    return {
+      filename: path.basename(s3Key),
+      originalName: name,
+      size,
+      mimetype,
+      mediaType: trackedFile.mediaType,
+      extension: trackedFile.extension,
+      properties: trackedFile.properties,
+      url: publicUrl,
+      s3Key,
+      fileTrackingId: trackedFile.id,
+      isDuplicate: false,
+    };
+  }
+
+  /** Same async moderation + copyright scan regular uploads get. */
+  static async enqueueModeration(trackedFile, publicUrl, userId) {
+    if (!userId || (trackedFile.mediaType !== 'image' && trackedFile.mediaType !== 'video')) return;
+    const isVideo = trackedFile.mediaType === 'video';
+    await MediaModerationService.enqueue({
+      entityType: isVideo ? MEDIA_ENTITY.MEDIA_VIDEO : MEDIA_ENTITY.MEDIA_IMAGE,
+      entityId: trackedFile.id,
+      userId,
+      imageUrls: isVideo ? [] : [publicUrl],
+      videoUrls: isVideo ? [publicUrl] : [],
+    });
+    if (isVideo) {
+      await CopyrightScanService.enqueue({ mediaId: trackedFile.id, userId, url: publicUrl });
     }
   }
 }

@@ -114,6 +114,12 @@ const EnvVariables = z.object({
   // Cover used when a listing has no image (events need at least one).
   // Listings without an image are skipped when this is unset.
   EXTERNAL_EVENTS_DEFAULT_IMAGE: z.string().optional(),
+  // Max listing pages fetched per sync run to read a missing event
+  // description (0 turns it off). Events not reached get theirs next run.
+  EXTERNAL_EVENTS_DESCRIPTION_FETCH_LIMIT: z.preprocess(
+    a => (a === undefined || a === '' ? undefined : +a),
+    z.number().int().min(0).optional().default(400)
+  ),
 
   // Didit — age verification (web gate). Endpoints answer 503 until the
   // API key + workflow are set.
@@ -244,6 +250,7 @@ const env = {
     daysAhead: envVars.EXTERNAL_EVENTS_DAYS_AHEAD,
     organizerId: envVars.EXTERNAL_EVENTS_ORGANIZER_ID,
     defaultImage: envVars.EXTERNAL_EVENTS_DEFAULT_IMAGE,
+    descriptionFetchLimit: envVars.EXTERNAL_EVENTS_DESCRIPTION_FETCH_LIMIT,
     configured: !!(envVars.TICKETMASTER_API_KEY || envVars.VENUNITE_API_KEY),
   },
   didit: {

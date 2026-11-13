@@ -73,12 +73,13 @@ export function unwrapVenuniteRedirect(u) {
 
 /**
  * The page where the event is actually hosted (ticket seller or the host's own
- * site), rather than VenuNite's listing page. VenuNite's own page is only used
- * when nothing else is available.
+ * site). Never VenuNite's own listing page: users must land where the event is
+ * hosted, so an event with no host link returns null and isn't imported (an
+ * already-imported one is unlisted by the next complete sync).
  */
 export function pickVenuniteHostUrl(candidates) {
   const links = candidates.map(unwrapVenuniteRedirect).filter(Boolean);
-  return links.find(u => !isVenuniteHost(u)) || links[0] || null;
+  return links.find(u => !isVenuniteHost(u)) || null;
 }
 
 /** Converts a VenuNite event into the shared shape used by the sync service. */

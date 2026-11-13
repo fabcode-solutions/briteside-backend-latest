@@ -197,9 +197,11 @@ export class EventService {
         await OrganizerPresetService.validatePresetOwnership(organizerId, presetId);
       }
 
-      // Resolve sessions — either expand the recurring rule or use the direct array
+      // Resolve sessions — prefer the concrete array (the web forms expand a
+      // recurring series in the organizer's own time zone and send it along
+      // with the rule); only expand the rule here when no sessions came with it.
       let resolvedSessions = sessions;
-      if (recurrenceRule) {
+      if (recurrenceRule && !(Array.isArray(sessions) && sessions.length > 0)) {
         resolvedSessions = generateOccurrences(recurrenceRule);
       }
 
@@ -255,7 +257,7 @@ export class EventService {
         presetId: presetId || null,
         showLikeCount: rest.showLikeCount !== undefined ? rest.showLikeCount : true,
         showTicketsRemaining:
-          rest.showTicketsRemaining !== undefined ? rest.showTicketsRemaining : true,
+          rest.showTicketsRemaining !== undefined ? rest.showTicketsRemaining : false,
         clientRequestId: rest.clientRequestId || null,
         // Organizer "Tax Tool" opt-in — TAX_STRATEGY.md §2.2/§2.3, NOT
         // legally reviewed. Only meaningful in non-Marketplace-Facilitator
