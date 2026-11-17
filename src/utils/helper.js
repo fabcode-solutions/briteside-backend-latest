@@ -177,7 +177,8 @@ export function buildDoorSalesUrl(token) {
   if (!token || typeof token !== 'string') {
     throw new Error('Invalid door sales token');
   }
-  const frontendBase = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://gokyro.com';
+  const frontendBase =
+    process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://www.briteside.app';
   // const frontendBase =  'http://localhost:3000';
   return `${frontendBase.replace(/\/+$/, '')}/door-sale/${encodeURIComponent(token)}`;
 }
@@ -191,7 +192,8 @@ export function buildTicketBundleUrl(orderId) {
   if (!orderId || typeof orderId !== 'string') {
     throw new Error('Invalid order ID');
   }
-  const frontendBase = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://gokyro.com';
+  const frontendBase =
+    process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://www.briteside.app';
   return `${frontendBase.replace(/\/+$/, '')}/door-sale/success?orderId=${encodeURIComponent(orderId)}`;
 }
 
@@ -204,7 +206,8 @@ export function buildTicketUrl(ticketCode) {
   if (!ticketCode || typeof ticketCode !== 'string') {
     throw new Error('Invalid ticket code');
   }
-  const frontendBase = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://gokyro.com';
+  const frontendBase =
+    process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://www.briteside.app';
   return `${frontendBase.replace(/\/+$/, '')}/tickets/${encodeURIComponent(ticketCode)}`;
 }
 
@@ -228,7 +231,8 @@ export function buildTicketViewUrl(viewTokens) {
   if (tokens.length === 0) {
     throw new Error('At least one view token is required');
   }
-  const frontendBase = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://gokyro.com';
+  const frontendBase =
+    process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://www.briteside.app';
   return `${frontendBase.replace(/\/+$/, '')}/ticket/view/${encodeURIComponent(tokens.join(','))}`;
 }
 

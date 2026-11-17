@@ -2889,6 +2889,7 @@ export class TalentSessionService {
             cancellation_reason: reason || 'Not provided',
             amount: `$${(session.priceCents / 100).toFixed(2)}`,
             refund_reference: session.id,
+            creator_username: talentUser.username,
           });
         },
       });
@@ -3751,6 +3752,7 @@ export class TalentSessionService {
           user_name: talentUser.firstName,
           creator_name: bookerName,
           ...rescheduleEmailParams,
+          recipient_role: 'talent',
         });
       },
     });
@@ -3768,6 +3770,7 @@ export class TalentSessionService {
           user_name: booker.firstName,
           creator_name: talentName,
           ...rescheduleEmailParams,
+          recipient_role: 'booker',
         });
       },
     });

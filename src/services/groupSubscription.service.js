@@ -960,7 +960,10 @@ static async refundGroupSubscription(userId, groupId) {
 
     const [user, group] = await Promise.all([
       getUserInformation(dbSub.userId),
-      db.query.groups.findFirst({ where: eq(groups.id, dbSub.groupId), columns: { name: true } }),
+      db.query.groups.findFirst({
+        where: eq(groups.id, dbSub.groupId),
+        columns: { name: true, slug: true },
+      }),
     ]).catch(() => [null, null]);
 
     if (!user || !group) return;
@@ -968,6 +971,7 @@ static async refundGroupSubscription(userId, groupId) {
     await sendGroupPaymentFailedEmail(user.email, {
       user_name: `${user.firstName} ${user.lastName}`,
       group_name: group.name,
+      group_slug: group.slug,
       membership_price: `$${parseFloat(dbSub.tier.price).toFixed(2)}`,
       payment_method_last4: '****',
       failed_date: new Date(invoice.created * 1000).toLocaleDateString(),
@@ -1050,7 +1054,7 @@ static async refundGroupSubscription(userId, groupId) {
       getUserInformation(userId),
       db.query.groups.findFirst({
         where: eq(groups.id, groupId),
-        columns: { name: true, createdBy: true },
+        columns: { name: true, slug: true, createdBy: true },
       }),
       db.query.groupSubscriptionTiers.findFirst({
         where: eq(groupSubscriptionTiers.id, tierId),
@@ -1063,6 +1067,7 @@ static async refundGroupSubscription(userId, groupId) {
     await sendPaidGroupSubscriptionEmail(user.email, {
       user_name: `${user.firstName} ${user.lastName}`,
       group_name: group.name,
+      group_slug: group.slug,
       organizer_name: `${organizer.firstName} ${organizer.lastName}`,
       membership_price: `$${parseFloat(tier.price).toFixed(2)}`,
       next_billing_date: (resolveSubPeriod(stripeSub).periodEnd ?? new Date()).toLocaleDateString(),
@@ -1072,7 +1077,10 @@ static async refundGroupSubscription(userId, groupId) {
   static async _sendCancellationEmail(userId, groupId, subscription, immediate = false) {
     const [user, group] = await Promise.all([
       getUserInformation(userId),
-      db.query.groups.findFirst({ where: eq(groups.id, groupId), columns: { name: true } }),
+      db.query.groups.findFirst({
+        where: eq(groups.id, groupId),
+        columns: { name: true, slug: true },
+      }),
     ]);
 
     const tierPrice = subscription.tier?.price ?? subscription.tierPrice ?? '0';
@@ -1083,6 +1091,7 @@ static async refundGroupSubscription(userId, groupId) {
     await sendGroupMembershipCancellationEmail(user.email, {
       user_name: `${user.firstName} ${user.lastName}`,
       group_name: group.name,
+      group_slug: group.slug,
       access_end_date: accessEndDate,
       final_charge: `$${parseFloat(tierPrice).toFixed(2)}`,
     });

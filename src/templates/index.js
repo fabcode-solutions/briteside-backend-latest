@@ -83,7 +83,7 @@ import { eventTemplates } from './event.templates.js';
 
 /**
  * @param {string} to
- * @param {{ user_name, event_name, event_date, event_time, event_location, organizer_name, registration_date }} params
+ * @param {{ user_name, event_name, event_date, event_time, event_location, organizer_name, registration_date, event_slug? }} params
  */
 export const sendEventRegistrationEmail = (to, params) =>
   sendTemplate(eventTemplates.eventRegistration, to, params);
@@ -92,28 +92,28 @@ export const sendEventRegistrationEmail = (to, params) =>
  * @param {string} to
  * @param {{ user_name, event_name, order_number, ticket_type, quantity, subtotal, fees, amount,
  *           payment_method, card_last_four, event_date, event_time, event_location, organizer_name,
- *           refund_policy, purchase_date }} params
+ *           refund_policy, purchase_date, event_slug? }} params
  */
 export const sendTicketPurchaseEmail = (to, params) =>
   sendTemplate(eventTemplates.ticketPurchase, to, params);
 
 /**
  * @param {string} to
- * @param {{ user_name, event_name, event_date, event_time, event_location }} params
+ * @param {{ user_name, event_name, event_date, event_time, event_location, event_slug? }} params
  */
 export const sendEventReminderWeekEmail = (to, params) =>
   sendTemplate(eventTemplates.eventReminderWeek, to, params);
 
 /**
  * @param {string} to
- * @param {{ user_name, event_name, event_date, event_time, event_location, doors_open_time, directions, additional_items? }} params
+ * @param {{ user_name, event_name, event_date, event_time, event_location, doors_open_time, directions, additional_items?, event_slug? }} params
  */
 export const sendEventReminder24hEmail = (to, params) =>
   sendTemplate(eventTemplates.eventReminder24h, to, params);
 
 /**
  * @param {string} to
- * @param {{ user_name, event_name, organizer_name, event_date, event_time, event_location, feedback_link }} params
+ * @param {{ user_name, event_name, organizer_name, event_date, event_time, event_location, feedback_link, event_slug? }} params
  */
 export const sendEventRatingEmail = (to, params) =>
   sendTemplate(eventTemplates.eventRating, to, params);
@@ -121,7 +121,7 @@ export const sendEventRatingEmail = (to, params) =>
 /**
  * @param {string} to
  * @param {{ user_name, inviter_name, event_name, event_date, event_time, event_location,
- *           ticket_price, event_description, personal_message, attending_friends_count? }} params
+ *           ticket_price, event_description, personal_message, attending_friends_count?, event_slug? }} params
  */
 export const sendEventInvitationEmail = (to, params) =>
   sendTemplate(eventTemplates.eventInvitation, to, params);
@@ -129,7 +129,7 @@ export const sendEventInvitationEmail = (to, params) =>
 /**
  * @param {string} to
  * @param {{ user_name, event_name, event_date, event_time, event_location, cancellation_reason,
- *           organizer_message?, is_paid_event, amount?, refund_reference? }} params
+ *           organizer_message?, is_paid_event, amount?, refund_reference?, event_slug? }} params
  */
 export const sendEventCancellationEmail = (to, params) =>
   sendTemplate(eventTemplates.eventCancellation, to, params);
@@ -137,7 +137,7 @@ export const sendEventCancellationEmail = (to, params) =>
 /**
  * @param {string} to
  * @param {{ user_name, event_name, old_date, old_time, new_date, new_time, event_location,
- *           reschedule_reason, organizer_message? }} params
+ *           reschedule_reason, organizer_message?, event_slug? }} params
  */
 export const sendEventRescheduledEmail = (to, params) =>
   sendTemplate(eventTemplates.eventRescheduled, to, params);
@@ -145,7 +145,7 @@ export const sendEventRescheduledEmail = (to, params) =>
 /**
  * @param {string} to
  * @param {{ user_name, event_name, event_date, event_time, timezone, event_duration, host_name,
- *           access_link, event_password?, requires_password, event_description?, registration_date }} params
+ *           access_link, event_password?, requires_password, event_description?, registration_date, event_slug? }} params
  */
 export const sendVirtualEventRegistrationEmail = (to, params) =>
   sendTemplate(eventTemplates.virtualEventRegistration, to, params);
@@ -153,7 +153,7 @@ export const sendVirtualEventRegistrationEmail = (to, params) =>
 /**
  * @param {string} to
  * @param {{ user_name, event_name, event_date, event_time, timezone, event_duration, host_name,
- *           access_link, event_password?, requires_password, event_description? }} params
+ *           access_link, event_password?, requires_password, event_description?, event_slug? }} params
  */
 export const sendVirtualEventReminderWeekEmail = (to, params) =>
   sendTemplate(eventTemplates.virtualEventReminderWeek, to, params);
@@ -161,7 +161,7 @@ export const sendVirtualEventReminderWeekEmail = (to, params) =>
 /**
  * @param {string} to
  * @param {{ user_name, event_name, event_date, event_time, timezone, event_duration, host_name,
- *           access_link, event_password?, requires_password, event_description?, event_agenda? }} params
+ *           access_link, event_password?, requires_password, event_description?, event_agenda?, event_slug? }} params
  */
 export const sendVirtualEventReminder1DayEmail = (to, params) =>
   sendTemplate(eventTemplates.virtualEventReminder1Day, to, params);
@@ -174,28 +174,28 @@ import { bookingTemplates } from './booking.templates.js';
 
 /**
  * @param {string} to
- * @param {{ user_name, creator_name, session_date, session_time, timezone, duration, amount, cancellation_policy, join_link? }} params
+ * @param {{ user_name, creator_name, session_date, session_time, timezone, duration, amount, cancellation_policy, join_link?, session_id? }} params
  */
 export const sendBookingConfirmationEmail = (to, params) =>
   sendTemplate(bookingTemplates.bookingConfirmation, to, params);
 
 /**
  * @param {string} to
- * @param {{ user_name, creator_name, session_time, timezone, duration, join_link? }} params
+ * @param {{ user_name, creator_name, session_time, timezone, duration, join_link?, session_id? }} params
  */
 export const sendBookingReminderEmail = (to, params) =>
   sendTemplate(bookingTemplates.bookingReminder, to, params);
 
 /**
  * @param {string} to
- * @param {{ user_name, creator_name, session_date, session_time, cancelled_by, cancellation_reason, amount, refund_reference }} params
+ * @param {{ user_name, creator_name, session_date, session_time, cancelled_by, cancellation_reason, amount, refund_reference, creator_username? }} params
  */
 export const sendBookingCancellationEmail = (to, params) =>
   sendTemplate(bookingTemplates.bookingCancellation, to, params);
 
 /**
  * @param {string} to
- * @param {{ user_name, creator_name, old_date, old_time, new_date, new_time, timezone, duration, reschedule_reason }} params
+ * @param {{ user_name, creator_name, old_date, old_time, new_date, new_time, timezone, duration, reschedule_reason, recipient_role?: 'talent'|'booker' }} params
  */
 export const sendBookingRescheduledEmail = (to, params) =>
   sendTemplate(bookingTemplates.bookingRescheduled, to, params);
@@ -284,7 +284,7 @@ import { subscriptionTemplates } from './subscription.templates.js';
 
 /**
  * @param {string} to
- * @param {{ user_name, next_billing_date, trial_end_date? }} params
+ * @param {{ user_name, next_billing_date, trial_end_date?, username? }} params
  */
 export const sendBridesidePlusSignupEmail = (to, params) =>
   sendTemplate(subscriptionTemplates.bridesidePlusSignup, to, params);
@@ -326,7 +326,7 @@ export const sendGuidelinesViolationEmail = (to, params) =>
 
 /**
  * @param {string} to
- * @param {{ user_name, post_excerpt, appeal_date, decision_date, review_notes? }} params
+ * @param {{ user_name, post_excerpt, appeal_date, decision_date, review_notes?, post_id? }} params
  */
 export const sendAppealApprovedEmail = (to, params) =>
   sendTemplate(moderationTemplates.appealApproved, to, params);
@@ -371,14 +371,16 @@ import { notificationTemplates } from './moderation-notification.templates.js';
 
 /**
  * @param {string} to
- * @param {{ user_name, sender_name, sender_bio, sender_followers, sender_mutual_connections }} params
+ * @param {{ user_name, sender_name, sender_bio, sender_followers, sender_mutual_connections,
+ *           sender_username?, priority_message_id? }} params
  */
 export const sendPriorityMessageRequestEmail = (to, params) =>
   sendTemplate(notificationTemplates.priorityMessageRequest, to, params);
 
 /**
  * @param {string} to
- * @param {{ user_name, sender_name, message_content, message_time, message_date, sender_bio? }} params
+ * @param {{ user_name, sender_name, message_content, message_time, message_date, sender_bio?,
+ *           sender_username?, priority_message_id? }} params
  */
 export const sendPriorityMessageEmail = (to, params) =>
   sendTemplate(notificationTemplates.priorityMessage, to, params);
@@ -395,7 +397,7 @@ export const sendNotificationDigestEmail = (to, params) =>
  * @param {string} to
  * @param {{ user_name, ticket_quantity, ticket_type, event_name, event_location, event_date,
  *           event_time, cart_items, subtotal, fees, total, remaining_tickets?, low_stock,
- *           event_description?, reminder_date }} params
+ *           event_description?, reminder_date, event_slug? }} params
  */
 export const sendAbandonedCartEmail = (to, params) =>
   sendTemplate(notificationTemplates.abandonedCart, to, params);

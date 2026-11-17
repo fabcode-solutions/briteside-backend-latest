@@ -3,6 +3,14 @@ import { catchAsync } from '../utils/catch-async.js';
 import ApiError from '../utils/api-error.js';
 import { EventService } from '../services/event.service.js';
 
+// Public web app origin (no trailing slash) — tracking links must point at
+// the event page on the frontend, not the API host or localhost.
+const frontendBase = () =>
+  (process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://www.briteside.app').replace(
+    /\/+$/,
+    ''
+  );
+
 const resolveEvent = async slug => {
   const event = await EventService.getEventBySlug(slug);
   if (!event) throw new ApiError(404, 'Event not found');
@@ -25,8 +33,7 @@ export const createTrackingLink = catchAsync(async (req, res) => {
   const { name, destinationUrl } = req.body;
   const link = await TrackingLinkService.create(organizerId, event.id, { name, destinationUrl });
 
-  const host = 'http://localhost:3000/' || 'https://gokyro.com';
-  const url = `${host}/events/${slug}?ref=${link.code}`;
+  const url = `${frontendBase()}/events/${encodeURIComponent(slug)}?ref=${encodeURIComponent(link.code)}`;
   res.status(201).json({ success: true, data: { link: { ...link, url } } });
 });
 
@@ -98,7 +105,6 @@ export const redirectTrackingLink = catchAsync(async (req, res) => {
     eventId: event.id,
   });
   const destination =
-    link.destinationUrl ||
-    `${process.env.FRONTEND_HOST || process.env.API_HOST || 'https://gokyro.com'}/events/${link.slug}`;
+    link.destinationUrl || `${frontendBase()}/events/${encodeURIComponent(event.slug ?? slug)}`;
   return res.redirect(302, destination);
 });
