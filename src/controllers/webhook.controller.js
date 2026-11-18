@@ -28,6 +28,8 @@ import { GroupSubscriptionService } from '../services/groupSubscription.service.
 import { GroupCourseService } from '../services/groupCourse.service.js';
 import { PriorityMessageService } from '../services/priorityMessage.service.js';
 import { TalentSessionService } from '../services/talentSession.service.js';
+import { BusinessBookingService } from '../services/businessBooking.service.js';
+import { BusinessCommissionService } from '../services/businessCommission.service.js';
 import { ShopOrderService } from '../services/shop/shopOrder.service.js';
 import { ShopCustomOfferService } from '../services/shop/shopCustomOffer.service.js';
 import { handleDisputeCreated, handleDisputeClosed } from '../services/paymentDispute.service.js';
@@ -83,6 +85,21 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
       if (session.metadata?.type === 'priority_message') {
         const io = req.app.get('io');
         await PriorityMessageService.handleWebhook(session, io);
+        return;
+      }
+
+      // ── Business booking payment ──────────────────────────────────────────
+      if (session.metadata?.type === 'business_booking') {
+        await BusinessBookingService.handlePaymentWebhook(session);
+        return;
+      }
+      if (session.metadata?.type === 'business_booking_balance') {
+        await BusinessBookingService.handleBalancePaymentWebhook(session);
+        return;
+      }
+      // Business paid its in-person commission from the dashboard
+      if (session.metadata?.type === 'business_commission') {
+        await BusinessCommissionService.handleCheckoutCompleted(session);
         return;
       }
 
@@ -177,6 +194,20 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
       // ── Talent session — release slot on expiry ───────────────────────────
       if (session.metadata?.type === 'talent_session') {
         await TalentSessionService.handlePaymentExpired(session);
+      }
+
+      // ── Business booking — release slot on expiry ─────────────────────────
+      if (session.metadata?.type === 'business_booking') {
+        await BusinessBookingService.handlePaymentExpired(session);
+        return;
+      }
+      if (session.metadata?.type === 'business_booking_balance') {
+        await BusinessBookingService.handleBalancePaymentExpired(session);
+        return;
+      }
+      if (session.metadata?.type === 'business_commission') {
+        await BusinessCommissionService.handleCheckoutExpired(session);
+        return;
       }
 
       // ── Shop order — mark abandoned checkout as expired ───────────────────
@@ -294,6 +325,17 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
         },
         io
       );
+    } else if (event.type === 'payment_intent.succeeded' && event.data.object?.metadata?.native === '1') {
+      // Business bookings / balances / commission paid through the in-app card form —
+      // safety net if the tab closed before the client's native-finalize call. Each
+      // handler claims atomically, so this and the client's call settle it exactly once.
+      // (Hosted-Checkout PaymentIntents carry no `native` flag — those settle via
+      // checkout.session.completed above.)
+      const pi = event.data.object;
+      const asSession = { id: null, payment_intent: pi.id, amount_total: pi.amount_received || pi.amount, metadata: pi.metadata };
+      if (pi.metadata.type === 'business_booking') await BusinessBookingService.handlePaymentWebhook(asSession);
+      else if (pi.metadata.type === 'business_booking_balance') await BusinessBookingService.handleBalancePaymentWebhook(asSession);
+      else if (pi.metadata.type === 'business_commission') await BusinessCommissionService.handleIntentSucceeded(pi);
     } else if (event.type === 'charge.dispute.created') {
       // Phase 4 of the payout architecture — see PAYMENTS_ARCHITECTURE.md §5.
       // Requires this webhook endpoint to be subscribed to

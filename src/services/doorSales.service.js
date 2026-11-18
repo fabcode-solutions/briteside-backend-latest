@@ -229,7 +229,8 @@ export class DoorSalesService {
       lineItems.push({ tier, qty });
     }
 
-    const frontendBase = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://gokyro.com';
+    const frontendBase =
+      process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://www.briteside.app';
     const result = await db.transaction(async tx => {
       await tx.execute(sql`SELECT id FROM events WHERE id = ${event.id} FOR UPDATE`);
 

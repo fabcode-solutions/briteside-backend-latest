@@ -3,7 +3,21 @@
  * Covers: booking confirmation, reminder (1 hr), cancellation, rescheduled
  */
 
-import { header, footer, ctaButton } from './emailLayout.js';
+import { header, footer, ctaButton, appUrl } from './emailLayout.js';
+
+const BOOKINGS_URL = appUrl('/bookings');
+const HELP_URL = appUrl('/help');
+const CONTACT_URL = appUrl('/contact');
+const MESSAGES_URL = appUrl('/messages');
+const SERVICES_URL = appUrl('/services');
+// Purchase History — session refunds show up there with their status.
+const ORDERS_URL = appUrl('/profile/orders');
+// Session call lobby; falls back to the bookings list when no id was passed.
+const sessionUrl = sessionId => (sessionId ? appUrl(`/session/${sessionId}`) : BOOKINGS_URL);
+// Booking flow for a specific talent (expects their username), else browse talent.
+const bookTalentUrl = username =>
+  username ? appUrl('/book-1-on-1', { talentId: username }) : SERVICES_URL;
+const footerLink = (label, url) => `<a href="${url}" style="color:#999;">${label}</a>`;
 
 export const bookingTemplates = {
   // ── Booking Confirmation ────────────────────────────────────────────────
@@ -20,6 +34,7 @@ export const bookingTemplates = {
       amount,
       cancellation_policy,
       join_link,
+      session_id,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -34,8 +49,7 @@ export const bookingTemplates = {
             <div>💰 <strong>Amount Paid:</strong> ${amount}</div>
           </div>
           <p>You can join the video call up to <strong>5 minutes before</strong> the scheduled time using the link below.</p>
-          <div style="text-align:center;margin:16px 0;">${ctaButton('Join Video Call', join_link || '#')}</div>
-          <div style="text-align:center;margin:16px 0;">${ctaButton('Add to Calendar')}</div>
+          <div style="text-align:center;margin:16px 0;">${ctaButton('Join Video Call', join_link || sessionUrl(session_id))}</div>
           <p><strong>Prepare for Your Session:</strong></p>
           <ul>
             <li>Test your camera and microphone beforehand</li>
@@ -45,12 +59,12 @@ export const bookingTemplates = {
           </ul>
           <p><strong>Cancellation Policy:</strong> ${cancellation_policy}</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Manage Booking')}
-            ${ctaButton(`Contact ${creator_name}`)}
+            ${ctaButton('Manage Booking', BOOKINGS_URL)}
+            ${ctaButton(`Contact ${creator_name}`, MESSAGES_URL)}
           </div>
           <p>Looking forward to your session!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Booking confirmation for session on ${session_date}.<br/><a href="#">View your bookings</a> | <a href="#">Get help</a>`)}
+        ${footer(`Booking confirmation for session on ${session_date}.<br/>${footerLink('View your bookings', BOOKINGS_URL)} | ${footerLink('Get help', HELP_URL)}`)}
       </div>`,
   },
 
@@ -58,7 +72,7 @@ export const bookingTemplates = {
   bookingReminder: {
     id: 'booking-reminder',
     subject: ({ creator_name }) => `Your session with ${creator_name} starts in 1 hour`,
-    html: ({ user_name, creator_name, session_time, timezone, duration, join_link }) => `
+    html: ({ user_name, creator_name, session_time, timezone, duration, join_link, session_id }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
         <div style="padding:30px 20px;">
@@ -77,14 +91,14 @@ export const bookingTemplates = {
             <li>✓ Quiet environment?</li>
           </ul>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Join Session Now', join_link || '#')}
+            ${ctaButton('Join Session Now', join_link || sessionUrl(session_id))}
           </div>
           <p style="font-size:13px;color:#666;">The session link will be active 10 minutes before the scheduled time.</p>
           <p><strong>Need Help?</strong> If you're having technical difficulties, please contact our support team immediately.</p>
-          <div style="text-align:center;margin:16px 0;">${ctaButton('Get Technical Help')}</div>
+          <div style="text-align:center;margin:16px 0;">${ctaButton('Get Technical Help', HELP_URL)}</div>
           <p>See you soon!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`This is a reminder for your upcoming session.<br/><a href="#">View booking details</a> | <a href="#">Contact support</a>`)}
+        ${footer(`This is a reminder for your upcoming session.<br/>${footerLink('View booking details', BOOKINGS_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 
@@ -101,6 +115,7 @@ export const bookingTemplates = {
       cancellation_reason,
       amount,
       refund_reference,
+      creator_username,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -120,12 +135,12 @@ export const bookingTemplates = {
             Refund Reference: ${refund_reference}
           </div>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Book New Session')}
-            ${ctaButton('Browse Creators')}
+            ${ctaButton('Book New Session', bookTalentUrl(creator_username))}
+            ${ctaButton('Browse Creators', SERVICES_URL)}
           </div>
           <p>We apologize for any inconvenience.<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Cancellation notice for session originally scheduled on ${session_date}.<br/><a href="#">View refund status</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Cancellation notice for session originally scheduled on ${session_date}.<br/>${footerLink('View refund status', ORDERS_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 
@@ -143,6 +158,7 @@ export const bookingTemplates = {
       timezone,
       duration,
       reschedule_reason,
+      recipient_role,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -157,14 +173,18 @@ export const bookingTemplates = {
             <div>📝 <strong>Reason:</strong> ${reschedule_reason}</div>
           </div>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Add to Calendar')}
-            ${ctaButton('Confirm New Time')}
-            ${ctaButton('Request Different Time')}
-            ${ctaButton('Cancel Booking')}
+            ${
+              // Only the talent re-confirms a reschedule (from their Requests tab).
+              recipient_role === 'talent'
+                ? ctaButton('Confirm New Time', appUrl('/bookings', { tab: 'requests' }))
+                : ''
+            }
+            ${ctaButton('Request Different Time', BOOKINGS_URL)}
+            ${ctaButton('Cancel Booking', BOOKINGS_URL)}
           </div>
           <p>Thank you for your understanding!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Schedule change notice for your session with ${creator_name}.<br/><a href="#">View booking details</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Schedule change notice for your session with ${creator_name}.<br/>${footerLink('View booking details', BOOKINGS_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 };

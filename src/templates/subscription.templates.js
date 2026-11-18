@@ -3,14 +3,26 @@
  * Covers: Briteside Plus signup, cancellation, payment failed
  */
 
-import { header, footer, ctaButton, infoBox, calloutBox } from './emailLayout.js';
+import { header, footer, ctaButton, infoBox, calloutBox, appUrl } from './emailLayout.js';
+
+const MANAGE_SUBSCRIPTION_URL = appUrl('/subscriptions');
+// Purchase History lists subscription charges with receipts.
+const BILLING_HISTORY_URL = appUrl('/profile/orders');
+const NOTIFICATION_SETTINGS_URL = appUrl('/settings/notifications');
+const CONTACT_URL = appUrl('/contact');
+const footerLink = (label, url) => `<a href="${url}" style="color:#999;">${label}</a>`;
+const subscriptionFooterLinks = [
+  footerLink('Manage subscription', MANAGE_SUBSCRIPTION_URL),
+  footerLink('Billing history', BILLING_HISTORY_URL),
+  footerLink('Email settings', NOTIFICATION_SETTINGS_URL),
+].join(' | ');
 
 export const subscriptionTemplates = {
   // ── Briteside Plus Signup ───────────────────────────────────────────────
   bridesidePlusSignup: {
     id: 'briteside-plus-signup',
     subject: () => 'Welcome to Briteside Plus! 👑',
-    html: ({ user_name, next_billing_date, trial_end_date }) => `
+    html: ({ user_name, next_billing_date, trial_end_date, username }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
         <div style="padding:30px 20px;">
@@ -44,24 +56,29 @@ export const subscriptionTemplates = {
           <div style="margin:16px 0;">
             <div style="margin-bottom:12px;">
               📅 <strong>Set Up Bookings</strong> – Offer paid 1-on-1 sessions.<br/>
-              <div style="margin-top:6px;">${ctaButton('Manage Bookings')}</div>
+              <div style="margin-top:6px;">${ctaButton('Manage Bookings', appUrl('/service-dashboard'))}</div>
             </div>
             <div style="margin-bottom:12px;">
               🎥 <strong>Go Live</strong> – Start your first live stream.<br/>
-              <div style="margin-top:6px;">${ctaButton('Go Live Now')}</div>
+              <div style="margin-top:6px;">${ctaButton('Go Live Now', appUrl('/go-live'))}</div>
             </div>
             <div style="margin-bottom:12px;">
               📊 <strong>View Analytics</strong> – Explore your audience insights.<br/>
-              <div style="margin-top:6px;">${ctaButton('Open Analytics')}</div>
+              ${
+                // Insights live on the user's own profile; no button if we don't know it.
+                username
+                  ? `<div style="margin-top:6px;">${ctaButton('Open Analytics', appUrl(`/profile/${username}/insights`))}</div>`
+                  : ''
+              }
             </div>
             <div style="margin-bottom:12px;">
               🎫 <strong>Create Premium Events</strong> – Host exclusive ticketed events.<br/>
-              <div style="margin-top:6px;">${ctaButton('Create Event')}</div>
+              <div style="margin-top:6px;">${ctaButton('Create Event', appUrl('/events/create'))}</div>
             </div>
           </div>
           <p>Here's to your growth!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`You received this email because you subscribed to Briteside Plus.<br/><a href="#">Manage subscription</a> | <a href="#">Billing history</a> | <a href="#">Unsubscribe</a>`)}
+        ${footer(`You received this email because you subscribed to Briteside Plus.<br/>${subscriptionFooterLinks}`)}
       </div>`,
   },
 
@@ -98,12 +115,12 @@ export const subscriptionTemplates = {
           <p>💰 <strong>Unsettled Earnings</strong> – Any pending earnings will still be paid out on your next scheduled payout date.</p>
           <p>📊 <strong>Your Data</strong> – All your content, followers, and event history will remain on your profile.</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Resubscribe to Briteside Plus')}
-            ${ctaButton('Share Feedback')}
+            ${ctaButton('Resubscribe to Briteside Plus', appUrl('/briteside-plus'))}
+            ${ctaButton('Share Feedback', CONTACT_URL)}
           </div>
           <p>We hope to see you back soon!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`You cancelled your Briteside Plus subscription.<br/><a href="#">Manage subscription</a> | <a href="#">Billing history</a> | <a href="#">Unsubscribe</a>`)}
+        ${footer(`You cancelled your Briteside Plus subscription.<br/>${subscriptionFooterLinks}`)}
       </div>`,
   },
 
@@ -126,11 +143,11 @@ export const subscriptionTemplates = {
           ])}
           <p>Don't want to continue? Cancel before <strong>${trial_end_date}</strong> and you won't be charged.</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Manage Subscription')}
+            ${ctaButton('Manage Subscription', MANAGE_SUBSCRIPTION_URL)}
           </div>
           <p><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`You're receiving this because you started a Briteside Plus free trial.<br/><a href="#">Manage subscription</a> | <a href="#">Billing history</a> | <a href="#">Unsubscribe</a>`)}
+        ${footer(`You're receiving this because you started a Briteside Plus free trial.<br/>${subscriptionFooterLinks}`)}
       </div>`,
   },
 
@@ -170,12 +187,12 @@ export const subscriptionTemplates = {
             <li>95% creator earnings rate</li>
           </ul>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Update Payment Method')}
-            ${ctaButton('Contact Support')}
+            ${ctaButton('Update Payment Method', appUrl('/settings/payment'))}
+            ${ctaButton('Contact Support', CONTACT_URL)}
           </div>
           <p><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Your Briteside Plus payment could not be processed.<br/><a href="#">Manage subscription</a> | <a href="#">Billing history</a> | <a href="#">Unsubscribe</a>`)}
+        ${footer(`Your Briteside Plus payment could not be processed.<br/>${subscriptionFooterLinks}`)}
       </div>`,
   },
 };

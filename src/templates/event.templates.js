@@ -4,7 +4,25 @@
  *         invitations, cancellations, rescheduled, virtual events
  */
 
-import { header, footer, ctaButton, infoBox, calloutBox } from './emailLayout.js';
+import { header, footer, ctaButton, infoBox, calloutBox, appUrl } from './emailLayout.js';
+
+// Event pages are addressed by slug. Without one, fall back to the events directory.
+const EVENTS_URL = appUrl('/events');
+const eventUrl = slug => (slug ? appUrl(`/events/${encodeURIComponent(slug)}`) : EVENTS_URL);
+// Attendee's ticket / registration page (ticket, QR, PDF download, add-to-calendar).
+const eventTicketUrl = slug =>
+  slug ? appUrl(`/events/${encodeURIComponent(slug)}/ticket`) : EVENTS_URL;
+const ORDERS_URL = appUrl('/profile/orders');
+const REFUNDS_URL = appUrl('/profile/refunds');
+const CONTACT_URL = appUrl('/contact');
+const NOTIFICATIONS_URL = appUrl('/notifications');
+const NOTIFICATION_SETTINGS_URL = appUrl('/settings/notifications');
+// Google Maps directions to the venue; the event page when there's no physical location.
+const directionsUrl = (location, slug) =>
+  location
+    ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(location)}`
+    : eventUrl(slug);
+const footerLink = (label, url) => `<a href="${url}" style="color:#999;">${label}</a>`;
 
 const divider = `<hr style="border:none;border-top:1px solid #eee;margin:20px 0;"/>`;
 
@@ -29,6 +47,7 @@ export const eventTemplates = {
       event_location,
       organizer_name,
       registration_date,
+      event_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -43,13 +62,13 @@ export const eventTemplates = {
             <li>Valid ID for check-in</li>
           </ul>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('View Event Details')}
-            ${ctaButton('Add to Calendar')}
-            ${ctaButton('Get Directions')}
+            ${ctaButton('View Event Details', eventUrl(event_slug))}
+            ${ctaButton('Add to Calendar', eventTicketUrl(event_slug))}
+            ${ctaButton('Get Directions', directionsUrl(event_location, event_slug))}
           </div>
           <p>We look forward to seeing you there!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`You registered for this event on ${registration_date}.<br/><a href="#">Manage your bookings</a> | <a href="#">Contact organizer</a>`)}
+        ${footer(`You registered for this event on ${registration_date}.<br/>${footerLink('Manage your bookings', eventTicketUrl(event_slug))} | ${footerLink('Contact organizer', eventUrl(event_slug))}`)}
       </div>`,
   },
 
@@ -74,6 +93,7 @@ export const eventTemplates = {
       organizer_name,
       refund_policy,
       purchase_date,
+      event_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -97,15 +117,14 @@ export const eventTemplates = {
           ${eventDetailsBlock({ event_date, event_time, event_location, organizer_name })}
 
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('View Ticket')}
-            ${ctaButton('Download PDF')}
-            ${ctaButton('Add to Wallet')}
+            ${ctaButton('View Ticket', eventTicketUrl(event_slug))}
+            ${ctaButton('Download PDF', eventTicketUrl(event_slug))}
           </div>
 
           <p><strong>Refund Policy:</strong> ${refund_policy}</p>
           <p>Questions? Contact the event organizer or our support team.<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Receipt for order #${order_number} placed on ${purchase_date}.<br/><a href="#">View order details</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Receipt for order #${order_number} placed on ${purchase_date}.<br/>${footerLink('View order details', ORDERS_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 
@@ -113,7 +132,7 @@ export const eventTemplates = {
   eventReminderWeek: {
     id: 'event-reminder-week',
     subject: ({ event_name }) => `${event_name} is coming up next week!`,
-    html: ({ user_name, event_name, event_date, event_time, event_location }) => `
+    html: ({ user_name, event_name, event_date, event_time, event_location, event_slug }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
         <div style="padding:30px 20px;">
@@ -128,13 +147,13 @@ export const eventTemplates = {
             <li>Plan your transportation</li>
           </ul>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('View Event Details')}
-            ${ctaButton('Add to Calendar')}
-            ${ctaButton('Share Event')}
+            ${ctaButton('View Event Details', eventUrl(event_slug))}
+            ${ctaButton('Add to Calendar', eventTicketUrl(event_slug))}
+            ${ctaButton('Share Event', eventUrl(event_slug))}
           </div>
           <p>We can't wait to see you there!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`You're registered for this event.<br/><a href="#">Manage your registration</a> | <a href="#">Contact organizer</a>`)}
+        ${footer(`You're registered for this event.<br/>${footerLink('Manage your registration', eventTicketUrl(event_slug))} | ${footerLink('Contact organizer', eventUrl(event_slug))}`)}
       </div>`,
   },
 
@@ -151,6 +170,7 @@ export const eventTemplates = {
       doors_open_time,
       directions,
       additional_items = '',
+      event_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -171,13 +191,13 @@ export const eventTemplates = {
           </ul>
           <p><strong>Getting There:</strong> ${directions}</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('View Your Ticket')}
-            ${ctaButton('Get Directions')}
-            ${ctaButton('Contact Organizer')}
+            ${ctaButton('View Your Ticket', eventTicketUrl(event_slug))}
+            ${ctaButton('Get Directions', directionsUrl(event_location, event_slug))}
+            ${ctaButton('Contact Organizer', eventUrl(event_slug))}
           </div>
           <p>See you tomorrow!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`<a href="#">View event details</a> | <a href="#">Manage your registration</a>`)}
+        ${footer(`${footerLink('View event details', eventUrl(event_slug))} | ${footerLink('Manage your registration', eventTicketUrl(event_slug))}`)}
       </div>`,
   },
 
@@ -196,6 +216,7 @@ export const eventTemplates = {
       event_description,
       personal_message,
       attending_friends_count,
+      event_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -212,12 +233,12 @@ export const eventTemplates = {
           ${calloutBox(`"${personal_message}"<br/><small>– ${inviter_name}</small>`, 'neutral')}
           ${attending_friends_count ? `<p>👥 <strong>${attending_friends_count}</strong> of your connections are attending this event.</p>` : ''}
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('View Event')}
-            ${ctaButton('Register Now')}
+            ${ctaButton('View Event', eventUrl(event_slug))}
+            ${ctaButton('Register Now', eventUrl(event_slug))}
           </div>
           <p><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Invitation sent by ${inviter_name}.<br/><a href="#">Manage invitations</a>`)}
+        ${footer(`Invitation sent by ${inviter_name}.<br/>${footerLink('Manage invitations', NOTIFICATIONS_URL)}`)}
       </div>`,
   },
 
@@ -236,6 +257,7 @@ export const eventTemplates = {
       is_paid_event,
       amount,
       refund_reference,
+      event_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -255,11 +277,11 @@ export const eventTemplates = {
               : `<p>As this was a free event, no refund is necessary.</p>`
           }
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Browse Similar Events')}
+            ${ctaButton('Browse Similar Events', EVENTS_URL)}
           </div>
           <p>We apologize for any inconvenience.<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`<a href="#">View refund status</a> | <a href="#">Contact organizer</a> | <a href="#">Browse events</a>`)}
+        ${footer(`${footerLink('View refund status', REFUNDS_URL)} | ${footerLink('Contact organizer', eventUrl(event_slug))} | ${footerLink('Browse events', EVENTS_URL)}`)}
       </div>`,
   },
 
@@ -277,6 +299,7 @@ export const eventTemplates = {
       event_location,
       reschedule_reason,
       organizer_message,
+      event_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -292,13 +315,13 @@ export const eventTemplates = {
           ${organizer_message ? calloutBox(`"${organizer_message}"`, 'neutral') : ''}
           <p>✅ Your registration is still valid for the new date. No action required unless you need to cancel.</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Update Calendar')}
-            ${ctaButton('View Event Details')}
-            ${ctaButton('Cancel & Get Refund')}
+            ${ctaButton('Update Calendar', eventTicketUrl(event_slug))}
+            ${ctaButton('View Event Details', eventUrl(event_slug))}
+            ${ctaButton('Cancel & Get Refund', ORDERS_URL)}
           </div>
           <p>Thank you for your understanding!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`<a href="#">View event details</a> | <a href="#">Contact organizer</a>`)}
+        ${footer(`${footerLink('View event details', eventUrl(event_slug))} | ${footerLink('Contact organizer', eventUrl(event_slug))}`)}
       </div>`,
   },
 
@@ -319,6 +342,7 @@ export const eventTemplates = {
       requires_password,
       event_description,
       registration_date,
+      event_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -334,7 +358,7 @@ export const eventTemplates = {
           ${calloutBox(
             `<strong>🔗 Your Access Link:</strong><br/>
             <div style="text-align:center;margin:12px 0;">
-              ${ctaButton('Join Virtual Event', access_link)}
+              ${ctaButton('Join Virtual Event', access_link || eventUrl(event_slug))}
             </div>
             <p style="font-size:12px;color:#666;word-break:break-all;margin:0;">${access_link}</p>
             ${requires_password ? `<p style="margin:8px 0 0;">🔐 <strong>Event Password:</strong> ${event_password}</p>` : ''}`,
@@ -349,7 +373,7 @@ export const eventTemplates = {
           </ul>
           <p>See you there!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Registration confirmed on ${registration_date}.<br/><a href="#">View event details</a> | <a href="#">Manage registration</a>`)}
+        ${footer(`Registration confirmed on ${registration_date}.<br/>${footerLink('View event details', eventUrl(event_slug))} | ${footerLink('Manage registration', eventTicketUrl(event_slug))}`)}
       </div>`,
   },
 
@@ -369,6 +393,7 @@ export const eventTemplates = {
       event_password,
       requires_password,
       event_description,
+      event_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -383,15 +408,14 @@ export const eventTemplates = {
           ])}
           ${calloutBox(
             `<strong>🔗 Your Access Link:</strong><br/>
-            <div style="text-align:center;margin:12px 0;">${ctaButton('Join Virtual Event', access_link)}</div>
+            <div style="text-align:center;margin:12px 0;">${ctaButton('Join Virtual Event', access_link || eventUrl(event_slug))}</div>
             ${requires_password ? `<p style="margin:0;">🔐 <strong>Event Password:</strong> ${event_password}</p>` : ''}`,
             'neutral'
           )}
           ${event_description ? `<p>${event_description}</p>` : ''}
-          <div style="text-align:center;margin:24px 0;">${ctaButton('Cancel Registration', '#')}</div>
           <p>See you in 1 week!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`<a href="#">View event details</a> | <a href="#">Manage registration</a>`)}
+        ${footer(`${footerLink('View event details', eventUrl(event_slug))} | ${footerLink('Manage registration', eventTicketUrl(event_slug))}`)}
       </div>`,
   },
 
@@ -412,6 +436,7 @@ export const eventTemplates = {
       requires_password,
       event_description,
       event_agenda = [],
+      event_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -426,7 +451,7 @@ export const eventTemplates = {
           ])}
           ${calloutBox(
             `<strong>🔗 Your Access Link:</strong><br/>
-            <div style="text-align:center;margin:12px 0;">${ctaButton('Join Virtual Event', access_link)}</div>
+            <div style="text-align:center;margin:12px 0;">${ctaButton('Join Virtual Event', access_link || eventUrl(event_slug))}</div>
             ${requires_password ? `<p style="margin:0;">🔐 <strong>Event Password:</strong> ${event_password}</p>` : ''}`,
             'neutral'
           )}
@@ -440,7 +465,7 @@ export const eventTemplates = {
           ${event_agenda.length ? `<p><strong>Event Agenda:</strong></p><ul>${event_agenda.map(a => `<li>${a.time} – ${a.topic}</li>`).join('')}</ul>` : ''}
           <p>See you tomorrow!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`<a href="#">View event details</a> | <a href="#">Manage registration</a>`)}
+        ${footer(`${footerLink('View event details', eventUrl(event_slug))} | ${footerLink('Manage registration', eventTicketUrl(event_slug))}`)}
       </div>`,
   },
   // ── Event Rating Request ─────────────────────────────────────────────────
@@ -455,6 +480,7 @@ export const eventTemplates = {
       event_time,
       event_location,
       feedback_link,
+      event_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -469,11 +495,11 @@ export const eventTemplates = {
           </div>
           <p style="margin:0 0 16px;">Share your thoughts on what went well and how we can improve.</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Rate This Event', feedback_link)}
+            ${ctaButton('Rate This Event', feedback_link || eventUrl(event_slug))}
           </div>
           <p>Thanks for helping the community!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`You attended this event on ${event_date}.<br/><a href="#">Manage your preferences</a> | <a href="#">Contact organizer</a>`)}
+        ${footer(`You attended this event on ${event_date}.<br/>${footerLink('Manage your preferences', NOTIFICATION_SETTINGS_URL)} | ${footerLink('Contact organizer', eventUrl(event_slug))}`)}
       </div>`,
   },
 };

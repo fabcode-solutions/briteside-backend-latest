@@ -1197,10 +1197,16 @@ export class GroupService {
         const userData = await getUserInformation(joinRequest.userId);
 
         if (group.isPaid) {
+          const organizer = group.createdBy
+            ? await getUserInformation(group.createdBy).catch(() => null)
+            : null;
           await sendPaidGroupSubscriptionEmail(userData.email, {
             user_name: `${userData.firstName} ${userData.lastName}`,
             group_name: group.name,
-            organizer_name: 'The Organizer',
+            group_slug: group.slug,
+            organizer_name: organizer
+              ? `${organizer.firstName ?? ''} ${organizer.lastName ?? ''}`.trim()
+              : '',
             membership_price: group.subscriptionPrice
               ? `$${parseFloat(group.subscriptionPrice).toFixed(2)}`
               : '$0.00',
@@ -2089,6 +2095,7 @@ async function sendGroupInvitations({ groupId, groupSlug, groupName, inviterId, 
           user_name: `${invitee.firstName} ${invitee.lastName}`,
           inviter_name: inviterName,
           group_name: groupName,
+          group_slug: groupSlug,
           group_description: '',
           member_count: 0,
           group_location: '',

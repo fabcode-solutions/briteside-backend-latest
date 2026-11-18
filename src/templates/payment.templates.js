@@ -3,7 +3,15 @@
  * Covers: payment receipt, refund confirmation, paid message auto-refund
  */
 
-import { header, footer, ctaButton, infoBox } from './emailLayout.js';
+import { header, footer, ctaButton, infoBox, appUrl } from './emailLayout.js';
+
+// Purchase History: every order, paid message, session and subscription, with receipts.
+const ORDERS_URL = appUrl('/profile/orders');
+const REFUNDS_URL = appUrl('/profile/refunds');
+const MESSAGES_URL = appUrl('/messages');
+const SERVICES_URL = appUrl('/services');
+const CONTACT_URL = appUrl('/contact');
+const footerLink = (label, url) => `<a href="${url}" style="color:#999;">${label}</a>`;
 
 export const paymentTemplates = {
   // ── Payment Receipt ─────────────────────────────────────────────────────
@@ -51,12 +59,11 @@ export const paymentTemplates = {
             <strong>Billing:</strong> ${billing_name}, ${billing_address}
           </div>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Download PDF Receipt')}
-            ${ctaButton('View Order Details')}
+            ${ctaButton('View Order Details', ORDERS_URL)}
           </div>
           <p>Questions about this charge? Contact our support team.<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Receipt for transaction on ${purchase_date}.<br/><a href="#">View transaction history</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Receipt for transaction on ${purchase_date}.<br/>${footerLink('View transaction history', ORDERS_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 
@@ -101,10 +108,10 @@ export const paymentTemplates = {
               <tr><td>Non-refundable Fees</td><td style="text-align:right;">${non_refundable_fees}</td></tr>
             </table>
           </div>
-          <div style="text-align:center;margin:24px 0;">${ctaButton('View Refund Status')}</div>
+          <div style="text-align:center;margin:24px 0;">${ctaButton('View Refund Status', REFUNDS_URL)}</div>
           <p>Thank you for your patience!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Refund confirmation for order #${order_number}.<br/><a href="#">View transaction history</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Refund confirmation for order #${order_number}.<br/>${footerLink('View transaction history', ORDERS_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 
@@ -128,12 +135,12 @@ export const paymentTemplates = {
           <p>Your refund of <strong>$${refund_amount}</strong> will be returned to your original payment method.</p>
           <p style="font-size:13px;color:#666;">💡 <strong>Tip:</strong> Some creators receive many messages. Try sending your message at a different time, or check if the creator offers 1:1 video bookings for a guaranteed connection.</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Try Again')}
-            ${ctaButton('Browse Talent')}
+            ${ctaButton('Try Again', MESSAGES_URL)}
+            ${ctaButton('Browse Talent', SERVICES_URL)}
           </div>
           <p><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Refund for paid message sent on ${message_date}.<br/><a href="#">View messages</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Refund for paid message sent on ${message_date}.<br/>${footerLink('View messages', MESSAGES_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 };

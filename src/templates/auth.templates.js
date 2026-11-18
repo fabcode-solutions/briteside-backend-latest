@@ -3,7 +3,9 @@
  * Covers: welcome, email-verification, password-reset
  */
 
-import { header, footer, ctaButton } from './emailLayout.js';
+import { header, footer, ctaButton, appUrl } from './emailLayout.js';
+
+const footerLink = (label, url) => `<a href="${url}" style="color:#999;">${label}</a>`;
 
 export const authTemplates = {
   welcome: {
@@ -24,14 +26,14 @@ export const authTemplates = {
             <li><strong>Create & Share</strong> – Post updates and engage with the community</li>
           </ul>
           <div style="text-align:center;margin:30px 0;">
-            ${ctaButton('Browse Events', 'https://www.briteside.app/events')}
-            ${ctaButton('Find Groups', 'https://www.briteside.app/groups')}
-            ${ctaButton('Complete Profile', 'https://www.briteside.app/profile')}
+            ${ctaButton('Browse Events', appUrl('/events'))}
+            ${ctaButton('Find Groups', appUrl('/groups'))}
+            ${ctaButton('Complete Profile', appUrl('/profile'))}
           </div>
           <p>If you have any questions, our support team is always here to help.</p>
           <p>Welcome aboard!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`You received this email because you signed up for Briteside.<br/><a href="#">Manage email preferences</a> | <a href="#">Unsubscribe</a>`)}
+        ${footer(`You received this email because you signed up for Briteside.<br/>${footerLink('Email settings', appUrl('/settings/notifications'))}`)}
       </div>`,
   },
 

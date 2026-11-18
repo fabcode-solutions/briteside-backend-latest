@@ -23,6 +23,7 @@ export const spendTypeEnum = pgEnum('spend_type', [
   // Appended, never inserted mid-list: Postgres orders enum values by their
   // declaration position, so reordering would change existing comparisons.
   'shop',
+  'business_booking',
 ]);
 
 export const userSpends = pgTable(

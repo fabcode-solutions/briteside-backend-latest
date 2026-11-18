@@ -82,3 +82,38 @@ export function calculatePlatformAndServiceFeeCents(baseCents) {
   const amount = Math.max(0, Math.round(baseCents) || 0);
   return Math.round(amount * PLATFORM_AND_SERVICE_FEE_RATE);
 }
+
+// ─── Business bookings ──────────────────────────────────────────────────────
+// Customer-paid booking fee, tiered on the FULL service price (never the
+// deposit), charged online at booking even for pay-in-person services.
+//   Up to $100       $5
+//   $100.01-$500     $7
+//   $500.01+         $10   (no higher tier — anything above $1,000 stays $10)
+const BUSINESS_BOOKING_FEE_TIERS_CENTS = [
+  { maxCents: 10_000, feeCents: 500 },
+  { maxCents: 50_000, feeCents: 700 },
+  { maxCents: Infinity, feeCents: 1_000 },
+];
+
+// Commission the business pays on every booking — 5% of the full service price:
+// withheld from whatever is paid online, and owed (collected later) on whatever
+// the customer pays in person. See services/businessCommission.service.js.
+export const BUSINESS_COMMISSION_RATE = 0.05;
+
+/**
+ * @param {number} servicePriceCents - full service price in cents
+ * @returns {number} customer booking fee in cents
+ */
+export function calculateBusinessBookingFeeCents(servicePriceCents) {
+  const amount = Math.max(0, Math.round(servicePriceCents) || 0);
+  return BUSINESS_BOOKING_FEE_TIERS_CENTS.find(t => amount <= t.maxCents).feeCents;
+}
+
+/**
+ * @param {number} servicePriceCents - full service price in cents
+ * @returns {number} platform commission (5%) in cents
+ */
+export function calculateBusinessCommissionCents(servicePriceCents) {
+  const amount = Math.max(0, Math.round(servicePriceCents) || 0);
+  return Math.round(amount * BUSINESS_COMMISSION_RATE);
+}
