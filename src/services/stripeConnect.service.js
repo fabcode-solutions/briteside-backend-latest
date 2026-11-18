@@ -376,6 +376,8 @@ export class StripeConnectService {
       priority_message: 'Priority Message',
       group_subscription: 'Group Subscription',
       shop: 'Shop Sale',
+      business_booking: 'Business Booking',
+      business_booking_balance: 'Business Booking',
     };
 
     let items = page.data.map(transfer => {
@@ -429,6 +431,7 @@ export class StripeConnectService {
         shop_custom_offer: 'shop',
         shop_custom_offer_milestone: 'shop',
         shop_offer_milestone: 'shop',
+        business_booking: 'business_booking',
       };
       let txnType =
         charge?.metadata?.type ?? subMeta.type ?? SOURCE_TO_TYPE[transfer.metadata?.source] ?? null;

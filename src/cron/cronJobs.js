@@ -18,6 +18,8 @@ import {
   processCustomOfferReviewReminders,
 } from './sessionReminders.js';
 import { runReserveRelease } from './reserveRelease.js';
+import { BusinessBookingService } from '../services/businessBooking.service.js';
+import { BusinessCommissionService } from '../services/businessCommission.service.js';
 import { runPayoutSweep } from './payoutSweep.js';
 import { startPriorityMessageRefundCron } from './priorityMessageRefund.js';
 import { startIapCatalogSyncCron } from './iapCatalogSync.js';
@@ -97,6 +99,24 @@ export const initializeCronJobs = () => {
 
   // Release slots held by unpaid in-app (native card) 1:1 bookings — every 5 minutes
   cron.schedule('*/5 * * * *', runCron('staleNativeSessionHolds', processStaleNativeSessionHolds));
+
+  // Business bookings: expire unanswered requests (full refund) and free abandoned checkout holds
+  cron.schedule(
+    '*/5 * * * *',
+    runCron('businessBookingExpiry', async () => {
+      await BusinessBookingService.expireUnansweredRequests();
+      await BusinessBookingService.releaseStaleHolds();
+      // Close confirmed bookings 48h after they end (+ record in-person commission)
+      await BusinessBookingService.autoCompletePastBookings();
+    })
+  );
+
+  // In-person booking commission: charge owners' saved cards for what they owed
+  // last month (1st of the month, retries 3 and 4 days later) — daily at 09:00
+  cron.schedule(
+    '0 9 * * *',
+    runCron('businessCommissionCardCharges', () => BusinessCommissionService.chargeSavedCards())
+  );
 
   // Auto-end live sessions that have exceeded their booked duration
   cron.schedule('*/5 * * * *', runCron('autoEndSessions', processAutoEndSessions));

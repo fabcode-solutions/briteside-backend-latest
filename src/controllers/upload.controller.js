@@ -6,7 +6,16 @@ import logger from '../config/logger.js';
 
 // Validate folder parameter
 const validateFolder = folder => {
-  const allowedFolders = ['general', 'events', 'users', 'groups', 'tickets', 'social', 'talents'];
+  const allowedFolders = [
+    'general',
+    'events',
+    'users',
+    'groups',
+    'tickets',
+    'social',
+    'talents',
+    'businesses',
+  ];
   const folderPattern = new RegExp(`^(${allowedFolders.join('|')})(/.+)?$`);
 
   if (!folderPattern.test(folder)) {

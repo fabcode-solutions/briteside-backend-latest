@@ -10,11 +10,13 @@ import {
   priorityMessagePayments,
   shopCustomServiceOffers,
   shopOfferMilestones,
+  businessBookings,
 } from '../db/schema/index.js';
 import { stripeConnectAccounts, creatorPayoutLedgers } from '../db/schema/stripeConnect.js';
 import config from '../config/config.js';
 import { cronLogger as logger } from '../config/logger.js';
 import { PayoutLedgerService } from '../services/payoutLedger.service.js';
+import { BusinessCommissionService } from '../services/businessCommission.service.js';
 
 const stripe = config.stripe?.secretKey
   ? new Stripe(config.stripe.secretKey, { apiVersion: '2026-03-25.dahlia' })
@@ -1442,6 +1444,155 @@ export async function releaseOrderReserves(force = false) {
   return { released, skipped, eventGroups: byEvent.size, candidateOrders: paidOrders.length };
 }
 
+// ─── Business bookings ──────────────────────────────────────────────────────
+// Same staged 85% (Day 14) / 15% (Day 21) model as sessions, measured from
+// completedAt — set when the booking is marked completed OR no-show.
+
+async function releaseBusinessBookingStage(stage, force) {
+  if (!stripe) {
+    logger.warn(`[Cron] ReserveRelease: STRIPE NOT CONFIGURED — skipping business booking ${stage}`);
+    return { released: 0, skipped: 0, reason: 'stripe_not_configured' };
+  }
+  const isStandard = stage === 'standard';
+  const cutoff = new Date(
+    Date.now() - (isStandard ? STANDARD_RELEASE_HOLD_DAYS : FINAL_RELEASE_HOLD_DAYS) * 86_400_000
+  );
+  const closed = inArray(businessBookings.status, ['completed', 'no_show']);
+
+  const where = isStandard
+    ? and(
+        gt(businessBookings.reserveAmountCents, 0),
+        isNull(businessBookings.standardReleasedAt),
+        ...(force ? [] : [closed, lte(businessBookings.completedAt, cutoff)])
+      )
+    : // Also picks up money added after a full release (e.g. a balance paid online late) —
+      // reserveAmountCents is 0 once released, so a row only reappears when new money lands.
+      and(
+        gt(businessBookings.reserveAmountCents, 0),
+        isNotNull(businessBookings.standardReleasedAt),
+        ...(force ? [] : [closed, lte(businessBookings.completedAt, cutoff)])
+      );
+
+  const rows = await db.query.businessBookings.findMany({
+    where,
+    with: { business: { columns: { ownerId: true } } },
+    columns: { id: true, reserveAmountCents: true, customerId: true },
+  });
+
+  let released = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    const userId = row.business?.ownerId;
+    const connectAccount = userId
+      ? await db.query.stripeConnectAccounts.findFirst({
+          where: eq(stripeConnectAccounts.userId, userId),
+          columns: { stripeAccountId: true, payoutsEnabled: true },
+        })
+      : null;
+    if (!connectAccount?.payoutsEnabled || (await isLedgerFrozen(userId))) {
+      logger.warn(`[Cron] ReserveRelease: business booking ${stage} skipped`, {
+        bookingId: row.id,
+        userId,
+        payoutsEnabled: !!connectAccount?.payoutsEnabled,
+      });
+      skipped++;
+      continue;
+    }
+
+    const amountToRelease = isStandard
+      ? Math.round(row.reserveAmountCents * STANDARD_RELEASE_PORTION)
+      : row.reserveAmountCents;
+    if (amountToRelease <= 0) {
+      skipped++;
+      continue;
+    }
+
+    // Commission the owner owes on in-person payments comes out of this payout first
+    let offset = { cents: 0, collectionId: null };
+    try {
+      offset = await BusinessCommissionService.reserveForPayoutOffset(userId, amountToRelease, row.id);
+    } catch (err) {
+      logger.error('[Cron] ReserveRelease: commission offset failed — paying out in full', {
+        bookingId: row.id,
+        error: err.message,
+      });
+    }
+    const transferCents = amountToRelease - offset.cents;
+
+    // Fully absorbed by commission owed → nothing to send
+    const transferId =
+      transferCents > 0
+        ? await transferReserve(connectAccount.stripeAccountId, transferCents, {
+            description: `${isStandard ? 'Standard (85%)' : 'Final'} reserve release — business booking ${row.id}`,
+            // Amounts in the key so a later catch-up release isn't swallowed as a duplicate
+            idempotencyKey: `reserve-business-booking-${stage}-${row.id}-${amountToRelease}-${transferCents}`,
+            metadata: {
+              type: 'reserve_release',
+              stage,
+              source: 'business_booking',
+              bookingId: row.id,
+              customerId: row.customerId ?? '',
+              commissionOffsetCents: String(offset.cents),
+            },
+          })
+        : 'commission_offset_only';
+    if (!transferId) {
+      await BusinessCommissionService.revertPayoutOffset(offset.collectionId).catch(err =>
+        logger.error('[Cron] ReserveRelease: commission offset revert failed', {
+          collectionId: offset.collectionId,
+          error: err.message,
+        })
+      );
+      skipped++;
+      continue;
+    }
+
+    await db
+      .update(businessBookings)
+      .set({
+        reserveAmountCents: sql`${businessBookings.reserveAmountCents} - ${amountToRelease}`,
+        ...(isStandard ? { standardReleasedAt: new Date() } : { reserveReleasedAt: new Date() }),
+      })
+      .where(eq(businessBookings.id, row.id));
+
+    const ledgerOp = isStandard
+      ? PayoutLedgerService.moveToAvailable(userId, 'pending', amountToRelease, {
+          sourceType: 'business_booking',
+          sourceId: row.id,
+          reason: 'day14_clear',
+        })
+      : PayoutLedgerService.releaseRemainingToAvailable(userId, amountToRelease, {
+          sourceType: 'business_booking',
+          sourceId: row.id,
+          reason: 'day21_clear',
+        });
+    await ledgerOp
+      .then(() =>
+        offset.cents > 0
+          ? PayoutLedgerService.debitAvailable(userId, offset.cents, {
+              sourceType: 'business_booking',
+              sourceId: row.id,
+              reason: 'business_commission_offset',
+              metadata: { collectionId: offset.collectionId },
+            })
+          : null
+      )
+      .catch(err =>
+        logger.error(`[Cron] ReserveRelease: ledger update failed (business booking ${stage})`, {
+          bookingId: row.id,
+          error: err.message,
+        })
+      );
+    released++;
+  }
+  return { released, skipped, candidates: rows.length };
+}
+
+export const releaseBusinessBookingStandardReserves = (force = false) =>
+  releaseBusinessBookingStage('standard', force);
+export const releaseBusinessBookingFinalReserves = (force = false) =>
+  releaseBusinessBookingStage('final', force);
+
 export async function runReserveRelease(force = false) {
   logger.info('[Cron] ReserveRelease: starting', { force });
   const [
@@ -1479,6 +1630,11 @@ export async function runReserveRelease(force = false) {
     customOfferMilestones: {
       standard: customOfferMilestoneStandard,
       final: customOfferMilestoneFinal,
+    },
+    // Sequential (final after standard) so force mode can't release the same row twice
+    businessBookings: {
+      standard: await releaseBusinessBookingStandardReserves(force),
+      final: await releaseBusinessBookingFinalReserves(force),
     },
   };
 

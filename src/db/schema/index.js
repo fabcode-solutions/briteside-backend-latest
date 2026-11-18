@@ -176,3 +176,6 @@ export * from './analyticsIdentity.js';
 export * from './analyticsRollups.js';
 export * from './analyticsEventDefinitions.js';
 export * from './analyticsRollupState.js';
+
+// Business accounts (service providers: profile, services, staff, team, bookings)
+export * from './businesses.js';

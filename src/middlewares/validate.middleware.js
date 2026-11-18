@@ -9,6 +9,10 @@ export function validateMiddleware(schema) {
         params: req.params,
       });
       req.body = data.body;
+      // Express 5 re-parses req.query on every read, so the assignment below
+      // doesn't stick — handlers that need the parsed/coerced values (defaults,
+      // numbers, arrays) should read req.validatedQuery instead.
+      req.validatedQuery = data.query;
       Object.assign(req.query, data.query);
       Object.assign(req.params, data.params);
       return next();
