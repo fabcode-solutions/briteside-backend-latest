@@ -124,7 +124,24 @@ const EnvVariables = z.object({
   // Didit — age verification (web gate). Endpoints answer 503 until the
   // API key + workflow are set.
   DIDIT_API_KEY: z.string().optional(),
+  // ID document + selfie workflow (used for the 18–22 band, or for everyone
+  // when no estimation workflow is configured).
   DIDIT_WORKFLOW_ID: z.string().optional(),
+  // Selfie-only age estimation workflow (liveness + age estimation, no ID).
+  // When set, users start here and only those under DIDIT_AUTO_PASS_AGE are
+  // sent on to the ID workflow.
+  DIDIT_ESTIMATE_WORKFLOW_ID: z.string().optional(),
+  DIDIT_AUTO_PASS_AGE: z.preprocess(
+    v => (v === undefined || v === '' ? undefined : Number(v)),
+    z.number().int().min(18).max(99).optional().default(23)
+  ),
+  // Delete each Didit session (selfie/ID images, face data) as soon as its
+  // result has been recorded. Set to "false" to keep sessions for manual review.
+  DIDIT_DELETE_SESSIONS: z
+    .enum(['true', 'false'])
+    .optional()
+    .default('true')
+    .transform(v => v === 'true'),
   DIDIT_WEBHOOK_SECRET: z.string().optional(),
   DIDIT_API_BASE_URL: z.string().optional().default('https://verification.didit.me'),
 });
@@ -253,12 +270,23 @@ const env = {
     descriptionFetchLimit: envVars.EXTERNAL_EVENTS_DESCRIPTION_FETCH_LIMIT,
     configured: !!(envVars.TICKETMASTER_API_KEY || envVars.VENUNITE_API_KEY),
   },
+  // DIDIT_*_LOCAL in the .env file win over everything (AWS secrets carry the
+  // Live Didit app), so local dev can point at the Didit Sandbox app — free,
+  // and it allows a localhost callback. Set all four _LOCAL keys together:
+  // a Sandbox key can't see Live workflows and vice versa.
   didit: {
-    apiKey: envVars.DIDIT_API_KEY,
-    workflowId: envVars.DIDIT_WORKFLOW_ID,
-    webhookSecret: envVars.DIDIT_WEBHOOK_SECRET,
+    apiKey: fileEnv.DIDIT_API_KEY_LOCAL || envVars.DIDIT_API_KEY,
+    workflowId: fileEnv.DIDIT_WORKFLOW_ID_LOCAL || envVars.DIDIT_WORKFLOW_ID,
+    estimateWorkflowId:
+      fileEnv.DIDIT_ESTIMATE_WORKFLOW_ID_LOCAL || envVars.DIDIT_ESTIMATE_WORKFLOW_ID,
+    autoPassAge: envVars.DIDIT_AUTO_PASS_AGE,
+    deleteSessions: envVars.DIDIT_DELETE_SESSIONS,
+    webhookSecret: fileEnv.DIDIT_WEBHOOK_SECRET_LOCAL || envVars.DIDIT_WEBHOOK_SECRET,
     apiBaseUrl: envVars.DIDIT_API_BASE_URL.replace(/\/+$/, ''),
-    configured: !!(envVars.DIDIT_API_KEY && envVars.DIDIT_WORKFLOW_ID),
+    configured: !!(
+      (fileEnv.DIDIT_API_KEY_LOCAL || envVars.DIDIT_API_KEY) &&
+      (fileEnv.DIDIT_WORKFLOW_ID_LOCAL || envVars.DIDIT_WORKFLOW_ID)
+    ),
   },
 };
 
@@ -278,6 +306,42 @@ if (env.nodeEnv === 'production') {
   if (missingIap.length > 0) {
     logger.error(`[config] In-app purchases are not fully configured — missing: ${missingIap.join(', ')}`);
   }
+}
+
+// TEMP DEBUG - remove after checking
+const KEYS_TO_CHECK = [
+  // Stripe
+  'STRIPE_SECRET_KEY',
+  'STRIPE_PUBLISHABLE_KEY',
+  'STRIPE_WEBHOOK_SECRET',
+  // Didit
+  'DIDIT_API_KEY',
+  'DIDIT_WORKFLOW_ID',
+  'DIDIT_WEBHOOK_SECRET',
+  // External events
+  'VENUNITE_API_KEY',
+  'TICKETMASTER_API_KEY',
+  // Other
+  'FIREBASE_SERVICE_ACCOUNT_JSON',
+  'ACRCLOUD_ACCESS_KEY',
+];
+
+console.log(
+  '[ENV CHECK]',
+  env.nodeEnv,
+  Object.fromEntries(
+    KEYS_TO_CHECK.map(k => [k, envVars[k] ? `SET (${envVars[k].length})` : 'MISSING'])
+  )
+);
+
+// Stripe: warn if a local key is overriding the production key
+const localOverrides = [
+  'STRIPE_SECRET_KEY_LOCAL',
+  'STRIPE_PUBLISHABLE_KEY_LOCAL',
+  'STRIPE_WEBHOOK_SECRET_LOCAL',
+].filter(k => envVars[k] || fileEnv[k]);
+if (env.nodeEnv === 'production' && localOverrides.length) {
+  console.log('[ENV CHECK] WARNING: _LOCAL keys are set in production:', localOverrides);
 }
 
 export default env;

@@ -1598,6 +1598,7 @@ export class SubscriptionService {
           user_name: user.firstName,
           next_billing_date: dayjs(trialEnd ?? subscription.currentPeriodEnd).format('MMMM D, YYYY'),
           trial_end_date: trialEnd ? dayjs(trialEnd).format('MMMM D, YYYY') : null,
+          username: user.username,
         });
       }
     } catch (emailErr) {

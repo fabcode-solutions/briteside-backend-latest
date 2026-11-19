@@ -38,9 +38,27 @@ export const emailWrapper = (content, footerText) => `
   ${footer(footerText)}
 </div>`;
 
-export const ctaButton = (label, url = '#') => `
-<a href="${url}" style="background-color: ${BRAND_COLOR}; color: #fff; padding: 14px 32px;
-   text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px; margin: 0 6px; display: inline-block;">
+/**
+ * Absolute link into the web app, e.g. appUrl('/groups/my-group', { tab: 'events' }).
+ * Empty/undefined query values are dropped.
+ */
+export const appUrl = (path = '/', query = {}) => {
+  const url = new URL(path, FRONTEND_URL);
+  Object.entries(query).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+  });
+  return url.toString();
+};
+
+/**
+ * Brand call-to-action button. Always pass the destination; a missing or
+ * placeholder ('#') URL falls back to the app home so a button is never dead.
+ * Vertical margin keeps buttons apart when they wrap onto separate lines
+ * (narrow phone screens), not just side by side.
+ */
+export const ctaButton = (label, url) => `
+<a href="${url && url !== '#' ? url : FRONTEND_URL}" target="_blank" style="background-color: ${BRAND_COLOR}; color: #fff; padding: 14px 32px;
+   text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 15px; line-height: 1.2; margin: 6px; display: inline-block;">
   ${label}
 </a>`;
 

@@ -54,6 +54,7 @@ import {
   getUserInformation,
   getUserTicketCountForTier,
   getUserTicketCountsForTiers,
+  buildTicketViewUrl,
 } from '../utils/helper.js';
 import {
   sendEventPublishedEmail,
@@ -3231,7 +3232,15 @@ export class EventService {
       // Send ticket purchase email to user
       try {
         if (holderEmail && event && event.venue && tickets.length > 0) {
-          const downloadUrl = `${process.env.API_HOST || 'https://gokyro.com'}/tickets/user`;
+          // Link into the web app's ticket page — this used to point at the
+          // API host (/tickets/user), which isn't a page users can open.
+          const viewTokens = tickets.map(t => t.viewToken).filter(Boolean);
+          const frontendBase = (
+            process.env.FRONTEND_URL || 'https://www.briteside.app'
+          ).replace(/\/+$/, '');
+          const downloadUrl = viewTokens.length
+            ? buildTicketViewUrl(viewTokens)
+            : `${frontendBase}/events/${encodeURIComponent(event.slug ?? event.id)}/ticket`;
           await sendTicketPurchaseEmail(holderEmail, event, tickets, event.venue, downloadUrl);
         }
       } catch (mailError) {

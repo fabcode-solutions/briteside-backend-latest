@@ -171,6 +171,7 @@ const sendReminderToBoth = async (session, reminderType) => {
           .format('h:mm A'),
         timezone: booker.timezone || 'UTC',
         duration: session.durationMins,
+        session_id: session.id,
       });
     } else {
       const { subject, html } = emailFn(booker, talentName, session, booker.timezone || 'UTC');
@@ -217,6 +218,7 @@ const sendReminderToBoth = async (session, reminderType) => {
           .format('h:mm A'),
         timezone: talentUser.timezone || 'UTC',
         duration: session.durationMins,
+        session_id: session.id,
       });
     } else {
       const { subject, html } = emailFn(

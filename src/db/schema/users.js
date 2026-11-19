@@ -89,6 +89,12 @@ export const users = pgTable(
     // ('Not Started', 'In Progress', 'In Review', 'Approved', 'Declined', …).
     diditSessionId: varchar('didit_session_id', { length: 64 }),
     diditSessionStatus: varchar('didit_session_status', { length: 30 }),
+    // Which Didit workflow diditSessionId belongs to: 'estimate' (selfie age
+    // estimation) or 'id' (ID document + selfie). Null on pre-estimation rows.
+    diditSessionKind: varchar('didit_session_kind', { length: 20 }),
+    // Null → start with the selfie age estimate. 'id_required' → the estimate
+    // was under the auto-pass age, so the user must verify with an ID.
+    ageVerificationStep: varchar('age_verification_step', { length: 20 }),
     // Set when the user finishes the app setup flow (event + group category
     // interests). Null → the web app shows the setup screens.
     onboardingCompletedAt: timestamp('onboarding_completed_at', { withTimezone: true }),

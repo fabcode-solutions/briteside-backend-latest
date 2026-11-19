@@ -4,7 +4,16 @@
  *         group payment failed, group fee change
  */
 
-import { header, footer, ctaButton, infoBox, calloutBox } from './emailLayout.js';
+import { header, footer, ctaButton, infoBox, calloutBox, appUrl } from './emailLayout.js';
+
+// Group page (optionally a tab: discussions | groupchat | events | members).
+// Falls back to the groups directory when the caller didn't pass a slug.
+const groupUrl = (slug, tab) => (slug ? appUrl(`/groups/${slug}`, { tab }) : appUrl('/groups'));
+const MANAGE_MEMBERSHIPS_URL = appUrl('/subscriptions');
+const NOTIFICATION_SETTINGS_URL = appUrl('/settings/notifications');
+const footerLink = (label, url) => `<a href="${url}" style="color:#999;">${label}</a>`;
+// "12.5" or "12.5%" → "12.5%" (callers weren't consistent → "12.5%%").
+const pct = v => `${String(v ?? '').replace(/%+$/, '')}%`;
 
 export const groupTemplates = {
   // ── Group Invitation ────────────────────────────────────────────────────
@@ -21,6 +30,7 @@ export const groupTemplates = {
       group_category,
       personal_message,
       invite_date,
+      group_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -30,21 +40,19 @@ export const groupTemplates = {
           <p><strong>${inviter_name}</strong> thinks you'd be a great addition to:</p>
           <div style="background:#f8f8f8;border-radius:6px;padding:16px;margin:16px 0;">
             <h3 style="margin:0 0 8px;color:#00D16E;">${group_name}</h3>
-            <p style="margin:0 0 12px;">${group_description}</p>
-            <div>👥 ${member_count} members</div>
-            <div>📍 ${group_location}</div>
-            <div>🏷️ ${group_category}</div>
+            ${group_description ? `<p style="margin:0 0 12px;">${group_description}</p>` : ''}
+            ${member_count ? `<div>👥 ${member_count} members</div>` : ''}
+            ${group_location ? `<div>📍 ${group_location}</div>` : ''}
+            ${group_category ? `<div>🏷️ ${group_category}</div>` : ''}
           </div>
           ${personal_message ? calloutBox(`"${personal_message}"<br/><small>– ${inviter_name}</small>`, 'neutral') : ''}
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Accept Invitation')}
-            ${ctaButton('View Group')}
-            ${ctaButton('Decline')}
+            ${ctaButton('View Group', groupUrl(group_slug))}
           </div>
-          <p style="font-size:13px;color:#666;">This invitation will expire in 7 days.</p>
+          <p style="font-size:13px;color:#666;">Open the group to take a look and join.</p>
           <p><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Invitation sent by ${inviter_name} on ${invite_date}.<br/><a href="#">Manage invitations</a> | <a href="#">Block invitations from this user</a>`)}
+        ${footer(`Invitation sent by ${inviter_name} on ${invite_date}.<br/>${footerLink('Notification settings', NOTIFICATION_SETTINGS_URL)}`)}
       </div>`,
   },
 
@@ -52,7 +60,14 @@ export const groupTemplates = {
   paidGroupSubscription: {
     id: 'paid-group-subscription',
     subject: ({ group_name }) => `Welcome to ${group_name}! 🎉`,
-    html: ({ user_name, group_name, organizer_name, membership_price, next_billing_date }) => `
+    html: ({
+      user_name,
+      group_name,
+      organizer_name,
+      membership_price,
+      next_billing_date,
+      group_slug,
+    }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
         <div style="padding:30px 20px;">
@@ -61,9 +76,11 @@ export const groupTemplates = {
           <p>Your membership is now active and you have full access to everything this group has to offer.</p>
           ${infoBox([
             ['Group', `👥 ${group_name}`],
-            ['Organized by', `📋 ${organizer_name}`],
+            organizer_name && ['Organized by', `📋 ${organizer_name}`],
             ['Membership', `💰 ${membership_price}/month`],
-            ['Next Billing Date', `📅 ${next_billing_date}`],
+            next_billing_date && next_billing_date !== 'N/A'
+              ? ['Next Billing Date', `📅 ${next_billing_date}`]
+              : null,
           ])}
           <p><strong>What's Included:</strong></p>
           <ul>
@@ -74,13 +91,13 @@ export const groupTemplates = {
             <li>✅ Group live streams & recordings</li>
           </ul>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Go to Group')}
-            ${ctaButton('View Events')}
-            ${ctaButton('View Members')}
+            ${ctaButton('Go to Group', groupUrl(group_slug))}
+            ${ctaButton('View Events', groupUrl(group_slug, 'events'))}
+            ${ctaButton('View Members', groupUrl(group_slug, 'members'))}
           </div>
-          <p><strong>The ${group_name} Team</strong></p>
+          <p>See you in the group!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`You received this email because you subscribed to ${group_name}.<br/><a href="#">Manage membership</a> | <a href="#">Unsubscribe</a>`)}
+        ${footer(`You received this email because you subscribed to ${group_name}.<br/>${footerLink('Manage membership', MANAGE_MEMBERSHIPS_URL)} | ${footerLink('Email settings', NOTIFICATION_SETTINGS_URL)}`)}
       </div>`,
   },
 
@@ -88,7 +105,7 @@ export const groupTemplates = {
   groupMembershipCancellation: {
     id: 'group-membership-cancellation',
     subject: ({ group_name }) => `Your ${group_name} Membership Has Been Cancelled`,
-    html: ({ user_name, group_name, access_end_date, final_charge }) => `
+    html: ({ user_name, group_name, access_end_date, final_charge, group_slug }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
         <div style="padding:30px 20px;">
@@ -111,12 +128,12 @@ export const groupTemplates = {
             <li>❌ Group live streams & recordings</li>
           </ul>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton(`Rejoin ${group_name}`)}
-            ${ctaButton('Share Feedback')}
+            ${ctaButton(`Rejoin ${group_name}`, groupUrl(group_slug))}
+            ${ctaButton('Share Feedback', appUrl('/contact'))}
           </div>
           <p><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`You received this email because you cancelled your membership to ${group_name}.<br/><a href="#">Manage memberships</a> | <a href="#">Unsubscribe</a>`)}
+        ${footer(`You received this email because you cancelled your membership to ${group_name}.<br/>${footerLink('Manage memberships', MANAGE_MEMBERSHIPS_URL)} | ${footerLink('Email settings', NOTIFICATION_SETTINGS_URL)}`)}
       </div>`,
   },
 
@@ -150,12 +167,12 @@ export const groupTemplates = {
           )}
           <p>We'll automatically retry on <strong>${next_retry_date}</strong>. If payment continues to fail after <strong>${max_retries}</strong> attempts, your membership will be suspended on <strong>${suspension_date}</strong>.</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Update Payment Method')}
-            ${ctaButton('Contact Support')}
+            ${ctaButton('Update Payment Method', appUrl('/settings/payment'))}
+            ${ctaButton('Contact Support', appUrl('/help'))}
           </div>
           <p><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Payment failure notice for ${group_name}.<br/><a href="#">Manage memberships</a> | <a href="#">Unsubscribe</a>`)}
+        ${footer(`Payment failure notice for ${group_name}.<br/>${footerLink('Manage memberships', MANAGE_MEMBERSHIPS_URL)} | ${footerLink('Email settings', NOTIFICATION_SETTINGS_URL)}`)}
       </div>`,
   },
 
@@ -191,10 +208,10 @@ export const groupTemplates = {
           ])}
           <p>${
             is_price_increase
-              ? `This represents a <strong>${change_percentage}% increase</strong> from your current rate.`
-              : `🎉 Great news! This represents a <strong>${change_percentage}% decrease</strong> from your current rate.`
+              ? `This represents a <strong>${pct(change_percentage)} increase</strong> from your current rate.`
+              : `🎉 Great news! This represents a <strong>${pct(change_percentage)} decrease</strong> from your current rate.`
           }</p>
-          <p><strong>Why this change?</strong> ${fee_change_reason}</p>
+          ${fee_change_reason ? `<p><strong>Why this change?</strong> ${fee_change_reason}</p>` : ''}
           ${
             is_grandfathered
               ? calloutBox(`✅ As a valued existing member, you'll continue paying <strong>${old_fee}/${billing_cycle}</strong> until ${grandfather_end_date}.`, 'success')
@@ -207,10 +224,10 @@ export const groupTemplates = {
           <ul>${membership_benefits.map(b => `<li>${b}</li>`).join('')}</ul>`
               : ''
           }
-          <div style="text-align:center;margin:24px 0;">${ctaButton('Manage My Membership')}</div>
+          <div style="text-align:center;margin:24px 0;">${ctaButton('Manage My Membership', MANAGE_MEMBERSHIPS_URL)}</div>
           <p>Thank you for being part of <strong>${group_name}</strong>!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Fee change notification for ${group_name}.<br/><a href="#">Manage membership</a> | <a href="#">Unsubscribe</a>`)}
+        ${footer(`Fee change notification for ${group_name}.<br/>${footerLink('Manage membership', MANAGE_MEMBERSHIPS_URL)} | ${footerLink('Email settings', NOTIFICATION_SETTINGS_URL)}`)}
       </div>`,
   },
 };

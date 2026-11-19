@@ -5,7 +5,26 @@
  *         priority message request/reply, notification digest, abandoned cart
  */
 
-import { header, footer, ctaButton, infoBox, calloutBox } from './emailLayout.js';
+import { header, footer, ctaButton, infoBox, calloutBox, appUrl } from './emailLayout.js';
+
+// There is no standalone community-guidelines page; the policies hub holds them.
+const GUIDELINES_URL = appUrl('/policies');
+const HELP_URL = appUrl('/help');
+const CONTACT_URL = appUrl('/contact');
+const LOGIN_URL = appUrl('/login');
+// Post-removal appeals have no in-app flow; support handles them via the contact form.
+const POST_APPEAL_URL = CONTACT_URL;
+// Suspended users who log in get the in-app suspension screen with its appeal form.
+const SUSPENSION_APPEAL_URL = LOGIN_URL;
+const NOTIFICATION_SETTINGS_URL = appUrl('/settings/notifications');
+// "Who can message you" lives under privacy settings.
+const MESSAGE_SETTINGS_URL = appUrl('/settings/privacy');
+const EVENTS_URL = appUrl('/events');
+const footerLink = (label, url) => `<a href="${url}" style="color:#999;">${label}</a>`;
+// Public profile; null when the caller didn't pass a username.
+const profileUrl = username => (username ? appUrl(`/${encodeURIComponent(username)}`) : null);
+// Priority inbox, opened on the specific message when its id is known.
+const priorityMessageUrl = id => appUrl('/messages', { tab: 'priority', priorityMsgId: id });
 
 // ─── Moderation ──────────────────────────────────────────────────────────────
 
@@ -41,19 +60,19 @@ export const moderationTemplates = {
               : `<p>This is your <strong>${offense_count}</strong> violation. Continued violations may result in temporary or permanent suspension.</p>`
           }
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Review Community Guidelines')}
-            ${ctaButton('Submit an Appeal')}
+            ${ctaButton('Review Community Guidelines', GUIDELINES_URL)}
+            ${ctaButton('Submit an Appeal', POST_APPEAL_URL)}
           </div>
           <p><strong>The Briteside Trust & Safety Team</strong></p>
         </div>
-        ${footer(`Violation notice issued on ${notice_date}.<br/><a href="#">Review guidelines</a> | <a href="#">Submit appeal</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Violation notice issued on ${notice_date}.<br/>${footerLink('Review guidelines', GUIDELINES_URL)} | ${footerLink('Submit appeal', POST_APPEAL_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 
   appealApproved: {
     id: 'appeal-approved',
     subject: () => 'Good news: Your appeal has been approved',
-    html: ({ user_name, post_excerpt, appeal_date, decision_date, review_notes }) => `
+    html: ({ user_name, post_excerpt, appeal_date, decision_date, review_notes, post_id }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
         <div style="padding:30px 20px;">
@@ -70,12 +89,15 @@ export const moderationTemplates = {
           ${review_notes ? `<p><strong>Our Findings:</strong> ${review_notes}</p>` : ''}
           <p>Your post has been restored and is now visible. Any restrictions have been lifted. This incident will not count against your account standing.</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('View Your Restored Post')}
-            ${ctaButton('Share Feedback')}
+            ${ctaButton(
+              'View Your Restored Post',
+              post_id ? appUrl(`/feed/post/${encodeURIComponent(post_id)}`) : appUrl('/feed')
+            )}
+            ${ctaButton('Share Feedback', CONTACT_URL)}
           </div>
           <p><strong>The Briteside Trust & Safety Team</strong></p>
         </div>
-        ${footer(`Appeal decision issued on ${decision_date}.<br/><a href="#">View community guidelines</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Appeal decision issued on ${decision_date}.<br/>${footerLink('View community guidelines', GUIDELINES_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 
@@ -113,13 +135,13 @@ export const moderationTemplates = {
               : `<p>${account_status_update}</p>`
           }
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Review Community Guidelines')}
-            ${ctaButton('View Help Center')}
-            ${ctaButton('Contact Support')}
+            ${ctaButton('Review Community Guidelines', GUIDELINES_URL)}
+            ${ctaButton('View Help Center', HELP_URL)}
+            ${ctaButton('Contact Support', CONTACT_URL)}
           </div>
           <p><strong>The Briteside Trust & Safety Team</strong></p>
         </div>
-        ${footer(`Appeal decision issued on ${decision_date}.<br/><a href="#">Review guidelines</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Appeal decision issued on ${decision_date}.<br/>${footerLink('Review guidelines', GUIDELINES_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 
@@ -164,13 +186,12 @@ export const moderationTemplates = {
               : `<p>This suspension is <strong>permanent</strong> due to severe or repeated violations.</p>`
           }
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Submit an Appeal')}
-            ${ctaButton('Request Data Export')}
-            ${ctaButton('Contact Trust & Safety')}
+            ${ctaButton('Submit an Appeal', SUSPENSION_APPEAL_URL)}
+            ${ctaButton('Contact Trust & Safety', CONTACT_URL)}
           </div>
           <p><strong>The Briteside Trust & Safety Team</strong></p>
         </div>
-        ${footer(`Suspension notice issued on ${suspension_date}.<br/><a href="#">Submit appeal</a> | <a href="#">Request data</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Suspension notice issued on ${suspension_date}.<br/>${footerLink('Submit appeal', SUSPENSION_APPEAL_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 
@@ -191,12 +212,12 @@ export const moderationTemplates = {
           )}
           <p>You now have full access to your Briteside account. All previously hidden content has been restored.</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Log In to Your Account')}
-            ${ctaButton('Review Community Guidelines')}
+            ${ctaButton('Log In to Your Account', LOGIN_URL)}
+            ${ctaButton('Review Community Guidelines', GUIDELINES_URL)}
           </div>
           <p>We're glad to have you back!<br/><strong>The Briteside Trust & Safety Team</strong></p>
         </div>
-        ${footer(`Account reinstated on ${reinstatement_date}.<br/><a href="#">View community guidelines</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Account reinstated on ${reinstatement_date}.<br/>${footerLink('View community guidelines', GUIDELINES_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 
@@ -239,13 +260,12 @@ export const moderationTemplates = {
           }
           <p>You may submit one final appeal within 30 days. You also have 30 days to request a copy of your personal data before it is permanently deleted.</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Submit Final Appeal')}
-            ${ctaButton('Request Data Export')}
-            ${ctaButton('Contact Trust & Safety')}
+            ${ctaButton('Submit Final Appeal', SUSPENSION_APPEAL_URL)}
+            ${ctaButton('Contact Trust & Safety', CONTACT_URL)}
           </div>
           <p><strong>The Briteside Trust & Safety Team</strong></p>
         </div>
-        ${footer(`Permanent suspension notice issued on ${suspension_date}.<br/><a href="#">Submit appeal</a> | <a href="#">Request data</a> | <a href="#">Contact support</a>`)}
+        ${footer(`Permanent suspension notice issued on ${suspension_date}.<br/>${footerLink('Submit appeal', SUSPENSION_APPEAL_URL)} | ${footerLink('Contact support', CONTACT_URL)}`)}
       </div>`,
   },
 };
@@ -256,7 +276,15 @@ export const notificationTemplates = {
   priorityMessageRequest: {
     id: 'priority-message-request',
     subject: ({ sender_name }) => `${sender_name} wants to send you a priority message`,
-    html: ({ user_name, sender_name, sender_bio, sender_followers, sender_mutual_connections }) => `
+    html: ({
+      user_name,
+      sender_name,
+      sender_bio,
+      sender_followers,
+      sender_mutual_connections,
+      sender_username,
+      priority_message_id,
+    }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
         <div style="padding:30px 20px;">
@@ -270,21 +298,29 @@ export const notificationTemplates = {
           </div>
           <p>Priority messages ensure your message gets noticed. ${sender_name} has paid a fee to contact you, showing they value your time.</p>
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Accept Request')}
-            ${ctaButton('Decline')}
-            ${ctaButton('View Profile')}
+            ${ctaButton('View Request', priorityMessageUrl(priority_message_id))}
+            ${sender_username ? ctaButton('View Profile', profileUrl(sender_username)) : ''}
           </div>
           <p style="font-size:13px;color:#666;">This request will expire in 48 hours.</p>
           <p><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Priority message request from ${sender_name}.<br/><a href="#">Manage message settings</a> | <a href="#">Block this user</a>`)}
+        ${footer(`Priority message request from ${sender_name}.<br/>${footerLink('Manage message settings', MESSAGE_SETTINGS_URL)}${sender_username ? ` | ${footerLink('Block this user', profileUrl(sender_username))}` : ''}`)}
       </div>`,
   },
 
   priorityMessage: {
     id: 'priority-message',
     subject: ({ sender_name }) => `You have a priority message from ${sender_name}`,
-    html: ({ user_name, sender_name, message_content, message_time, message_date, sender_bio }) => `
+    html: ({
+      user_name,
+      sender_name,
+      message_content,
+      message_time,
+      message_date,
+      sender_bio,
+      sender_username,
+      priority_message_id,
+    }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
         <div style="padding:30px 20px;">
@@ -293,14 +329,14 @@ export const notificationTemplates = {
           <p><strong>${sender_name}</strong> sent you a priority message:</p>
           ${calloutBox(`<p style="margin:0;">${message_content}</p><p style="margin:8px 0 0;font-size:12px;color:#666;">Sent: ${message_time}</p>`, 'neutral')}
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton(`Reply to ${sender_name}`)}
-            ${ctaButton('View Full Message')}
-            ${ctaButton('View Profile')}
+            ${ctaButton(`Reply to ${sender_name}`, priorityMessageUrl(priority_message_id))}
+            ${ctaButton('View Full Message', priorityMessageUrl(priority_message_id))}
+            ${sender_username ? ctaButton('View Profile', profileUrl(sender_username)) : ''}
           </div>
           ${sender_bio ? `<p><strong>About ${sender_name}:</strong> ${sender_bio}</p>` : ''}
           <p><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Priority message received on ${message_date}.<br/><a href="#">Manage notifications</a> | <a href="#">Message settings</a>`)}
+        ${footer(`Priority message received on ${message_date}.<br/>${footerLink('Manage notifications', NOTIFICATION_SETTINGS_URL)} | ${footerLink('Message settings', MESSAGE_SETTINGS_URL)}`)}
       </div>`,
   },
 
@@ -340,7 +376,7 @@ export const notificationTemplates = {
               ? `
           <p><strong>Upcoming Events (${upcoming_events.length}):</strong></p>
           <ul>${upcoming_events.map(e => `<li>📅 ${e.name} – ${e.date}</li>`).join('')}</ul>
-          <div style="text-align:center;margin:12px 0;">${ctaButton('View All Events')}</div>`
+          <div style="text-align:center;margin:12px 0;">${ctaButton('View All Events', EVENTS_URL)}</div>`
               : ''
           }
 
@@ -349,7 +385,7 @@ export const notificationTemplates = {
               ? `
           <p><strong>Trending in Your Area:</strong></p>
           <ul>${trending_events.map(e => `<li>🔥 ${e.name} – ${e.attendees} attending</li>`).join('')}</ul>
-          <div style="text-align:center;margin:12px 0;">${ctaButton('Explore Trending Events')}</div>`
+          <div style="text-align:center;margin:12px 0;">${ctaButton('Explore Trending Events', EVENTS_URL)}</div>`
               : ''
           }
 
@@ -358,7 +394,7 @@ export const notificationTemplates = {
               ? `
           <p><strong>Groups You Might Like:</strong></p>
           <ul>${suggested_groups.map(g => `<li>👥 ${g.name} – ${g.members} members</li>`).join('')}</ul>
-          <div style="text-align:center;margin:12px 0;">${ctaButton('Discover Groups')}</div>`
+          <div style="text-align:center;margin:12px 0;">${ctaButton('Discover Groups', appUrl('/groups'))}</div>`
               : ''
           }
 
@@ -367,13 +403,13 @@ export const notificationTemplates = {
               ? `
           <p><strong>People to Follow:</strong></p>
           <ul>${suggested_users.map(u => `<li>✨ ${u.name} – ${u.followers} followers</li>`).join('')}</ul>
-          <div style="text-align:center;margin:12px 0;">${ctaButton('Find More People')}</div>`
+          <div style="text-align:center;margin:12px 0;">${ctaButton('Find More People', appUrl('/feed/discover'))}</div>`
               : ''
           }
 
           <p>Have a great week!<br/><strong>The Briteside Team</strong></p>
         </div>
-        ${footer(`Weekly digest for ${week_start} – ${week_end}.<br/><a href="#">Manage digest preferences</a> | <a href="#">Unsubscribe from digest</a>`)}
+        ${footer(`Weekly digest for ${week_start} – ${week_end}.<br/>${footerLink('Email settings', NOTIFICATION_SETTINGS_URL)}`)}
       </div>`,
   },
 
@@ -396,6 +432,7 @@ export const notificationTemplates = {
       low_stock,
       event_description,
       reminder_date,
+      event_slug,
     }) => `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
         ${header}
@@ -418,12 +455,12 @@ export const notificationTemplates = {
           </div>
           ${low_stock ? `<p style="color:#c0392b;font-weight:bold;">⚠️ Only ${remaining_tickets} tickets left at this price!</p>` : ''}
           <div style="text-align:center;margin:24px 0;">
-            ${ctaButton('Complete My Purchase')}
+            ${ctaButton('Complete My Purchase', event_slug ? appUrl(`/events/${encodeURIComponent(event_slug)}`) : EVENTS_URL)}
           </div>
           ${event_description ? `<p>${event_description}</p>` : ''}
           <p>See you at the event!<br/><strong>The Briteside Events Team</strong></p>
         </div>
-        ${footer(`Cart reminder sent on ${reminder_date}.<br/><a href="#">Browse more events</a> | <a href="#">Unsubscribe from cart reminders</a>`)}
+        ${footer(`Cart reminder sent on ${reminder_date}.<br/>${footerLink('Browse more events', EVENTS_URL)} | ${footerLink('Email settings', NOTIFICATION_SETTINGS_URL)}`)}
       </div>`,
   },
 };
