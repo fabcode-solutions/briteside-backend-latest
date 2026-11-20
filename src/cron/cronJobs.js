@@ -20,6 +20,7 @@ import {
 import { runReserveRelease } from './reserveRelease.js';
 import { BusinessBookingService } from '../services/businessBooking.service.js';
 import { BusinessCommissionService } from '../services/businessCommission.service.js';
+import { BusinessReviewService } from '../services/businessReview.service.js';
 import { runPayoutSweep } from './payoutSweep.js';
 import { startPriorityMessageRefundCron } from './priorityMessageRefund.js';
 import { startIapCatalogSyncCron } from './iapCatalogSync.js';
@@ -116,6 +117,12 @@ export const initializeCronJobs = () => {
   cron.schedule(
     '0 9 * * *',
     runCron('businessCommissionCardCharges', () => BusinessCommissionService.chargeSavedCards())
+  );
+
+  // Ask customers to review a business visit ~24h after it completed — hourly
+  cron.schedule(
+    '10 * * * *',
+    runCron('businessReviewReminders', () => BusinessReviewService.sendReviewReminders())
   );
 
   // Auto-end live sessions that have exceeded their booked duration

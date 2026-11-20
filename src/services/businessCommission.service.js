@@ -62,9 +62,13 @@ const money = c => `$${(c / 100).toFixed(2)}`;
 const remaining = c => c.amountCents - c.collectedCents;
 const startOfMonthUtc = (d = new Date()) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
 
-/** Service amount the customer paid in person (what the 5% is charged on). */
+/**
+ * What the customer paid in person (what the 5% is charged on): the service
+ * price not paid online, plus any extras added when the booking was completed.
+ */
 export function inPersonCents(booking) {
-  return Math.max(0, (booking.servicePriceCents ?? 0) - (booking.amountPaidCents ?? 0));
+  const total = (booking.servicePriceCents ?? 0) + (booking.extraChargesCents ?? 0);
+  return Math.max(0, total - (booking.amountPaidCents ?? 0));
 }
 
 /** 5% of the in-person part — shown on the booking, charged once it completes. */
@@ -227,7 +231,7 @@ export class BusinessCommissionService {
       .where(
         and(
           eq(businessBookings.status, 'completed'),
-          sql`${businessBookings.servicePriceCents} > ${businessBookings.amountPaidCents}`,
+          sql`${businessBookings.servicePriceCents} + ${businessBookings.extraChargesCents} > ${businessBookings.amountPaidCents}`,
           isNull(businessCommissionCharges.id)
         )
       )

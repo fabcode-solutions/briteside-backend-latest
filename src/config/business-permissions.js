@@ -13,6 +13,8 @@ export const BUSINESS_PERMISSIONS = {
   BOOKINGS_MANAGE: 'bookings.manage',
   CUSTOMERS_VIEW: 'customers.view',
   REPORTS_VIEW: 'reports.view',
+  // Reply to customer reviews
+  REVIEWS_MANAGE: 'reviews.manage',
   EARNINGS_VIEW: 'earnings.view',
   WALLET_MANAGE: 'wallet.manage',
   TAXES_MANAGE: 'taxes.manage',

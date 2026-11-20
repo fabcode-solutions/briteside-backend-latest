@@ -2,7 +2,12 @@ import httpStatus from 'http-status';
 import { catchAsync } from '../utils/catch-async.js';
 import { BusinessService } from '../services/business.service.js';
 import { BusinessBookingService } from '../services/businessBooking.service.js';
+import { BusinessGroupSessionService } from '../services/businessGroupSession.service.js';
+import { BusinessGalleryService } from '../services/businessGallery.service.js';
 import { BusinessCommissionService } from '../services/businessCommission.service.js';
+import { BusinessReviewService } from '../services/businessReview.service.js';
+import { BusinessEarningsService } from '../services/businessEarnings.service.js';
+import { BusinessWallService } from '../services/businessWall.service.js';
 
 // ─── Public ─────────────────────────────────────────────────────────────────
 export const getCategories = catchAsync(async (req, res) => {
@@ -48,6 +53,40 @@ export const updateBusiness = catchAsync(async (req, res) => {
 export const updatePolicies = catchAsync(async (req, res) => {
   const business = await BusinessService.update(req.business, req.body);
   res.json({ success: true, data: { business } });
+});
+
+export const saveAddOns = catchAsync(async (req, res) => {
+  const addOns = await BusinessService.saveAddOns(req.business, req.body.addOns);
+  res.json({ success: true, data: { addOns } });
+});
+
+export const saveQuestionnaires = catchAsync(async (req, res) => {
+  const data = await BusinessService.saveQuestionnaires(req.business, req.body.questionnaires);
+  res.json({ success: true, data });
+});
+
+export const uploadBookingAttachment = catchAsync(async (req, res) => {
+  const attachment = await BusinessBookingService.uploadAttachment(req.params.idOrSlug, req.user, req.file);
+  res.status(201).json({ success: true, data: { attachment } });
+});
+
+export const getBookingAttachmentForBusiness = catchAsync(async (req, res) => {
+  const data = await BusinessBookingService.attachmentUrlForBusiness(
+    req.business,
+    req.params.bookingId,
+    req.businessAccess,
+    Number(req.params.index)
+  );
+  res.json({ success: true, data });
+});
+
+export const getMyBookingAttachment = catchAsync(async (req, res) => {
+  const data = await BusinessBookingService.attachmentUrlForCustomer(
+    req.user,
+    req.params.bookingId,
+    Number(req.params.index)
+  );
+  res.json({ success: true, data });
 });
 
 export const updateBookingQuestions = catchAsync(async (req, res) => {
@@ -141,6 +180,16 @@ export const inviteTeamMember = catchAsync(async (req, res) => {
   res.status(httpStatus.CREATED).json({ success: true, data: { member } });
 });
 
+export const updateTeamMember = catchAsync(async (req, res) => {
+  const member = await BusinessService.updateMemberRole(
+    req.business,
+    req.user,
+    req.params.memberId,
+    req.body.role
+  );
+  res.json({ success: true, data: { member } });
+});
+
 export const revokeTeamMember = catchAsync(async (req, res) => {
   await BusinessService.revokeMember(req.business, req.params.memberId);
   res.json({ success: true, message: 'Access removed' });
@@ -159,8 +208,143 @@ export const getSlots = catchAsync(async (req, res) => {
 });
 
 export const getBookingQuote = catchAsync(async (req, res) => {
-  const pricing = await BusinessBookingService.quote(req.params.idOrSlug, (req.validatedQuery ?? req.query).serviceId);
+  const query = req.validatedQuery ?? req.query;
+  const pricing = await BusinessBookingService.quote(
+    req.params.idOrSlug,
+    query.serviceId,
+    query.addOnIds,
+    query.partySize ?? 1
+  );
   res.json({ success: true, data: { pricing } });
+});
+
+// Gallery posts: likes / comments
+export const getGalleryEngagement = catchAsync(async (req, res) => {
+  const data = await BusinessGalleryService.engagement(req.params.idOrSlug, req.user ?? null);
+  res.json({ success: true, data });
+});
+
+export const likeGalleryPost = catchAsync(async (req, res) => {
+  const data = await BusinessGalleryService.like(req.user, req.params.idOrSlug, req.params.postKey);
+  res.json({ success: true, data });
+});
+
+export const unlikeGalleryPost = catchAsync(async (req, res) => {
+  const data = await BusinessGalleryService.unlike(req.user, req.params.idOrSlug, req.params.postKey);
+  res.json({ success: true, data });
+});
+
+export const listGalleryComments = catchAsync(async (req, res) => {
+  const data = await BusinessGalleryService.listComments(
+    req.params.idOrSlug,
+    req.params.postKey,
+    req.user ?? null,
+    req.validatedQuery ?? req.query
+  );
+  res.json({ success: true, data });
+});
+
+export const listGalleryReplies = catchAsync(async (req, res) => {
+  const data = await BusinessGalleryService.listReplies(
+    req.params.idOrSlug,
+    req.params.postKey,
+    req.params.commentId,
+    req.user ?? null,
+    req.validatedQuery ?? req.query
+  );
+  res.json({ success: true, data });
+});
+
+export const createGalleryComment = catchAsync(async (req, res) => {
+  const comment = await BusinessGalleryService.createComment(
+    req.user,
+    req.params.idOrSlug,
+    req.params.postKey,
+    req.body
+  );
+  res.status(201).json({ success: true, data: { comment } });
+});
+
+export const updateGalleryComment = catchAsync(async (req, res) => {
+  const comment = await BusinessGalleryService.updateComment(
+    req.user,
+    req.params.idOrSlug,
+    req.params.postKey,
+    req.params.commentId,
+    req.body
+  );
+  res.json({ success: true, data: { comment } });
+});
+
+export const deleteGalleryComment = catchAsync(async (req, res) => {
+  const data = await BusinessGalleryService.removeComment(
+    req.user,
+    req.params.idOrSlug,
+    req.params.postKey,
+    req.params.commentId
+  );
+  res.json({ success: true, data });
+});
+
+export const likeGalleryComment = catchAsync(async (req, res) => {
+  const data = await BusinessGalleryService.likeComment(
+    req.user,
+    req.params.idOrSlug,
+    req.params.postKey,
+    req.params.commentId
+  );
+  res.json({ success: true, data });
+});
+
+export const unlikeGalleryComment = catchAsync(async (req, res) => {
+  const data = await BusinessGalleryService.unlikeComment(
+    req.user,
+    req.params.idOrSlug,
+    req.params.postKey,
+    req.params.commentId
+  );
+  res.json({ success: true, data });
+});
+
+export const listPublicGroupSessions = catchAsync(async (req, res) => {
+  const query = req.validatedQuery ?? req.query;
+  const data = await BusinessBookingService.listPublicGroupSessions(req.params.idOrSlug, query.serviceId);
+  res.json({ success: true, data });
+});
+
+// Group sessions (dashboard)
+export const listGroupSessions = catchAsync(async (req, res) => {
+  const data = await BusinessGroupSessionService.list(
+    req.business,
+    req.businessAccess,
+    req.validatedQuery ?? req.query
+  );
+  res.json({ success: true, data });
+});
+
+export const createGroupSessions = catchAsync(async (req, res) => {
+  const data = await BusinessGroupSessionService.create(req.business, req.businessAccess, req.body);
+  res.status(201).json({ success: true, data });
+});
+
+export const updateGroupSession = catchAsync(async (req, res) => {
+  const data = await BusinessGroupSessionService.update(
+    req.business,
+    req.businessAccess,
+    req.params.sessionId,
+    req.body
+  );
+  res.json({ success: true, data });
+});
+
+export const cancelGroupSession = catchAsync(async (req, res) => {
+  const data = await BusinessGroupSessionService.cancel(
+    req.business,
+    req.businessAccess,
+    req.params.sessionId,
+    req.body ?? {}
+  );
+  res.json({ success: true, data });
 });
 
 export const createBookingCheckout = catchAsync(async (req, res) => {
@@ -261,8 +445,236 @@ const bookingAction = method =>
 export const confirmBooking = bookingAction('confirm');
 export const declineBooking = bookingAction('decline');
 export const cancelBookingByBusiness = bookingAction('cancelByBusiness');
-export const completeBooking = bookingAction('complete');
+export const completeBooking = catchAsync(async (req, res) => {
+  const booking = await BusinessBookingService.complete(
+    req.business,
+    req.params.bookingId,
+    req.businessAccess,
+    req.body ?? {}
+  );
+  res.json({ success: true, data: { booking } });
+});
+
+export const checkInBooking = catchAsync(async (req, res) => {
+  const data = await BusinessBookingService.checkIn(
+    req.business,
+    req.params.bookingId,
+    req.businessAccess,
+    req.body ?? {}
+  );
+  res.json({ success: true, data });
+});
+
+export const createManualBooking = catchAsync(async (req, res) => {
+  const data = await BusinessBookingService.createManual(req.business, req.businessAccess, req.body);
+  res.status(httpStatus.CREATED).json({ success: true, data });
+});
 export const markBookingNoShow = bookingAction('markNoShow');
+
+export const refundBookingByBusiness = catchAsync(async (req, res) => {
+  const data = await BusinessBookingService.refundByBusiness(
+    req.business,
+    req.params.bookingId,
+    req.businessAccess,
+    req.body ?? {}
+  );
+  res.json({ success: true, data });
+});
+
+export const getBusinessRescheduleSlots = catchAsync(async (req, res) => {
+  const data = await BusinessBookingService.rescheduleSlotsForBusiness(
+    req.business,
+    req.params.bookingId,
+    req.businessAccess,
+    req.validatedQuery ?? req.query
+  );
+  res.json({ success: true, data });
+});
+
+export const rescheduleBookingByBusiness = catchAsync(async (req, res) => {
+  const data = await BusinessBookingService.rescheduleByBusiness(
+    req.business,
+    req.params.bookingId,
+    req.businessAccess,
+    req.body
+  );
+  res.json({ success: true, data });
+});
+
+export const getMyRescheduleSlots = catchAsync(async (req, res) => {
+  const data = await BusinessBookingService.rescheduleSlotsForCustomer(
+    req.user,
+    req.params.bookingId,
+    req.validatedQuery ?? req.query
+  );
+  res.json({ success: true, data });
+});
+
+export const rescheduleMyBooking = catchAsync(async (req, res) => {
+  const data = await BusinessBookingService.rescheduleByCustomer(req.user, req.params.bookingId, req.body);
+  res.json({ success: true, data });
+});
+
+// ─── Reviews ────────────────────────────────────────────────────────────────
+export const listPublicReviews = catchAsync(async (req, res) => {
+  const data = await BusinessReviewService.listPublic(req.params.idOrSlug, req.validatedQuery ?? req.query);
+  res.json({ success: true, data });
+});
+
+export const listBusinessReviews = catchAsync(async (req, res) => {
+  const data = await BusinessReviewService.listForBusiness(req.business, req.validatedQuery ?? req.query);
+  res.json({ success: true, data });
+});
+
+export const replyToReview = catchAsync(async (req, res) => {
+  const review = await BusinessReviewService.reply(req.business, req.params.reviewId, req.body.reply);
+  res.json({ success: true, data: { review } });
+});
+
+export const createReview = catchAsync(async (req, res) => {
+  const review = await BusinessReviewService.create(req.user, req.params.bookingId, req.body);
+  res.status(httpStatus.CREATED).json({ success: true, data: { review } });
+});
+
+export const updateReview = catchAsync(async (req, res) => {
+  const review = await BusinessReviewService.update(req.user, req.params.bookingId, req.body);
+  res.json({ success: true, data: { review } });
+});
+
+// ─── Wall (standard business pages) ─────────────────────────────────────────
+export const listWallPosts = catchAsync(async (req, res) => {
+  const data = await BusinessWallService.list(
+    req.params.idOrSlug,
+    req.user ?? null,
+    req.validatedQuery ?? req.query
+  );
+  res.json({ success: true, data });
+});
+
+export const createWallPost = catchAsync(async (req, res) => {
+  const post = await BusinessWallService.create(req.user, req.params.idOrSlug, req.body.text);
+  res.status(httpStatus.CREATED).json({ success: true, data: { post } });
+});
+
+export const moderateWallPost = catchAsync(async (req, res) => {
+  const post = await BusinessWallService.moderate(
+    req.user,
+    req.params.idOrSlug,
+    req.params.postId,
+    req.body.status
+  );
+  res.json({ success: true, data: { post } });
+});
+
+export const deleteWallPost = catchAsync(async (req, res) => {
+  await BusinessWallService.remove(req.user, req.params.idOrSlug, req.params.postId);
+  res.json({ success: true });
+});
+
+export const likeWallPost = catchAsync(async (req, res) => {
+  const data = await BusinessWallService.like(req.user, req.params.idOrSlug, req.params.postId);
+  res.json({ success: true, data });
+});
+
+export const unlikeWallPost = catchAsync(async (req, res) => {
+  const data = await BusinessWallService.unlike(req.user, req.params.idOrSlug, req.params.postId);
+  res.json({ success: true, data });
+});
+
+export const listWallComments = catchAsync(async (req, res) => {
+  const data = await BusinessWallService.listComments(
+    req.params.idOrSlug,
+    req.params.postId,
+    req.user ?? null,
+    req.validatedQuery ?? req.query
+  );
+  res.json({ success: true, data });
+});
+
+export const createWallComment = catchAsync(async (req, res) => {
+  const comment = await BusinessWallService.createComment(
+    req.user,
+    req.params.idOrSlug,
+    req.params.postId,
+    req.body
+  );
+  res.status(httpStatus.CREATED).json({ success: true, data: { comment } });
+});
+
+export const listWallReplies = catchAsync(async (req, res) => {
+  const data = await BusinessWallService.listReplies(
+    req.params.idOrSlug,
+    req.params.postId,
+    req.params.commentId,
+    req.user ?? null,
+    req.validatedQuery ?? req.query
+  );
+  res.json({ success: true, data });
+});
+
+export const updateWallComment = catchAsync(async (req, res) => {
+  const comment = await BusinessWallService.updateComment(
+    req.user,
+    req.params.idOrSlug,
+    req.params.postId,
+    req.params.commentId,
+    req.body
+  );
+  res.json({ success: true, data: { comment } });
+});
+
+export const deleteWallComment = catchAsync(async (req, res) => {
+  const data = await BusinessWallService.removeComment(
+    req.user,
+    req.params.idOrSlug,
+    req.params.postId,
+    req.params.commentId
+  );
+  res.json({ success: true, data });
+});
+
+export const likeWallComment = catchAsync(async (req, res) => {
+  const { idOrSlug, postId, commentId } = req.params;
+  const data = await BusinessWallService.likeComment(req.user, idOrSlug, postId, commentId);
+  res.json({ success: true, data });
+});
+
+export const unlikeWallComment = catchAsync(async (req, res) => {
+  const { idOrSlug, postId, commentId } = req.params;
+  const data = await BusinessWallService.unlikeComment(req.user, idOrSlug, postId, commentId);
+  res.json({ success: true, data });
+});
+
+// ─── Earnings & wallet ──────────────────────────────────────────────────────
+export const getEarnings = catchAsync(async (req, res) => {
+  const data = await BusinessEarningsService.summary(req.business, req.validatedQuery ?? req.query);
+  res.json({ success: true, data });
+});
+
+export const getPayoutHistory = catchAsync(async (req, res) => {
+  const data = await BusinessEarningsService.payoutHistory(req.business, req.validatedQuery ?? req.query);
+  res.json({ success: true, data });
+});
+
+export const getWallet = catchAsync(async (req, res) => {
+  const data = await BusinessEarningsService.wallet(req.business, req.businessAccess);
+  res.json({ success: true, data });
+});
+
+export const cashOut = catchAsync(async (req, res) => {
+  const data = await BusinessEarningsService.cashOut(req.business, req.businessAccess, req.body.amountCents);
+  res.status(httpStatus.CREATED).json({ success: true, data });
+});
+
+export const getStripeDashboardLink = catchAsync(async (req, res) => {
+  const data = await BusinessEarningsService.stripeDashboardLink(req.business, req.businessAccess);
+  res.json({ success: true, data });
+});
+
+export const getStripeOnboardingLink = catchAsync(async (req, res) => {
+  const data = await BusinessEarningsService.stripeOnboardingLink(req.business, req.businessAccess);
+  res.json({ success: true, data });
+});
 
 export const payMyBookingBalance = catchAsync(async (req, res) => {
   const data = await BusinessBookingService.createBalanceCheckout(

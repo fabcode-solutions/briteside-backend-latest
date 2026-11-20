@@ -6,6 +6,30 @@ import ApiError from '../utils/api-error.js';
 import { ALL_BUSINESS_PERMISSIONS, permissionsForRole } from '../config/business-permissions.js';
 
 /**
+ * The user's access to `business`, or null when they have none.
+ * { role: 'owner'|'admin'|'manager'|'staff'|'platform_admin', permissions, staffId }
+ */
+export async function resolveBusinessAccess(business, user) {
+  if (!user?.id) return null;
+  if (business.ownerId === user.id) {
+    return { role: 'owner', permissions: ALL_BUSINESS_PERMISSIONS, staffId: null };
+  }
+  if (user.roles?.includes('admin')) {
+    return { role: 'platform_admin', permissions: ALL_BUSINESS_PERMISSIONS, staffId: null };
+  }
+  const member = await db.query.businessTeamMembers.findFirst({
+    where: and(
+      eq(businessTeamMembers.businessId, business.id),
+      eq(businessTeamMembers.userId, user.id),
+      eq(businessTeamMembers.status, 'active')
+    ),
+  });
+  return member
+    ? { role: member.role, permissions: permissionsForRole(member.role), staffId: member.staffId }
+    : null;
+}
+
+/**
  * Resolve the caller's access to req.params.businessId and require `permission`.
  * Must run after authMiddleware. Sets:
  *   req.business        — the business row
@@ -27,27 +51,7 @@ export const requireBusinessPermission = permission => async (req, res, next) =>
       return next(new ApiError(httpStatus.NOT_FOUND, 'Business not found'));
     }
 
-    let access;
-    if (business.ownerId === req.user.id) {
-      access = { role: 'owner', permissions: ALL_BUSINESS_PERMISSIONS, staffId: null };
-    } else if (req.user.roles?.includes('admin')) {
-      access = { role: 'platform_admin', permissions: ALL_BUSINESS_PERMISSIONS, staffId: null };
-    } else {
-      const member = await db.query.businessTeamMembers.findFirst({
-        where: and(
-          eq(businessTeamMembers.businessId, business.id),
-          eq(businessTeamMembers.userId, req.user.id),
-          eq(businessTeamMembers.status, 'active')
-        ),
-      });
-      if (member) {
-        access = {
-          role: member.role,
-          permissions: permissionsForRole(member.role),
-          staffId: member.staffId,
-        };
-      }
-    }
+    const access = await resolveBusinessAccess(business, req.user);
 
     // Hide existence from outsiders
     if (!access) {

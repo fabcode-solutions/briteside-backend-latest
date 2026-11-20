@@ -12,11 +12,17 @@ import {
   businessServiceStaff,
   businessTeamMembers,
   businessBookings,
+  businessAddOns,
+  businessQuestionnaires,
+  businessGroupSessions,
 } from '../db/schema/index.js';
+import { normalizeQuestion } from '../utils/businessQuestionnaire.js';
+import { sessionSettingsProblem } from '../utils/businessSession.js';
 import ApiError from '../utils/api-error.js';
 import logger from '../config/logger.js';
 import { sendMail } from './mail.service.js';
 import { BusinessCommissionService } from './businessCommission.service.js';
+import { serviceDepositCents } from '../utils/businessDeposit.js';
 import { emailWrapper, ctaRow, ctaButton, appUrl } from '../templates/emailLayout.js';
 import {
   BUSINESS_CATEGORIES,
@@ -52,10 +58,7 @@ const emptyToNull = v => (v === '' || v === undefined ? null : v);
 
 const serializeService = (service, business) => {
   const paymentModel = service.paymentModel ?? business.defaultPaymentModel;
-  const depositCents =
-    paymentModel === 'deposit'
-      ? Math.min(service.priceCents, service.depositCents ?? Math.round(service.priceCents * 0.2))
-      : null;
+  const depositCents = paymentModel === 'deposit' ? serviceDepositCents(service) : null;
   return {
     id: service.id,
     name: service.name,
@@ -67,7 +70,19 @@ const serializeService = (service, business) => {
     paymentModel: service.paymentModel, // null = inherits business default
     effectivePaymentModel: paymentModel,
     depositCents: service.depositCents,
+    // 1–100; when set it wins over depositCents
+    depositPercent: service.depositPercent ?? null,
     effectiveDepositCents: depositCents,
+    requiresApproval: !!service.requiresApproval,
+    // null = the business's general booking questions
+    questionnaireId: service.questionnaireId ?? null,
+    // 'individual' | 'group' (priceCents per seat) | 'private_group' (priceCents per person)
+    sessionType: service.sessionType ?? 'individual',
+    capacity: service.capacity ?? null,
+    showRemainingSeats: service.showRemainingSeats ?? true,
+    minGuests: service.minGuests ?? null,
+    maxGuests: service.maxGuests ?? null,
+    minimumTotalCents: service.minimumTotalCents ?? null,
     bufferMins: service.bufferMins,
     // [] = every staff member
     eligibleStaffIds: service.allStaff ? [] : (service.staffLinks ?? []).map(l => l.staffId),
@@ -91,9 +106,33 @@ const serializeStaff = (staff, { includePrivate = false } = {}) => ({
   ...(includePrivate ? { userId: staff.userId } : {}),
 });
 
-const serializeBusiness = (b, { services = [], staff = [], includePrivate = false } = {}) => ({
+export const serializeAddOn = a => ({
+  id: a.id,
+  name: a.name,
+  priceCents: a.priceCents,
+  durationMins: a.durationMins,
+  // [] = offered with every service
+  serviceIds: a.serviceIds ?? [],
+  active: a.active,
+  sortOrder: a.sortOrder,
+});
+
+export const serializeQuestionnaire = (q, { includeInactive = true } = {}) => ({
+  id: q.id,
+  name: q.name,
+  // Public page: only the questions customers are asked
+  questions: (q.questions ?? []).filter(x => includeInactive || x.active !== false),
+  allowAttachments: q.allowAttachments,
+  sortOrder: q.sortOrder,
+});
+
+const serializeBusiness = (
+  b,
+  { services = [], staff = [], addOns = [], questionnaires = [], includePrivate = false } = {}
+) => ({
   id: b.id,
   slug: b.slug,
+  pageType: b.pageType,
   name: b.name,
   announcement: b.announcement,
   category: b.category,
@@ -110,6 +149,7 @@ const serializeBusiness = (b, { services = [], staff = [], includePrivate = fals
   longitude: b.longitude != null ? Number(b.longitude) : null,
   phone: b.phone,
   email: b.email,
+  websiteUrl: b.websiteUrl ?? null,
   timezone: b.timezone,
   hours: b.hours,
   acceptingBookings: b.acceptingBookings,
@@ -121,6 +161,7 @@ const serializeBusiness = (b, { services = [], staff = [], includePrivate = fals
     lateArrivalPolicy: b.lateArrivalPolicy,
     noShowPolicy: b.noShowPolicy,
     refundPolicy: b.refundPolicy,
+    additionalPolicies: b.additionalPolicies ?? null,
     allowCustomerRescheduling: b.allowCustomerRescheduling,
     reschedulingNoticeDays: b.reschedulingNoticeDays,
     freeCancellationHours: b.freeCancellationHours,
@@ -130,6 +171,13 @@ const serializeBusiness = (b, { services = [], staff = [], includePrivate = fals
   reviewCount: b.reviewCount,
   services: services.map(s => serializeService(s, b)),
   staff: staff.map(s => serializeStaff(s, { includePrivate })),
+  // Public: active only. Dashboard: all (inactive ones are kept but not offered).
+  addOns: (includePrivate ? addOns : addOns.filter(a => a.active)).map(serializeAddOn),
+  // Public: only ones a service uses, active questions only
+  questionnaires: (includePrivate
+    ? questionnaires
+    : questionnaires.filter(q => services.some(s => s.questionnaireId === q.id))
+  ).map(q => serializeQuestionnaire(q, { includeInactive: includePrivate })),
   ...(includePrivate
     ? { ownerId: b.ownerId, isPublished: b.isPublished, createdAt: b.createdAt, updatedAt: b.updatedAt }
     : {}),
@@ -155,7 +203,7 @@ async function generateUniqueSlug(name, tx = db) {
 }
 
 async function loadServicesAndStaff(businessId) {
-  const [services, staff] = await Promise.all([
+  const [services, staff, addOns, questionnaires] = await Promise.all([
     db.query.businessServices.findMany({
       where: and(eq(businessServices.businessId, businessId), isNull(businessServices.deletedAt)),
       with: { staffLinks: true },
@@ -165,8 +213,73 @@ async function loadServicesAndStaff(businessId) {
       where: and(eq(businessStaff.businessId, businessId), isNull(businessStaff.deletedAt)),
       orderBy: [asc(businessStaff.sortOrder), asc(businessStaff.createdAt)],
     }),
+    db.query.businessAddOns.findMany({
+      where: and(eq(businessAddOns.businessId, businessId), isNull(businessAddOns.deletedAt)),
+      orderBy: [asc(businessAddOns.sortOrder), asc(businessAddOns.createdAt)],
+    }),
+    db.query.businessQuestionnaires.findMany({
+      where: and(eq(businessQuestionnaires.businessId, businessId), isNull(businessQuestionnaires.deletedAt)),
+      orderBy: [asc(businessQuestionnaires.sortOrder), asc(businessQuestionnaires.createdAt)],
+    }),
   ]);
-  return { services, staff };
+  return { services, staff, addOns, questionnaires };
+}
+
+const SESSION_FIELDS = ['sessionType', 'capacity', 'showRemainingSeats', 'minGuests', 'maxGuests', 'minimumTotalCents'];
+
+/** Session columns for a service row — only the fields its type uses are kept. */
+function sessionColumns(s) {
+  const type = s.sessionType ?? 'individual';
+  return {
+    sessionType: type,
+    capacity: type === 'group' ? s.capacity : null,
+    showRemainingSeats: s.showRemainingSeats ?? true,
+    minGuests: type === 'private_group' ? s.minGuests : null,
+    maxGuests: type === 'private_group' ? s.maxGuests : null,
+    minimumTotalCents: type === 'private_group' ? (s.minimumTotalCents ?? 0) : null,
+  };
+}
+
+/** A group service with sessions still to run can't be removed or turned into another type. */
+async function assertNoUpcomingSessions(serviceId, action) {
+  const [upcoming] = await db
+    .select({ id: businessGroupSessions.id })
+    .from(businessGroupSessions)
+    .where(
+      and(
+        eq(businessGroupSessions.serviceId, serviceId),
+        eq(businessGroupSessions.status, 'scheduled'),
+        gte(businessGroupSessions.endAt, new Date())
+      )
+    )
+    .limit(1);
+  if (upcoming) {
+    throw new ApiError(
+      httpStatus.CONFLICT,
+      `This service has upcoming group sessions. Cancel them under Group sessions before ${action}.`
+    );
+  }
+}
+
+/** The questionnaire must be this business's and not removed. */
+async function assertQuestionnaire(businessId, questionnaireId) {
+  if (!questionnaireId) return;
+  const [row] = await db
+    .select({ id: businessQuestionnaires.id })
+    .from(businessQuestionnaires)
+    .where(
+      and(
+        eq(businessQuestionnaires.id, questionnaireId),
+        eq(businessQuestionnaires.businessId, businessId),
+        isNull(businessQuestionnaires.deletedAt)
+      )
+    );
+  if (!row) {
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      'That questionnaire no longer exists. Pick another one or refresh the page.'
+    );
+  }
 }
 
 async function assertStaffBelong(businessId, staffIds, tx = db) {
@@ -282,6 +395,7 @@ export class BusinessService {
       businesses: rows.map(r => ({
         id: r.business.id,
         slug: r.business.slug,
+        pageType: r.business.pageType,
         name: r.business.name,
         category: r.business.category,
         subcategory: r.business.subcategory,
@@ -321,12 +435,17 @@ export class BusinessService {
     if (!business || !isBusinessPublic(business, business.owner)) {
       throw new ApiError(httpStatus.NOT_FOUND, 'Business not found');
     }
-    const [{ services, staff }, paused] = await Promise.all([
+    const [{ services, staff, addOns, questionnaires }, paused] = await Promise.all([
       loadServicesAndStaff(business.id),
       BusinessCommissionService.isBookingPaused(business.id),
     ]);
     // Overdue in-person commission pauses new bookings (shown as not accepting)
-    return serializeBusiness(paused ? { ...business, acceptingBookings: false } : business, { services, staff });
+    return serializeBusiness(paused ? { ...business, acceptingBookings: false } : business, {
+      services,
+      staff,
+      addOns,
+      questionnaires,
+    });
   }
 
   // ── Owner / team ──────────────────────────────────────────────────────────
@@ -346,6 +465,7 @@ export class BusinessService {
     const pick = (b, role) => ({
       id: b.id,
       slug: b.slug,
+      pageType: b.pageType,
       name: b.name,
       category: b.category,
       logoUrl: b.logoUrl,
@@ -360,8 +480,12 @@ export class BusinessService {
     ];
   }
 
-  /** Onboarding: business + optional owner staff + optional first service, atomically. */
+  /**
+   * Onboarding: business + optional owner staff + optional first service, atomically.
+   * A 'standard' page has no booking, so staff / first service are ignored for it.
+   */
   static async create(user, body) {
+    const isStandard = body.pageType === 'standard';
     const result = await db.transaction(async tx => {
       const slug = await generateUniqueSlug(body.name, tx);
       const [business] = await tx
@@ -369,6 +493,7 @@ export class BusinessService {
         .values({
           ownerId: user.id,
           slug,
+          pageType: isStandard ? 'standard' : 'appointments',
           name: body.name,
           category: body.category,
           subcategory: emptyToNull(body.subcategory),
@@ -378,6 +503,7 @@ export class BusinessService {
           address: body.locationType === 'mobile' ? body.city : emptyToNull(body.address),
           phone: emptyToNull(body.phone),
           email: emptyToNull(body.email),
+          websiteUrl: emptyToNull(body.websiteUrl),
           // users.timezone defaults to 'UTC' — treat that as "unknown"
           timezone:
             body.timezone ??
@@ -390,7 +516,7 @@ export class BusinessService {
         })
         .returning();
 
-      if (body.ownerStaff) {
+      if (body.ownerStaff && !isStandard) {
         await tx.insert(businessStaff).values({
           businessId: business.id,
           userId: user.id,
@@ -400,7 +526,7 @@ export class BusinessService {
         });
       }
 
-      if (body.firstService) {
+      if (body.firstService && !isStandard) {
         await tx.insert(businessServices).values({
           businessId: business.id,
           name: body.firstService.name,
@@ -415,8 +541,138 @@ export class BusinessService {
   }
 
   static async getForManage(business) {
-    const { services, staff } = await loadServicesAndStaff(business.id);
-    return serializeBusiness(business, { services, staff, includePrivate: true });
+    const { services, staff, addOns, questionnaires } = await loadServicesAndStaff(business.id);
+    return serializeBusiness(business, { services, staff, addOns, questionnaires, includePrivate: true });
+  }
+
+  /**
+   * Replace the business's questionnaires with `list` (edited as one library):
+   * items with a known id are updated, others inserted, missing ones removed
+   * (soft delete; services using them fall back to the general booking
+   * questions). Past bookings keep their text snapshot either way.
+   * Returns { questionnaires, unlinkedServiceIds }.
+   */
+  static async saveQuestionnaires(business, list) {
+    const names = list.map(q => q.name.trim().toLowerCase());
+    if (new Set(names).size !== names.length) {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'Two questionnaires have the same name. Give each a different name.');
+    }
+
+    let unlinkedServiceIds = [];
+    await db.transaction(async tx => {
+      const existing = await tx
+        .select({ id: businessQuestionnaires.id })
+        .from(businessQuestionnaires)
+        .where(and(eq(businessQuestionnaires.businessId, business.id), isNull(businessQuestionnaires.deletedAt)));
+      const existingIds = new Set(existing.map(r => r.id));
+      const keep = new Set();
+      for (const [index, q] of list.entries()) {
+        // Question ids must be unique within a questionnaire (answers are keyed by them)
+        const seen = new Set();
+        const questions = q.questions.map(raw => {
+          const id = raw.id && !seen.has(raw.id) ? raw.id : crypto.randomUUID();
+          seen.add(id);
+          return normalizeQuestion({ ...raw, id });
+        });
+        const values = {
+          name: q.name.trim(),
+          questions,
+          allowAttachments: !!q.allowAttachments,
+          sortOrder: index,
+          updatedAt: new Date(),
+        };
+        if (q.id && existingIds.has(q.id)) {
+          keep.add(q.id);
+          await tx.update(businessQuestionnaires).set(values).where(eq(businessQuestionnaires.id, q.id));
+        } else {
+          await tx.insert(businessQuestionnaires).values({ ...values, businessId: business.id });
+        }
+      }
+      const removed = [...existingIds].filter(id => !keep.has(id));
+      if (removed.length) {
+        await tx
+          .update(businessQuestionnaires)
+          .set({ deletedAt: new Date(), updatedAt: new Date() })
+          .where(inArray(businessQuestionnaires.id, removed));
+        const unlinked = await tx
+          .update(businessServices)
+          .set({ questionnaireId: null, updatedAt: new Date() })
+          .where(
+            and(eq(businessServices.businessId, business.id), inArray(businessServices.questionnaireId, removed))
+          )
+          .returning({ id: businessServices.id });
+        unlinkedServiceIds = unlinked.map(r => r.id);
+      }
+    });
+
+    const rows = await db.query.businessQuestionnaires.findMany({
+      where: and(eq(businessQuestionnaires.businessId, business.id), isNull(businessQuestionnaires.deletedAt)),
+      orderBy: [asc(businessQuestionnaires.sortOrder), asc(businessQuestionnaires.createdAt)],
+    });
+    return { questionnaires: rows.map(q => serializeQuestionnaire(q)), unlinkedServiceIds };
+  }
+
+  /**
+   * Replace the business's add-ons with `list` (the dashboard edits them as one
+   * list): items with an id are updated, new ones inserted, missing ones removed
+   * (soft delete — past bookings keep their snapshot). Returns the saved list.
+   */
+  static async saveAddOns(business, list) {
+    const serviceIds = [...new Set(list.flatMap(a => a.serviceIds ?? []))];
+    if (serviceIds.length) {
+      const found = await db
+        .select({ id: businessServices.id })
+        .from(businessServices)
+        .where(
+          and(
+            eq(businessServices.businessId, business.id),
+            inArray(businessServices.id, serviceIds),
+            isNull(businessServices.deletedAt)
+          )
+        );
+      if (found.length !== serviceIds.length) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'One of the chosen services no longer exists. Refresh and try again.');
+      }
+    }
+
+    await db.transaction(async tx => {
+      const existing = await tx
+        .select({ id: businessAddOns.id })
+        .from(businessAddOns)
+        .where(and(eq(businessAddOns.businessId, business.id), isNull(businessAddOns.deletedAt)));
+      const existingIds = new Set(existing.map(r => r.id));
+      const keep = new Set();
+      for (const [index, a] of list.entries()) {
+        const values = {
+          name: a.name,
+          priceCents: a.priceCents,
+          durationMins: a.durationMins ?? 0,
+          serviceIds: [...new Set(a.serviceIds ?? [])],
+          active: a.active ?? true,
+          sortOrder: index,
+          updatedAt: new Date(),
+        };
+        if (a.id && existingIds.has(a.id)) {
+          keep.add(a.id);
+          await tx.update(businessAddOns).set(values).where(eq(businessAddOns.id, a.id));
+        } else {
+          await tx.insert(businessAddOns).values({ ...values, businessId: business.id });
+        }
+      }
+      const removed = [...existingIds].filter(id => !keep.has(id));
+      if (removed.length) {
+        await tx
+          .update(businessAddOns)
+          .set({ deletedAt: new Date(), updatedAt: new Date() })
+          .where(inArray(businessAddOns.id, removed));
+      }
+    });
+
+    const rows = await db.query.businessAddOns.findMany({
+      where: and(eq(businessAddOns.businessId, business.id), isNull(businessAddOns.deletedAt)),
+      orderBy: [asc(businessAddOns.sortOrder), asc(businessAddOns.createdAt)],
+    });
+    return rows.map(serializeAddOn);
   }
 
   static async update(business, patch) {
@@ -450,8 +706,28 @@ export class BusinessService {
       }
     }
 
+    // A standard page can't take bookings — don't strand ones already made
+    if (patch.pageType === 'standard' && business.pageType !== 'standard') {
+      const active = await db
+        .select({ id: businessBookings.id })
+        .from(businessBookings)
+        .where(
+          and(
+            eq(businessBookings.businessId, business.id),
+            inArray(businessBookings.status, ACTIVE_BOOKING_STATUSES)
+          )
+        )
+        .limit(1);
+      if (active.length) {
+        throw new ApiError(
+          httpStatus.CONFLICT,
+          'Finish or cancel your upcoming bookings before switching to a standard page'
+        );
+      }
+    }
+
     const values = { ...patch, updatedAt: new Date() };
-    for (const k of ['subcategory', 'bio', 'address', 'phone', 'email', 'announcement']) {
+    for (const k of ['subcategory', 'bio', 'address', 'phone', 'email', 'announcement', 'websiteUrl']) {
       if (k in values) values[k] = emptyToNull(values[k]);
     }
     if (values.latitude !== undefined && values.latitude !== null) values.latitude = String(values.latitude);
@@ -512,6 +788,9 @@ export class BusinessService {
     assertServiceCategory(business, body.categoryName);
     const staffIds = [...new Set(body.eligibleStaffIds ?? [])];
     await assertStaffBelong(business.id, staffIds);
+    await assertQuestionnaire(business.id, body.questionnaireId);
+    const sessionProblem = sessionSettingsProblem(body);
+    if (sessionProblem) throw new ApiError(httpStatus.BAD_REQUEST, sessionProblem);
 
     const id = await db.transaction(async tx => {
       const [service] = await tx
@@ -525,7 +804,12 @@ export class BusinessService {
           durationMins: body.durationMins,
           priceCents: body.priceCents,
           paymentModel: body.paymentModel ?? null,
-          depositCents: body.depositCents ?? null,
+          // At most one of the two (validation rejects both)
+          depositCents: body.depositPercent != null ? null : (body.depositCents ?? null),
+          depositPercent: body.depositPercent ?? null,
+          requiresApproval: body.requiresApproval ?? false,
+          questionnaireId: body.questionnaireId ?? null,
+          ...sessionColumns(body),
           bufferMins: body.bufferMins ?? 10,
           allStaff: staffIds.length === 0,
           sortOrder: body.sortOrder ?? 0,
@@ -557,10 +841,25 @@ export class BusinessService {
   static async updateService(business, serviceId, patch) {
     const existing = await this.getService(business, serviceId);
     assertServiceCategory(business, patch.categoryName);
+    await assertQuestionnaire(business.id, patch.questionnaireId);
+    if (SESSION_FIELDS.some(k => k in patch)) {
+      const merged = { ...existing, ...patch };
+      const sessionProblem = sessionSettingsProblem(merged);
+      if (sessionProblem) throw new ApiError(httpStatus.BAD_REQUEST, sessionProblem);
+      // Its scheduled sessions would be stranded
+      if (existing.sessionType === 'group' && merged.sessionType !== 'group') {
+        await assertNoUpcomingSessions(serviceId, 'changing its session type');
+      }
+      patch = { ...patch, ...sessionColumns(merged) };
+    }
     const price = patch.priceCents ?? existing.priceCents;
+    // Switching deposit kind clears the other one, so only one is ever set
+    if (patch.depositPercent != null) patch = { ...patch, depositCents: null };
+    else if (patch.depositCents != null) patch = { ...patch, depositPercent: null };
     const deposit = patch.depositCents !== undefined ? patch.depositCents : existing.depositCents;
-    if (deposit != null && deposit > price) {
-      throw new ApiError(httpStatus.BAD_REQUEST, 'Deposit cannot exceed the price');
+    const percent = patch.depositPercent !== undefined ? patch.depositPercent : existing.depositPercent;
+    if (percent == null && deposit != null && deposit > price) {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'The deposit can’t be more than the price');
     }
 
     const { eligibleStaffIds, ...rest } = patch;
@@ -589,6 +888,7 @@ export class BusinessService {
   /** Soft delete — existing bookings keep their reference and snapshot. */
   static async deleteService(business, serviceId) {
     await this.getService(business, serviceId);
+    await assertNoUpcomingSessions(serviceId, 'deleting it');
     await db
       .update(businessServices)
       .set({ deletedAt: new Date(), updatedAt: new Date() })
@@ -781,9 +1081,61 @@ export class BusinessService {
       staffId: m.staffId,
       status: m.status,
       user: m.user ?? null,
+      // Pending only — lets the business copy / resend the link by hand
+      inviteUrl:
+        m.status === 'pending' && m.inviteToken
+          ? appUrl(`/business/invitations/${m.inviteToken}`)
+          : undefined,
       acceptedAt: m.acceptedAt,
       createdAt: m.createdAt,
     }));
+  }
+
+  /**
+   * Switch a dashboard member between admin and manager. Staff-role members
+   * are tied to a staff record and are managed from the staff schedule instead.
+   */
+  static async updateMemberRole(business, actor, memberId, role) {
+    const member = await db.query.businessTeamMembers.findFirst({
+      where: and(
+        eq(businessTeamMembers.id, memberId),
+        eq(businessTeamMembers.businessId, business.id),
+        ne(businessTeamMembers.status, 'revoked')
+      ),
+      with: {
+        user: { columns: { id: true, firstName: true, lastName: true, username: true, image: true } },
+      },
+    });
+    if (!member) throw new ApiError(httpStatus.NOT_FOUND, 'Team member not found');
+    if (member.role === 'staff') {
+      throw new ApiError(httpStatus.BAD_REQUEST, "Staff access is managed from the staff member's schedule");
+    }
+    if (member.userId && member.userId === actor.id) {
+      throw new ApiError(httpStatus.BAD_REQUEST, "You can't change your own access level");
+    }
+
+    let updated = member;
+    if (member.role !== role) {
+      [updated] = await db
+        .update(businessTeamMembers)
+        .set({ role, updatedAt: new Date() })
+        .where(eq(businessTeamMembers.id, member.id))
+        .returning();
+    }
+    return {
+      id: updated.id,
+      email: updated.email,
+      role: updated.role,
+      staffId: updated.staffId,
+      status: updated.status,
+      user: member.user ?? null,
+      inviteUrl:
+        updated.status === 'pending' && updated.inviteToken
+          ? appUrl(`/business/invitations/${updated.inviteToken}`)
+          : undefined,
+      acceptedAt: updated.acceptedAt,
+      createdAt: updated.createdAt,
+    };
   }
 
   static async invite(business, inviter, { email, role, staffId }) {

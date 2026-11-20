@@ -308,31 +308,6 @@ if (env.nodeEnv === 'production') {
   }
 }
 
-// TEMP DEBUG - remove after checking
-const KEYS_TO_CHECK = [
-  // Stripe
-  'STRIPE_SECRET_KEY',
-  'STRIPE_PUBLISHABLE_KEY',
-  'STRIPE_WEBHOOK_SECRET',
-  // Didit
-  'DIDIT_API_KEY',
-  'DIDIT_WORKFLOW_ID',
-  'DIDIT_WEBHOOK_SECRET',
-  // External events
-  'VENUNITE_API_KEY',
-  'TICKETMASTER_API_KEY',
-  // Other
-  'FIREBASE_SERVICE_ACCOUNT_JSON',
-  'ACRCLOUD_ACCESS_KEY',
-];
-
-console.log(
-  '[ENV CHECK]',
-  env.nodeEnv,
-  Object.fromEntries(
-    KEYS_TO_CHECK.map(k => [k, envVars[k] ? `SET (${envVars[k].length})` : 'MISSING'])
-  )
-);
 
 // Stripe: warn if a local key is overriding the production key
 const localOverrides = [
