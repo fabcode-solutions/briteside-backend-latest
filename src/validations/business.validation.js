@@ -3,9 +3,23 @@ import {
   BUSINESS_CATEGORY_KEYS,
   PAYMENT_MODELS,
   LOCATION_TYPES,
+  PAGE_TYPES,
   BOOKING_CONFIRMATION_MODES,
 } from '../constants/businessCategories.js';
 import { BUSINESS_ROLES } from '../config/business-permissions.js';
+import {
+  ATTACHMENT_MAX_FILES,
+  LONG_ANSWER_MAX,
+  MAX_OPTIONS,
+  MAX_QUESTIONNAIRES,
+  MAX_QUESTIONS,
+  OPTION_QUESTION_TYPES,
+  QUESTION_TYPES,
+} from '../utils/businessQuestionnaire.js';
+import { MAX_PARTY_SIZE, SESSION_TYPES } from '../utils/businessSession.js';
+
+// Dates per "schedule sessions" request (weekly for a year)
+const MAX_SESSIONS_PER_REQUEST = 52;
 
 // ─── Shared pieces ──────────────────────────────────────────────────────────
 const HHMM = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Time must be HH:mm');
@@ -33,6 +47,24 @@ const timezone = z.string().refine(
 );
 
 const url = z.string().url().max(2048);
+// Public website: http(s) only, so a javascript:/data: link can't end up on the page
+const websiteUrl = z
+  .string()
+  .trim()
+  .max(2048)
+  .refine(
+    v => {
+      if (v === '') return true;
+      try {
+        const u = new URL(v);
+        return (u.protocol === 'http:' || u.protocol === 'https:') && !!u.hostname.includes('.');
+      } catch {
+        return false;
+      }
+    },
+    { message: 'Website must be a full http:// or https:// address' }
+  )
+  .nullable();
 const optionalText = max => z.string().trim().max(max).optional().nullable();
 const cents = z.number().int().min(0).max(10_000_000);
 const uuid = z.string().uuid();
@@ -57,6 +89,8 @@ export const getPublicBusinessSchema = z.object({
 // ─── Owner: business ────────────────────────────────────────────────────────
 export const createBusinessSchema = z.object({
   body: z.object({
+    // 'standard' = profile page without booking (no staff / services)
+    pageType: z.enum(PAGE_TYPES).default('appointments'),
     name: z.string().trim().min(1).max(150),
     category: z.enum(BUSINESS_CATEGORY_KEYS),
     subcategory: optionalText(100),
@@ -66,6 +100,7 @@ export const createBusinessSchema = z.object({
     address: optionalText(500),
     phone: optionalText(40),
     email: z.string().trim().email().max(255).optional().nullable().or(z.literal('')),
+    websiteUrl: websiteUrl.optional(),
     timezone: timezone.optional(),
     logoUrl: url.optional().nullable(),
     heroUrl: url.optional().nullable(),
@@ -96,6 +131,7 @@ export const updateBusinessSchema = z.object({
   params: businessIdParams,
   body: z
     .object({
+      pageType: z.enum(PAGE_TYPES),
       name: z.string().trim().min(1).max(150),
       announcement: z
         .string()
@@ -116,6 +152,7 @@ export const updateBusinessSchema = z.object({
       longitude: z.number().min(-180).max(180).nullable(),
       phone: optionalText(40),
       email: z.string().trim().email().max(255).nullable().or(z.literal('')),
+      websiteUrl,
       timezone,
       hours: weeklyHoursSchema,
       acceptingBookings: z.boolean(),
@@ -135,6 +172,7 @@ export const updatePoliciesSchema = z.object({
       lateArrivalPolicy: optionalText(2000),
       noShowPolicy: optionalText(2000),
       refundPolicy: optionalText(2000),
+      additionalPolicies: optionalText(4000),
       allowCustomerRescheduling: z.boolean(),
       reschedulingNoticeDays: z.number().int().min(0).max(365).nullable(),
       freeCancellationHours: z.number().int().min(0).max(24 * 30),
@@ -173,8 +211,30 @@ const serviceFields = z.object({
   priceCents: cents,
   // null = inherit business default
   paymentModel: z.enum(PAYMENT_MODELS).nullable(),
-  // null = 20% of price
+  // Deposit: a fixed amount OR a percentage of the price (neither = 20%)
   depositCents: cents.nullable(),
+  depositPercent: z
+    .number()
+    .int('Deposit percentage must be a whole number')
+    .min(1, 'Deposit percentage must be at least 1%')
+    .max(100, 'Deposit percentage can’t be more than 100%')
+    .nullable(),
+  // Bookings arrive as requests the business accepts or declines
+  requiresApproval: z.boolean(),
+  // null = the business's general booking questions
+  questionnaireId: uuid.nullable(),
+  // Group session (seats in scheduled sessions) / private group event (guests × price, with a minimum)
+  sessionType: z.enum(SESSION_TYPES, { message: 'Choose a session type' }),
+  capacity: z
+    .number()
+    .int('Seats must be a whole number')
+    .min(1, 'A session needs at least 1 seat')
+    .max(MAX_PARTY_SIZE, `Up to ${MAX_PARTY_SIZE} seats`)
+    .nullable(),
+  showRemainingSeats: z.boolean(),
+  minGuests: z.number().int('Use a whole number of guests').min(1, 'At least 1 guest').max(MAX_PARTY_SIZE).nullable(),
+  maxGuests: z.number().int('Use a whole number of guests').min(1, 'At least 1 guest').max(MAX_PARTY_SIZE).nullable(),
+  minimumTotalCents: cents.nullable(),
   bufferMins: z.number().int().min(0).max(240),
   // [] = every staff member
   eligibleStaffIds: z.array(uuid).max(200),
@@ -183,7 +243,11 @@ const serviceFields = z.object({
 
 const depositRefine = [
   s => s.depositCents == null || s.priceCents == null || s.depositCents <= s.priceCents,
-  { message: 'Deposit cannot exceed the price', path: ['depositCents'] },
+  { message: 'The deposit can’t be more than the price', path: ['depositCents'] },
+];
+const oneDepositKind = [
+  s => s.depositCents == null || s.depositPercent == null,
+  { message: 'Set the deposit as an amount or a percentage, not both', path: ['depositPercent'] },
 ];
 
 export const createServiceSchema = z.object({
@@ -191,7 +255,8 @@ export const createServiceSchema = z.object({
   body: serviceFields
     .partial()
     .required({ name: true, durationMins: true, priceCents: true })
-    .refine(...depositRefine),
+    .refine(...depositRefine)
+    .refine(...oneDepositKind),
 });
 
 export const updateServiceSchema = z.object({
@@ -199,11 +264,94 @@ export const updateServiceSchema = z.object({
   body: serviceFields
     .partial()
     .refine(...depositRefine)
+    .refine(...oneDepositKind)
     .refine(b => Object.keys(b).length > 0, { message: 'Nothing to update' }),
+});
+
+export const saveAddOnsSchema = z.object({
+  params: businessIdParams,
+  body: z.object({
+    addOns: z
+      .array(
+        z.object({
+          id: uuid.optional(),
+          name: z.string().trim().min(1, 'Every add-on needs a name').max(120, 'Add-on names can be up to 120 characters'),
+          priceCents: cents,
+          durationMins: z
+            .number()
+            .int('Extra minutes must be a whole number')
+            .min(0, 'Extra minutes can’t be negative')
+            .max(480, 'Extra minutes can be up to 8 hours'),
+          // [] = every service
+          serviceIds: z.array(uuid).max(200).optional(),
+          active: z.boolean().optional(),
+        })
+      )
+      .max(50, 'You can have up to 50 add-ons'),
+  }),
 });
 
 export const serviceIdSchema = z.object({
   params: businessIdParams.extend({ serviceId: uuid }),
+});
+
+// ─── Questionnaires ─────────────────────────────────────────────────────────
+const questionnaireQuestion = z
+  .object({
+    // Client-made id (answers are keyed by it); the server fills in missing / duplicate ones
+    id: z.string().trim().min(1).max(64).regex(/^[\w-]+$/, 'Invalid question id').optional(),
+    label: z
+      .string()
+      .trim()
+      .min(1, 'Every question needs text')
+      .max(300, 'Questions can be up to 300 characters'),
+    type: z.enum(QUESTION_TYPES, { message: 'Pick an answer type for each question' }),
+    options: z
+      .array(z.string().trim().max(120, 'Options can be up to 120 characters'))
+      .max(MAX_OPTIONS, `Up to ${MAX_OPTIONS} options per question`)
+      .optional()
+      .default([]),
+    required: z.boolean().optional().default(false),
+    active: z.boolean().optional().default(true),
+    placeholder: z.string().trim().max(120).optional().nullable(),
+  })
+  .refine(q => !OPTION_QUESTION_TYPES.includes(q.type) || q.options.some(o => o.length > 0), {
+    message: 'Add at least one option to each choice question',
+    path: ['options'],
+  });
+
+export const saveQuestionnairesSchema = z.object({
+  params: businessIdParams,
+  body: z.object({
+    questionnaires: z
+      .array(
+        z.object({
+          id: uuid.optional(),
+          name: z
+            .string()
+            .trim()
+            .min(1, 'Every questionnaire needs a name')
+            .max(120, 'Names can be up to 120 characters'),
+          questions: z.array(questionnaireQuestion).max(MAX_QUESTIONS, `Up to ${MAX_QUESTIONS} questions each`),
+          allowAttachments: z.boolean().optional().default(false),
+        })
+      )
+      .max(MAX_QUESTIONNAIRES, `You can have up to ${MAX_QUESTIONNAIRES} questionnaires`),
+  }),
+});
+
+const attachmentIndex = z.coerce.number().int().min(0).max(ATTACHMENT_MAX_FILES - 1);
+
+export const businessAttachmentSchema = z.object({
+  params: businessIdParams.extend({ bookingId: uuid, index: attachmentIndex }),
+});
+
+export const customerAttachmentSchema = z.object({
+  params: z.object({ bookingId: uuid, index: attachmentIndex }),
+});
+
+export const uploadBookingAttachmentSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120) }),
 });
 
 // ─── Staff ──────────────────────────────────────────────────────────────────
@@ -293,6 +441,11 @@ export const teamMemberIdSchema = z.object({
   params: businessIdParams.extend({ memberId: uuid }),
 });
 
+export const updateTeamMemberSchema = z.object({
+  params: businessIdParams.extend({ memberId: uuid }),
+  body: z.object({ role: z.enum(['admin', 'manager']) }),
+});
+
 export const acceptInvitationSchema = z.object({
   params: z.object({ token: z.string().regex(/^[a-f0-9]{48}$/, 'Invalid invitation') }),
 });
@@ -300,18 +453,74 @@ export const acceptInvitationSchema = z.object({
 // ─── Bookings ───────────────────────────────────────────────────────────────
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be yyyy-MM-dd');
 
+// ?addOnIds=a,b → ['a','b'] (query strings can't carry arrays cleanly)
+const addOnIdsQuery = z
+  .string()
+  .optional()
+  .transform(s => (s ? s.split(',').map(x => x.trim()).filter(Boolean) : []))
+  .pipe(z.array(uuid).max(20, 'Pick up to 20 add-ons'));
+
 export const getSlotsSchema = z.object({
   params: z.object({ idOrSlug: z.string().trim().min(1).max(120) }),
   query: z.object({
     serviceId: uuid,
     staffId: uuid.optional(),
     date: isoDate,
+    addOnIds: addOnIdsQuery,
   }),
 });
 
 export const bookingQuoteSchema = z.object({
   params: z.object({ idOrSlug: z.string().trim().min(1).max(120) }),
+  query: z.object({
+    serviceId: uuid,
+    addOnIds: addOnIdsQuery,
+    partySize: z.coerce.number().int().min(1).max(MAX_PARTY_SIZE).optional(),
+  }),
+});
+
+export const publicGroupSessionsSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120) }),
   query: z.object({ serviceId: uuid }),
+});
+
+// ─── Group sessions (dashboard) ─────────────────────────────────────────────
+export const listGroupSessionsSchema = z.object({
+  params: businessIdParams,
+  query: z.object({
+    from: z.string().datetime({ offset: true }).optional(),
+    to: z.string().datetime({ offset: true }).optional(),
+    serviceId: uuid.optional(),
+  }),
+});
+
+export const createGroupSessionsSchema = z.object({
+  params: businessIdParams,
+  body: z.object({
+    serviceId: uuid,
+    staffId: uuid,
+    dates: z
+      .array(isoDate)
+      .min(1, 'Pick at least one date')
+      .max(MAX_SESSIONS_PER_REQUEST, `Up to ${MAX_SESSIONS_PER_REQUEST} dates at a time`),
+    time: HHMM,
+    // Omitted = the service's seats
+    capacity: z.number().int().min(1, 'At least 1 seat').max(MAX_PARTY_SIZE).optional(),
+  }),
+});
+
+const groupSessionParams = businessIdParams.extend({ sessionId: uuid });
+
+export const updateGroupSessionSchema = z.object({
+  params: groupSessionParams,
+  body: z.object({
+    capacity: z.number().int('Seats must be a whole number').min(1, 'At least 1 seat').max(MAX_PARTY_SIZE),
+  }),
+});
+
+export const cancelGroupSessionSchema = z.object({
+  params: groupSessionParams,
+  body: z.object({ reason: z.string().trim().max(500).optional() }).optional().default({}),
 });
 
 export const createBookingCheckoutSchema = z.object({
@@ -320,8 +529,14 @@ export const createBookingCheckoutSchema = z.object({
     serviceId: uuid,
     // omitted = first available staff member at that time
     staffId: uuid.optional(),
-    date: isoDate,
-    time: HHMM,
+    // Optional extras; their price and minutes are added to the booking
+    addOnIds: z.array(uuid).max(20, 'Pick up to 20 add-ons').optional(),
+    // Group services: the session to book seats in (date / time come from it)
+    groupSessionId: uuid.optional(),
+    // Seats (group session) or guests (private event)
+    partySize: z.number().int().min(1).max(MAX_PARTY_SIZE).optional(),
+    date: isoDate.optional(),
+    time: HHMM.optional(),
     customer: z
       .object({
         name: z.string().trim().min(1).max(150).optional(),
@@ -330,14 +545,32 @@ export const createBookingCheckoutSchema = z.object({
       })
       .optional(),
     notes: z.string().trim().max(2000).optional().nullable(),
+    // text | one option | ticked options | yes/no — checked against the questions in the service
     answers: z
-      .array(z.object({ questionId: z.string().min(1).max(64), answer: z.string().max(2000) }))
-      .max(20)
+      .array(
+        z.object({
+          questionId: z.string().min(1).max(64),
+          answer: z.union([
+            z.string().max(LONG_ANSWER_MAX),
+            z.array(z.string().max(120)).max(MAX_OPTIONS),
+            z.boolean(),
+          ]),
+        })
+      )
+      .max(MAX_QUESTIONS)
+      .optional(),
+    // Files uploaded first via POST /:idOrSlug/booking-attachments (signed-in customers)
+    attachments: z
+      .array(z.object({ key: z.string().min(1).max(500), name: z.string().trim().max(200).optional() }))
+      .max(ATTACHMENT_MAX_FILES, `You can attach up to ${ATTACHMENT_MAX_FILES} files`)
       .optional(),
     platform: z.enum(['web', 'ios', 'android']).optional(),
     // 'native' = hold the slot and pay through the in-app card form
     // (native-intent → native-finalize); default = Stripe Checkout session
     mode: z.enum(['checkout', 'native']).optional(),
+  }).refine(b => !!b.groupSessionId || (!!b.date && !!b.time), {
+    message: 'Pick a date and time',
+    path: ['time'],
   }),
 });
 
@@ -398,6 +631,98 @@ export const businessBookingActionSchema = z.object({
   body: z.object({ reason: z.string().trim().max(500).optional() }).optional().default({}),
 });
 
+export const completeBookingSchema = z.object({
+  params: businessIdParams.extend({ bookingId: uuid }),
+  body: z
+    .object({
+      // Extras done on the day, collected in person (5% commission applies)
+      charges: z
+        .array(
+          z.object({
+            label: z.string().trim().min(1, 'Describe each extra charge').max(80),
+            amountCents: cents.min(1, 'Each extra charge must be above $0'),
+          })
+        )
+        .max(20, 'Add up to 20 extra charges')
+        .optional(),
+    })
+    .optional()
+    .default({}),
+});
+
+export const checkInSchema = z.object({
+  params: businessIdParams.extend({ bookingId: uuid }),
+  body: z.object({ undo: z.boolean().optional() }).optional().default({}),
+});
+
+export const manualBookingSchema = z.object({
+  params: businessIdParams,
+  body: z
+    .object({
+      customer: z
+        .object({
+          name: z.string().trim().min(1, "Enter the customer's name").max(150),
+          email: z.string().trim().email('Enter a valid email').max(255).optional().or(z.literal('')),
+          phone: z.string().trim().max(40).optional().or(z.literal('')),
+        })
+        .refine(c => !!(c.email || c.phone), { message: 'Add an email or a phone number', path: ['phone'] }),
+      serviceId: uuid.optional(),
+      customService: z
+        .object({
+          name: z.string().trim().min(1, 'Name the service').max(150),
+          durationMins: z.number().int().min(5, 'At least 5 minutes').max(720, 'Up to 12 hours'),
+        })
+        .optional(),
+      staffId: uuid,
+      date: isoDate,
+      time: HHMM,
+      priceCents: cents,
+      paymentArrangement: z.enum(['cash', 'card_in_person', 'bank_transfer', 'other']),
+      notes: z.string().trim().max(500).optional(),
+      allowOverlap: z.boolean().optional(),
+      notifyCustomer: z.boolean().optional(),
+    })
+    .refine(b => !!b.serviceId !== !!b.customService, {
+      message: 'Choose a service or describe a custom one',
+      path: ['serviceId'],
+    }),
+});
+
+export const businessRefundSchema = z.object({
+  params: businessIdParams.extend({ bookingId: uuid }),
+  body: z
+    .object({
+      // Omitted = everything still refundable
+      amountCents: z.number().int().min(1).max(10_000_000).optional(),
+      reason: z.string().trim().max(500).optional(),
+    })
+    .optional()
+    .default({}),
+});
+
+const rescheduleSlotsQuery = z.object({ date: isoDate, staffId: uuid.optional() });
+const rescheduleBody = { date: isoDate, time: HHMM, staffId: uuid.optional() };
+
+export const businessRescheduleSlotsSchema = z.object({
+  params: businessIdParams.extend({ bookingId: uuid }),
+  query: rescheduleSlotsQuery,
+});
+
+export const businessRescheduleSchema = z.object({
+  params: businessIdParams.extend({ bookingId: uuid }),
+  body: z.object({ ...rescheduleBody, message: z.string().trim().max(500).optional() }),
+});
+
+export const customerRescheduleSlotsSchema = z.object({
+  params: z.object({ bookingId: uuid }),
+  query: rescheduleSlotsQuery,
+});
+
+export const customerRescheduleSchema = z.object({
+  params: z.object({ bookingId: uuid }),
+  body: z.object(rescheduleBody),
+});
+
 export const payCommissionSchema = z.object({
   params: businessIdParams,
   body: z
@@ -434,4 +759,180 @@ export const payBalanceSchema = z.object({
     .object({ platform: z.enum(['web', 'ios', 'android']).optional(), mode: z.enum(['checkout', 'native']).optional() })
     .optional()
     .default({}),
+});
+
+// ─── Reviews ────────────────────────────────────────────────────────────────
+const reviewListQuery = z.object({
+  page: z.coerce.number().int().min(1).optional().default(1),
+  limit: z.coerce.number().int().min(1).max(50).optional().default(10),
+  rating: z.coerce.number().int().min(1).max(5).optional(),
+});
+
+export const listPublicReviewsSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120) }),
+  query: reviewListQuery,
+});
+
+export const listBusinessReviewsSchema = z.object({
+  params: businessIdParams,
+  query: reviewListQuery,
+});
+
+const rating = z.number().int().min(1).max(5);
+
+export const createReviewSchema = z.object({
+  params: z.object({ bookingId: uuid }),
+  body: z.object({ rating, comment: optionalText(2000) }),
+});
+
+export const updateReviewSchema = z.object({
+  params: z.object({ bookingId: uuid }),
+  body: z
+    .object({ rating: rating.optional(), comment: optionalText(2000) })
+    .refine(b => b.rating !== undefined || b.comment !== undefined, { message: 'Nothing to update' }),
+});
+
+// ─── Wall (standard business pages) ────────────────────────────────────────
+export const listWallPostsSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120) }),
+  query: z.object({
+    page: z.coerce.number().int().min(1).optional().default(1),
+    limit: z.coerce.number().int().min(1).max(50).optional().default(20),
+  }),
+});
+
+export const createWallPostSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120) }),
+  body: z.object({ text: z.string().trim().min(1).max(2000) }),
+});
+
+export const wallPostIdSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120), postId: uuid }),
+});
+
+export const moderateWallPostSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120), postId: uuid }),
+  body: z.object({ status: z.enum(['approved', 'rejected']) }),
+});
+
+export const listWallCommentsSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120), postId: uuid }),
+  query: z.object({
+    page: z.coerce.number().int().min(1).optional().default(1),
+    limit: z.coerce.number().int().min(1).max(50).optional().default(20),
+  }),
+});
+
+const wallCommentBody = {
+  text: z.string().trim().min(1).max(1000),
+  // Users tagged with @username in the text (only kept if the @username is in it)
+  mentionedUserIds: z.array(uuid).max(20).optional().default([]),
+};
+
+export const createWallCommentSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120), postId: uuid }),
+  // parentId: reply to a comment (replying to a reply attaches to its top-level comment)
+  body: z.object({ ...wallCommentBody, parentId: uuid.nullable().optional() }),
+});
+
+// ─── Gallery posts (likes / comments) ───────────────────────────────────────
+const galleryPostParams = z.object({
+  idOrSlug: z.string().trim().min(1).max(120),
+  postKey: z.string().regex(/^[0-9a-f]{24}$/, 'Post not found'),
+});
+
+export const galleryEngagementSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120) }),
+});
+
+export const galleryPostSchema = z.object({ params: galleryPostParams });
+
+export const listGalleryCommentsSchema = z.object({
+  params: galleryPostParams,
+  query: z.object({
+    page: z.coerce.number().int().min(1).optional().default(1),
+    limit: z.coerce.number().int().min(1).max(50).optional().default(20),
+  }),
+});
+
+const galleryCommentBody = {
+  text: z
+    .string()
+    .trim()
+    .min(1, 'Write a comment first')
+    .max(1000, 'Comments can be up to 1000 characters'),
+  // Users tagged with @username in the text (only kept if the @username is in it)
+  mentionedUserIds: z.array(uuid).max(20).optional().default([]),
+};
+
+export const createGalleryCommentSchema = z.object({
+  params: galleryPostParams,
+  // parentId: reply to a comment (replying to a reply attaches to its top-level comment)
+  body: z.object({ ...galleryCommentBody, parentId: uuid.nullable().optional() }),
+});
+
+export const updateGalleryCommentSchema = z.object({
+  params: galleryPostParams.extend({ commentId: uuid }),
+  body: z.object(galleryCommentBody),
+});
+
+export const galleryCommentIdSchema = z.object({
+  params: galleryPostParams.extend({ commentId: uuid }),
+});
+
+export const listGalleryRepliesSchema = z.object({
+  params: galleryPostParams.extend({ commentId: uuid }),
+  query: z.object({
+    page: z.coerce.number().int().min(1).optional().default(1),
+    limit: z.coerce.number().int().min(1).max(50).optional().default(20),
+  }),
+});
+
+export const wallCommentIdSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120), postId: uuid, commentId: uuid }),
+});
+
+export const updateWallCommentSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120), postId: uuid, commentId: uuid }),
+  body: z.object(wallCommentBody),
+});
+
+export const listWallRepliesSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120), postId: uuid, commentId: uuid }),
+  query: z.object({
+    page: z.coerce.number().int().min(1).optional().default(1),
+    limit: z.coerce.number().int().min(1).max(50).optional().default(20),
+  }),
+});
+
+export const replyToReviewSchema = z.object({
+  params: businessIdParams.extend({ reviewId: uuid }),
+  // Empty / null removes the reply
+  body: z.object({ reply: z.string().trim().max(1000).nullable() }),
+});
+
+// ─── Earnings & wallet ──────────────────────────────────────────────────────
+export const businessEarningsSchema = z.object({
+  params: businessIdParams,
+  query: z
+    .object({
+      from: z.string().datetime({ offset: true }).optional(),
+      to: z.string().datetime({ offset: true }).optional(),
+    })
+    .refine(q => !q.from || !q.to || new Date(q.from) <= new Date(q.to), {
+      message: '`from` must be on or before `to`',
+    }),
+});
+
+export const businessPayoutHistorySchema = z.object({
+  params: businessIdParams,
+  query: z.object({
+    page: z.coerce.number().int().min(1).optional().default(1),
+    limit: z.coerce.number().int().min(1).max(100).optional().default(20),
+  }),
+});
+
+export const businessCashOutSchema = z.object({
+  params: businessIdParams,
+  body: z.object({ amountCents: z.number().int().min(100).max(100_000_000) }),
 });

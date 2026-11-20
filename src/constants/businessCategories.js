@@ -73,6 +73,8 @@ export const BUSINESS_CATEGORY_KEYS = Object.keys(BUSINESS_CATEGORIES);
 
 export const PAYMENT_MODELS = ['full', 'deposit', 'in_person'];
 export const LOCATION_TYPES = ['physical', 'mobile'];
+// 'appointments' = bookable services; 'standard' = profile page without booking
+export const PAGE_TYPES = ['appointments', 'standard'];
 export const BOOKING_CONFIRMATION_MODES = ['automatic', 'manual'];
 
 // Default weekly hours for a new business (0 = Sunday). Matches onboarding UI.

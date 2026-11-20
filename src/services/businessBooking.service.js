@@ -27,8 +27,13 @@ import {
   businessServices,
   businessBookings,
   businessTeamMembers,
+  businessAddOns,
+  businessQuestionnaires,
+  businessGroupSessions,
 } from '../db/schema/index.js';
 import { BUSINESS_PERMISSIONS, permissionsForRole } from '../config/business-permissions.js';
+import { legacyQuestions, resolveAnswers } from '../utils/businessQuestionnaire.js';
+import { BusinessAttachmentService } from './businessAttachment.service.js';
 import ApiError from '../utils/api-error.js';
 import config from '../config/config.js';
 import logger from '../config/logger.js';
@@ -40,6 +45,7 @@ import {
   inPersonCommissionCents,
 } from './businessCommission.service.js';
 import { UserSpendService } from './userSpend.service.js';
+import { BusinessReviewService, canReviewBooking } from './businessReview.service.js';
 import { createNotification } from './notification.service.js';
 import { sendMail } from './mail.service.js';
 import { PlusTaxLiabilityService } from './tax/plusTaxLiability.service.js';
@@ -55,6 +61,14 @@ import {
   calculateBusinessBookingFeeCents,
   calculateBusinessCommissionCents,
 } from '../utils/orderProcessingFee.js';
+import { serviceDepositCents } from '../utils/businessDeposit.js';
+import {
+  depositBasis,
+  isGroup,
+  partySizeProblem,
+  seatsLeft,
+  sessionBaseCents,
+} from '../utils/businessSession.js';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -81,15 +95,20 @@ const escapeHtml = s =>
 
 // ─── Pure helpers (exported for tests) ──────────────────────────────────────
 
-/** Online amounts for a service under a business's defaults. */
-export function priceBooking(service, business) {
+/**
+ * Online amounts for a service (+ chosen add-ons) under a business's defaults.
+ * Add-ons and the party (seats × price for a group session, guests × price with a
+ * minimum for a private event) are part of the booked price: the fee tier, 5% and
+ * a % deposit all use the total; a fixed $ deposit stays as set (per seat for
+ * group sessions).
+ */
+export function priceBooking(service, business, addOns = [], { partySize = 1 } = {}) {
   const paymentModel = service.paymentModel ?? business.defaultPaymentModel;
-  const price = service.priceCents;
+  const addOnsCents = addOns.reduce((s, a) => s + a.priceCents, 0);
+  const price = sessionBaseCents(service, partySize) + addOnsCents;
   let amountDueNowCents = 0;
   if (paymentModel === 'full') amountDueNowCents = price;
-  else if (paymentModel === 'deposit') {
-    amountDueNowCents = Math.min(price, service.depositCents ?? Math.round(price * 0.2));
-  }
+  else if (paymentModel === 'deposit') amountDueNowCents = serviceDepositCents(depositBasis(service, price, partySize));
   const customerFeeCents = calculateBusinessBookingFeeCents(price);
   // 5% of what is collected online now (withheld from it): full price, the deposit, or nothing.
   const platformCommissionCents = calculateBusinessCommissionCents(amountDueNowCents);
@@ -98,6 +117,7 @@ export function priceBooking(service, business) {
   return {
     paymentModel,
     servicePriceCents: price,
+    addOnsCents,
     amountDueNowCents,
     customerFeeCents,
     platformCommissionCents,
@@ -182,6 +202,80 @@ export function customerCancellationRefund(booking, business, now = new Date()) 
   };
 }
 
+const BUSINESS_REFUND_STATUSES = ['confirmed', 'completed', 'no_show', 'cancelled'];
+const RESCHEDULABLE_STATUSES = ['pending', 'confirmed'];
+
+/** True once any of the booking's payout has gone to the business (day-14 / day-21 release). */
+const payoutReleased = b => !!(b.standardReleasedAt || b.reserveReleasedAt);
+
+/**
+ * Service amount the business can still refund itself. Only while the whole
+ * payout is held — after release the money has left the platform. The booking
+ * fee is Briteside's and is never part of a business refund.
+ */
+export function businessRefundableCents(b) {
+  if (!BUSINESS_REFUND_STATUSES.includes(b.status) || payoutReleased(b)) return 0;
+  return Math.max(0, b.amountPaidCents - b.refundedCents);
+}
+
+/** Seats belong to a session's fixed time. */
+export const GROUP_MOVE_BLOCK =
+  'Seats in a group session can’t be moved to another time. Cancel and book another session instead.';
+
+/** Why a customer can't move this booking themselves (null = they can). */
+export function customerRescheduleBlock(booking, business, now = new Date()) {
+  if (booking.groupSessionId) return GROUP_MOVE_BLOCK;
+  if (!business?.allowCustomerRescheduling) return "This business doesn't allow online rescheduling";
+  if (!RESCHEDULABLE_STATUSES.includes(booking.status)) return 'This booking can no longer be rescheduled';
+  const days = business.reschedulingNoticeDays ?? 0;
+  const noticeMs = Math.max(days * 86_400_000, MIN_LEAD_MINS * 60_000);
+  if (booking.startAt.getTime() - now.getTime() < noticeMs) {
+    return days > 0
+      ? `Bookings can be rescheduled up to ${days} day${days === 1 ? '' : 's'} before the appointment`
+      : 'This booking is too close to its start time to reschedule';
+  }
+  return null;
+}
+
+/** An add-on with no service list is offered with every service. */
+export const addOnApplies = (addOn, serviceId) =>
+  !addOn.serviceIds?.length || addOn.serviceIds.includes(serviceId);
+
+/** Check-in opens this long before the start (customers arrive early). */
+export const CHECK_IN_EARLY_MINS = 120;
+/** Manual bookings may be back-dated this far (recording a walk-in after the fact). */
+export const MANUAL_BACKDATE_HOURS = 24;
+export const PAYMENT_ARRANGEMENTS = ['cash', 'card_in_person', 'bank_transfer', 'other'];
+
+/** Existing bookings that would clash with [startAt, endAt) — buffers included, like computeSlots. */
+export function overlappingBookings(busy, startAt, endAt, bufferMins = 0) {
+  return busy.filter(b => {
+    const buf = Math.max(bufferMins, b.bufferMins ?? 0) * 60_000;
+    return startAt.getTime() < b.endAt.getTime() + buf && endAt.getTime() + buf > b.startAt.getTime();
+  });
+}
+
+/** Why this booking can't be checked in right now (null = it can). */
+export function checkInBlock(booking, now = new Date()) {
+  if (booking.status !== 'confirmed') {
+    return booking.status === 'pending'
+      ? 'Accept this booking request before checking the customer in'
+      : 'Only confirmed bookings can be checked in';
+  }
+  if (booking.startAt.getTime() - now.getTime() > CHECK_IN_EARLY_MINS * 60_000) {
+    return `Check-in opens ${CHECK_IN_EARLY_MINS / 60} hours before the appointment`;
+  }
+  return null;
+}
+
+/** Clean extra charges and their total (cents). */
+export function normalizeExtraCharges(charges = []) {
+  const lines = charges
+    .map(c => ({ label: String(c.label ?? '').trim(), amountCents: Math.round(Number(c.amountCents)) }))
+    .filter(c => c.label && Number.isInteger(c.amountCents) && c.amountCents > 0);
+  return { lines, totalCents: lines.reduce((s, c) => s + c.amountCents, 0) };
+}
+
 // ─── Serializers ────────────────────────────────────────────────────────────
 
 const serializeBooking = (b, { forBusiness = false } = {}) => ({
@@ -203,28 +297,46 @@ const serializeBooking = (b, { forBusiness = false } = {}) => ({
   taxAmountCents: b.taxAmountCents,
   amountPaidCents: b.amountPaidCents,
   refundedCents: b.refundedCents,
-  balanceDueAtVisitCents: b.servicePriceCents - b.amountPaidCents,
+  balanceDueAtVisitCents: Math.max(0, b.servicePriceCents + (b.extraChargesCents ?? 0) - b.amountPaidCents),
+  source: b.source ?? 'online',
+  // Picked when booking; already included in servicePriceCents / durationMins
+  addOns: b.addOns ?? [],
+  addOnsCents: b.addOnsCents ?? 0,
+  checkedInAt: b.checkedInAt ?? null,
+  extraCharges: b.extraCharges ?? [],
+  extraChargesCents: b.extraChargesCents ?? 0,
   balancePaidOnlineCents: b.balancePaidCents,
   canPayBalanceOnline:
     b.status === 'confirmed' && !b.balancePaymentIntentId && b.servicePriceCents > b.amountPaidCents,
   customerName: b.customerName,
   notes: b.notes,
   answers: b.answers,
+  // Seats in a public group session, or guests at a private event (1 = individual)
+  groupSessionId: b.groupSessionId ?? null,
+  partySize: b.partySize ?? 1,
+  // Names only — the files are fetched through a signed link (attachment endpoints)
+  attachments: (b.attachments ?? []).map((a, index) => ({ index, name: a.name, size: a.size, type: a.type })),
   acceptDeadline: b.acceptDeadline,
   cancelledBy: b.cancelledBy,
   cancellationReason: b.cancellationReason,
+  rescheduledAt: b.rescheduledAt ?? null,
+  rescheduledBy: b.rescheduledBy ?? null,
   createdAt: b.createdAt,
   ...(forBusiness
     ? {
         customerId: b.customerId,
         customerEmail: b.customerEmail,
         customerPhone: b.customerPhone,
+        paymentArrangement: b.paymentArrangement ?? null,
         platformCommissionCents: b.platformCommissionCents,
         // 5% of what the customer pays at the visit — owed once the booking completes
         inPersonCommissionCents: ['cancelled', 'declined', 'expired', 'no_show'].includes(b.status)
           ? 0
           : inPersonCommissionCents(b),
         businessNetCents: b.amountPaidCents - b.refundedCents - b.platformCommissionCents,
+        // What the business can still refund from the dashboard (0 once the payout is released)
+        refundableCents: businessRefundableCents(b),
+        payoutReleased: payoutReleased(b),
         confirmedAt: b.confirmedAt,
         completedAt: b.completedAt,
         cancelledAt: b.cancelledAt,
@@ -261,6 +373,120 @@ async function loadService(business, serviceId) {
   return service;
 }
 
+/**
+ * The add-ons a customer picked, checked against what the business offers now:
+ * active, not removed, and offered with this service. Throws a friendly 409 if
+ * any isn't (the page was open while the business changed its add-ons).
+ */
+async function resolveAddOns(business, service, ids) {
+  const unique = [...new Set(ids ?? [])];
+  if (!unique.length) return [];
+  // Per-seat extras would be ambiguous — group sessions don't take add-ons
+  if (isGroup(service)) {
+    throw new ApiError(httpStatus.CONFLICT, "Add-ons aren't available for group sessions.", true, '', {
+      code: 'ADD_ON_UNAVAILABLE',
+    });
+  }
+  const rows = await db.query.businessAddOns.findMany({
+    where: and(
+      eq(businessAddOns.businessId, business.id),
+      inArray(businessAddOns.id, unique),
+      isNull(businessAddOns.deletedAt),
+      eq(businessAddOns.active, true)
+    ),
+  });
+  const usable = rows.filter(a => addOnApplies(a, service.id));
+  if (usable.length !== unique.length) {
+    throw new ApiError(
+      httpStatus.CONFLICT,
+      'One of the add-ons you picked is no longer available. Please review your choices.',
+      true,
+      '',
+      { code: 'ADD_ON_UNAVAILABLE' }
+    );
+  }
+  // Keep the customer's order stable
+  return unique.map(id => usable.find(a => a.id === id));
+}
+
+/** Individual / private event: lock the candidate staff and claim the requested slot. */
+async function holdSlot(tx, business, bookedService, candidates, body) {
+  for (const s of [...candidates].sort((a, b) => a.id.localeCompare(b.id))) {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${'business_staff:' + s.id}))`);
+  }
+  const byStaff = await slotsForStaffList({
+    business,
+    service: bookedService,
+    staffList: candidates,
+    date: body.date,
+    tx,
+  });
+  const staff = candidates.find(s => byStaff.get(s.id)?.some(sl => sl.time === body.time));
+  if (!staff) {
+    throw new ApiError(httpStatus.CONFLICT, 'That time was just taken. Please pick another slot.');
+  }
+  return { staff, slot: byStaff.get(staff.id).find(sl => sl.time === body.time) };
+}
+
+/**
+ * Group session: lock the session, check it's still on and has room for
+ * `seats`, and return its host + time. Two customers racing for the last seat
+ * are serialised by the lock — the second gets SESSION_FULL.
+ */
+async function holdGroupSeats(tx, business, service, sessionId, seats) {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${'business_group_session:' + sessionId}))`);
+  const session = await tx.query.businessGroupSessions.findFirst({
+    where: and(
+      eq(businessGroupSessions.id, sessionId),
+      eq(businessGroupSessions.businessId, business.id),
+      eq(businessGroupSessions.serviceId, service.id)
+    ),
+    with: { staff: true },
+  });
+  const gone = (message, code = 'SESSION_UNAVAILABLE') =>
+    new ApiError(httpStatus.CONFLICT, message, true, '', { code });
+  if (!session || session.status !== 'scheduled' || !session.staff || session.staff.deletedAt) {
+    throw gone('This session is no longer available. Please pick another one.');
+  }
+  if (session.startAt.getTime() < Date.now() + MIN_LEAD_MINS * 60_000) {
+    throw gone('This session has already started. Please pick another one.');
+  }
+  const taken = (await seatsTakenBySession([session.id], tx)).get(session.id) ?? 0;
+  const left = seatsLeft(session.capacity, taken);
+  if (seats > left) {
+    throw gone(
+      left === 0
+        ? 'This session just filled up. Please pick another one.'
+        : `Only ${left} ${left === 1 ? 'seat is' : 'seats are'} left in this session.`,
+      'SESSION_FULL'
+    );
+  }
+  return {
+    staff: session.staff,
+    slot: { startAt: session.startAt.toISOString(), endAt: session.endAt.toISOString() },
+  };
+}
+
+/** The service's questionnaire (null = none / removed → general booking questions). */
+async function loadQuestionnaire(business, service) {
+  if (!service.questionnaireId) return null;
+  return (
+    (await db.query.businessQuestionnaires.findFirst({
+      where: and(
+        eq(businessQuestionnaires.id, service.questionnaireId),
+        eq(businessQuestionnaires.businessId, business.id),
+        isNull(businessQuestionnaires.deletedAt)
+      ),
+    })) ?? null
+  );
+}
+
+/** Service with its length extended by the chosen add-ons (for slot maths). */
+const withAddOnTime = (service, addOns) => ({
+  ...service,
+  durationMins: service.durationMins + addOns.reduce((s, a) => s + a.durationMins, 0),
+});
+
 /** Active staff who can perform the service and are taking bookings. */
 async function eligibleStaff(business, service) {
   const all = await db.query.businessStaff.findMany({
@@ -276,7 +502,11 @@ async function eligibleStaff(business, service) {
   return all.filter(s => allowed.has(s.id));
 }
 
-async function busyForStaff(staffIds, dayStart, dayEnd, tx = db, excludeId = null) {
+/**
+ * Time already taken in these staff members' calendars: holding bookings plus
+ * scheduled group sessions they host (a session blocks its whole time, booked or not).
+ */
+export async function busyForStaff(staffIds, dayStart, dayEnd, tx = db, excludeId = null, { excludeSessionId } = {}) {
   if (!staffIds.length) return [];
   const staleCutoff = new Date(Date.now() - STALE_HOLD_MINS * 60_000);
   // Widen by the largest plausible buffer so neighbours across midnight count
@@ -290,15 +520,63 @@ async function busyForStaff(staffIds, dayStart, dayEnd, tx = db, excludeId = nul
     or(ne(businessBookings.status, 'awaiting_payment'), gte(businessBookings.createdAt, staleCutoff)),
   ];
   if (excludeId) conds.push(ne(businessBookings.id, excludeId));
-  return tx
+  // Seats in a session are covered by the session itself
+  if (excludeSessionId) {
+    conds.push(
+      or(isNull(businessBookings.groupSessionId), ne(businessBookings.groupSessionId, excludeSessionId))
+    );
+  }
+  const sessionConds = [
+    inArray(businessGroupSessions.staffId, staffIds),
+    eq(businessGroupSessions.status, 'scheduled'),
+    lt(businessGroupSessions.startAt, to),
+    gte(businessGroupSessions.endAt, from),
+  ];
+  if (excludeSessionId) sessionConds.push(ne(businessGroupSessions.id, excludeSessionId));
+  const [bookings, sessions] = await Promise.all([
+    tx
+      .select({
+        staffId: businessBookings.staffId,
+        startAt: businessBookings.startAt,
+        endAt: businessBookings.endAt,
+        bufferMins: businessBookings.bufferMins,
+      })
+      .from(businessBookings)
+      .where(and(...conds)),
+    tx
+      .select({
+        staffId: businessGroupSessions.staffId,
+        startAt: businessGroupSessions.startAt,
+        endAt: businessGroupSessions.endAt,
+        bufferMins: businessGroupSessions.bufferMins,
+      })
+      .from(businessGroupSessions)
+      .where(and(...sessionConds)),
+  ]);
+  return [...bookings, ...sessions];
+}
+
+/** Seats held per session (paid, requested, or a checkout still in progress). */
+export async function seatsTakenBySession(sessionIds, tx = db, { excludeBookingId } = {}) {
+  const out = new Map(sessionIds.map(id => [id, 0]));
+  if (!sessionIds.length) return out;
+  const staleCutoff = new Date(Date.now() - STALE_HOLD_MINS * 60_000);
+  const conds = [
+    inArray(businessBookings.groupSessionId, sessionIds),
+    inArray(businessBookings.status, HOLDING_STATUSES),
+    or(ne(businessBookings.status, 'awaiting_payment'), gte(businessBookings.createdAt, staleCutoff)),
+  ];
+  if (excludeBookingId) conds.push(ne(businessBookings.id, excludeBookingId));
+  const rows = await tx
     .select({
-      staffId: businessBookings.staffId,
-      startAt: businessBookings.startAt,
-      endAt: businessBookings.endAt,
-      bufferMins: businessBookings.bufferMins,
+      sessionId: businessBookings.groupSessionId,
+      seats: sql`coalesce(sum(${businessBookings.partySize}), 0)::int`,
     })
     .from(businessBookings)
-    .where(and(...conds));
+    .where(and(...conds))
+    .groupBy(businessBookings.groupSessionId);
+  for (const r of rows) out.set(r.sessionId, Number(r.seats));
+  return out;
 }
 
 async function overridesFor(staffIds, date, tx = db) {
@@ -382,11 +660,37 @@ async function refundBooking(booking, business, { serviceRefundCents, refundFee,
   const feeRefund = refundFee ? booking.customerFeeCents : 0;
   const total = serviceRefund + taxRefund + feeRefund;
 
+  // Claim the refund first: only succeeds if nobody refunded since `booking` was read,
+  // so two refund paths (e.g. a business refund and a customer cancel) can't both pay out.
+  if (serviceRefund > 0) {
+    const [claimed] = await db
+      .update(businessBookings)
+      .set({ refundedCents: booking.refundedCents + serviceRefund, updatedAt: new Date() })
+      .where(and(eq(businessBookings.id, booking.id), eq(businessBookings.refundedCents, booking.refundedCents)))
+      .returning({ id: businessBookings.id });
+    if (!claimed) {
+      throw new ApiError(httpStatus.CONFLICT, 'This booking was just refunded. Refresh and try again.');
+    }
+  }
+  const releaseClaim = () =>
+    serviceRefund > 0
+      ? db
+          .update(businessBookings)
+          .set({ refundedCents: booking.refundedCents, updatedAt: new Date() })
+          .where(
+            and(
+              eq(businessBookings.id, booking.id),
+              eq(businessBookings.refundedCents, booking.refundedCents + serviceRefund)
+            )
+          )
+      : Promise.resolve();
+
   // A booking can have two card payments (booking + balance paid later). Refund the
   // balance payment first (it carries no booking fee), the rest from the booking payment.
   const refundIds = [];
   if (total > 0) {
     if (!stripe || !booking.stripePaymentIntentId) {
+      await releaseClaim();
       throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Refunds are unavailable right now');
     }
     const fromBalance = booking.balancePaymentIntentId
@@ -397,15 +701,23 @@ async function refundBooking(booking, business, { serviceRefundCents, refundFee,
       { pi: booking.stripePaymentIntentId, amount: total - fromBalance, key: 'booking' },
     ].filter(p => p.pi && p.amount > 0);
     for (const p of parts) {
-      const refund = await stripe.refunds.create(
-        {
-          payment_intent: p.pi,
-          amount: p.amount,
-          reason: 'requested_by_customer',
-          metadata: { type: SOURCE_TYPE, bookingId: booking.id, reason, payment: p.key },
-        },
-        { idempotencyKey: `business-booking-refund-${booking.id}-${reason}-${p.key}` }
-      );
+      let refund;
+      try {
+        refund = await stripe.refunds.create(
+          {
+            payment_intent: p.pi,
+            amount: p.amount,
+            reason: 'requested_by_customer',
+            metadata: { type: SOURCE_TYPE, bookingId: booking.id, reason, payment: p.key },
+          },
+          { idempotencyKey: `business-booking-refund-${booking.id}-${reason}-${p.key}` }
+        );
+      } catch (err) {
+        // Nothing went out yet → give the claim back. If an earlier part already
+        // refunded, keep the claim (money did leave) and surface the error.
+        if (!refundIds.length) await releaseClaim();
+        throw err;
+      }
       refundIds.push(refund.id);
     }
   }
@@ -471,6 +783,128 @@ async function closeWithRefund(booking, business, from, values, refundOpts) {
   return { row, refund };
 }
 
+// ─── Rescheduling ───────────────────────────────────────────────────────────
+
+/** Slot maths uses the booking's own length/buffer — the service may have changed or been removed since. */
+const bookingShape = booking => ({ durationMins: booking.durationMins, bufferMins: booking.bufferMins });
+
+/**
+ * Staff a booking may move to: anyone currently eligible for its service, plus
+ * its current staff member (so a booking can still move within their calendar).
+ * `onlyStaffId` narrows to one (staff-role members, or a chosen staff member).
+ */
+async function rescheduleStaffPool(business, booking, onlyStaffId) {
+  // Manual bookings of a custom service have no serviceId — only their own staff member applies
+  const service = booking.serviceId
+    ? await db.query.businessServices.findFirst({
+        where: and(
+          eq(businessServices.id, booking.serviceId),
+          eq(businessServices.businessId, business.id),
+          isNull(businessServices.deletedAt)
+        ),
+        with: { staffLinks: true },
+      })
+    : null;
+  const pool = service ? await eligibleStaff(business, service) : [];
+  if (!pool.some(s => s.id === booking.staffId)) {
+    const current = await db.query.businessStaff.findFirst({
+      where: and(eq(businessStaff.id, booking.staffId), isNull(businessStaff.deletedAt)),
+    });
+    if (current) pool.push(current);
+  }
+  return onlyStaffId ? pool.filter(s => s.id === onlyStaffId) : pool;
+}
+
+/** Free times on `date` for moving `booking` (its own current slot doesn't block). */
+async function rescheduleSlotsFor(business, booking, { date, staffId }) {
+  const staffList = await rescheduleStaffPool(business, booking, staffId ?? booking.staffId);
+  const base = { date, timezone: business.timezone, durationMins: booking.durationMins };
+  if (!staffList.length) return { ...base, slots: [] };
+  const byStaff = await slotsForStaffList({
+    business,
+    service: bookingShape(booking),
+    staffList,
+    date,
+    excludeBookingId: booking.id,
+  });
+  const staff = staffList[0];
+  const current = booking.startAt.toISOString();
+  const slots = (byStaff.get(staff.id) ?? []).filter(s => staff.id !== booking.staffId || s.startAt !== current);
+  return { ...base, staffId: staff.id, slots };
+}
+
+/**
+ * Move a booking in place: re-checks the slot under the staff lock (same as
+ * checkout), keeps payments as they are, and re-arms the reminders.
+ */
+async function moveBooking(business, booking, { date, time, staffId }, by) {
+  const [staff] = await rescheduleStaffPool(business, booking, staffId ?? booking.staffId);
+  if (!staff) throw new ApiError(httpStatus.CONFLICT, 'That staff member is not available for this booking');
+
+  return db.transaction(async tx => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${'business_staff:' + staff.id}))`);
+    const fresh = await tx.query.businessBookings.findFirst({ where: eq(businessBookings.id, booking.id) });
+    if (
+      !fresh ||
+      !RESCHEDULABLE_STATUSES.includes(fresh.status) ||
+      fresh.startAt.getTime() !== booking.startAt.getTime()
+    ) {
+      throw new ApiError(httpStatus.CONFLICT, 'This booking was already updated. Refresh and try again.');
+    }
+    const byStaff = await slotsForStaffList({
+      business,
+      service: bookingShape(booking),
+      staffList: [staff],
+      date,
+      tx,
+      excludeBookingId: booking.id,
+    });
+    const slot = byStaff.get(staff.id)?.find(s => s.time === time);
+    if (!slot) throw new ApiError(httpStatus.CONFLICT, 'That time is no longer available. Please pick another.');
+    if (staff.id === booking.staffId && slot.startAt === booking.startAt.toISOString()) {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'Pick a different time');
+    }
+
+    const [row] = await tx
+      .update(businessBookings)
+      .set({
+        startAt: new Date(slot.startAt),
+        endAt: new Date(slot.endAt),
+        staffId: staff.id,
+        staffName: staff.name,
+        reminder24hSentAt: null,
+        reminder1hSentAt: null,
+        rescheduledAt: new Date(),
+        rescheduledBy: by,
+        rescheduleCount: sql`${businessBookings.rescheduleCount} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(businessBookings.id, booking.id), inArray(businessBookings.status, RESCHEDULABLE_STATUSES)))
+      .returning();
+    if (!row) throw new ApiError(httpStatus.CONFLICT, 'This booking was already updated. Refresh and try again.');
+    return row;
+  });
+}
+
+/** A signed-in customer's own booking, with the business columns rescheduling needs. */
+async function loadCustomerBooking(user, bookingId) {
+  const booking = await db.query.businessBookings.findFirst({
+    where: and(eq(businessBookings.id, bookingId), eq(businessBookings.customerId, user.id)),
+    with: { business: true },
+  });
+  if (!booking || !booking.business || booking.business.deletedAt) {
+    throw new ApiError(httpStatus.NOT_FOUND, 'Booking not found');
+  }
+  return booking;
+}
+
+async function attachmentLink(booking, index) {
+  const file = (booking.attachments ?? [])[index];
+  if (!file) throw new ApiError(httpStatus.NOT_FOUND, 'That file is no longer attached to this booking');
+  const { url, expiresIn } = await BusinessAttachmentService.viewUrl(file);
+  return { url, expiresIn, name: file.name, type: file.type };
+}
+
 // ─── Notifications (never throw) ────────────────────────────────────────────
 
 function fmtWhen(booking) {
@@ -493,7 +927,19 @@ async function notifyOwner(business, title, message, booking, redirectTo = '/bus
   }
 }
 
+/** Email the customer and, when they have an account, an in-app notification too. */
 function emailCustomer(booking, business, subject, headline, extraRows = []) {
+  if (booking.customerId) {
+    createNotification({
+      userId: booking.customerId,
+      title: subject,
+      message: `${headline} · ${booking.serviceName}, ${fmtWhen(booking)}`,
+      type: 'business_booking',
+      redirectTo: '/bookings?tab=business',
+      relatedId: booking.id,
+      metadata: { businessId: business.id, bookingId: booking.id, status: booking.status },
+    }).catch(err => logger.error(`[businessBooking] customer notification failed ${booking.id}: ${err.message}`));
+  }
   const html = emailWrapper(`
     <h2 style="margin:0 0 12px">${escapeHtml(headline)}</h2>
     ${infoBox([
@@ -505,6 +951,8 @@ function emailCustomer(booking, business, subject, headline, extraRows = []) {
     ])}
     ${ctaRow(ctaButton('View business', appUrl(`/business/${business.slug}`)))}
   `);
+  // Manual bookings may have only a phone number
+  if (!booking.customerEmail) return;
   sendMail(booking.customerEmail, subject, html).catch(err =>
     logger.error(`[businessBooking] customer email failed ${booking.id}: ${err.message}`)
   );
@@ -585,11 +1033,15 @@ export class BusinessBookingService {
    * Public slots for a service on a date (business-local yyyy-MM-dd).
    * With staffId → that staff member's slots. Without → union, each slot listing who is free.
    */
-  static async getSlots(idOrSlug, { serviceId, staffId, date }) {
+  static async getSlots(idOrSlug, { serviceId, staffId, date, addOnIds }) {
     const business = await loadPublicBusiness(idOrSlug);
-    const service = await loadService(business, serviceId);
+    const loaded = await loadService(business, serviceId);
+    // Add-on minutes make the appointment longer, so fewer times may fit
+    const service = withAddOnTime(loaded, await resolveAddOns(business, loaded, addOnIds));
     const base = { date, timezone: business.timezone, durationMins: service.durationMins };
-    if (!business.acceptingBookings) return { ...base, slots: [] };
+    if (!business.acceptingBookings || business.pageType === 'standard') return { ...base, slots: [] };
+    // Group services are booked into scheduled sessions (listGroupSessions), not free slots
+    if (isGroup(loaded)) return { ...base, slots: [] };
 
     let staffList = await eligibleStaff(business, service);
     if (staffId) {
@@ -611,10 +1063,52 @@ export class BusinessBookingService {
   }
 
   /** Price breakdown for the booking flow summary. */
-  static async quote(idOrSlug, serviceId) {
+  static async quote(idOrSlug, serviceId, addOnIds, partySize = 1) {
     const business = await loadPublicBusiness(idOrSlug);
     const service = await loadService(business, serviceId);
-    return priceBooking(service, business);
+    const problem = partySizeProblem(service, partySize);
+    if (problem) throw new ApiError(httpStatus.BAD_REQUEST, problem);
+    const addOns = await resolveAddOns(business, service, addOnIds);
+    return priceBooking(service, business, addOns, { partySize });
+  }
+
+  /**
+   * Upcoming sessions of a group service customers can book (next 90 days).
+   * Seats left are shown only when the business allows it; `full` always is.
+   */
+  static async listPublicGroupSessions(idOrSlug, serviceId) {
+    const business = await loadPublicBusiness(idOrSlug);
+    const service = await loadService(business, serviceId);
+    if (!isGroup(service)) return { timezone: business.timezone, sessions: [] };
+    const now = new Date();
+    const rows = await db.query.businessGroupSessions.findMany({
+      where: and(
+        eq(businessGroupSessions.serviceId, service.id),
+        eq(businessGroupSessions.status, 'scheduled'),
+        gte(businessGroupSessions.startAt, new Date(now.getTime() + MIN_LEAD_MINS * 60_000)),
+        lte(businessGroupSessions.startAt, new Date(now.getTime() + 90 * 86_400_000))
+      ),
+      with: { staff: { columns: { id: true, name: true, deletedAt: true } } },
+      orderBy: [asc(businessGroupSessions.startAt)],
+      limit: 200,
+    });
+    const visible = rows.filter(r => r.staff && !r.staff.deletedAt);
+    const taken = await seatsTakenBySession(visible.map(r => r.id));
+    return {
+      timezone: business.timezone,
+      sessions: visible.map(r => {
+        const left = seatsLeft(r.capacity, taken.get(r.id) ?? 0);
+        return {
+          id: r.id,
+          startAt: r.startAt,
+          endAt: r.endAt,
+          staffId: r.staffId,
+          staffName: r.staff.name,
+          full: left === 0,
+          ...(service.showRemainingSeats ? { capacity: r.capacity, seatsLeft: left } : {}),
+        };
+      }),
+    };
   }
 
   /**
@@ -625,27 +1119,45 @@ export class BusinessBookingService {
     if (!stripe) throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Payments are unavailable right now');
 
     const business = await loadPublicBusiness(idOrSlug);
+    // Standard pages are profile-only — no booking
+    if (business.pageType === 'standard') {
+      throw new ApiError(httpStatus.CONFLICT, 'This business does not take bookings on Briteside');
+    }
     if (!business.acceptingBookings || (await BusinessCommissionService.isBookingPaused(business.id))) {
       throw new ApiError(httpStatus.CONFLICT, 'This business is not taking bookings right now');
     }
     const service = await loadService(business, body.serviceId);
 
-    // Required booking questions
-    const questions = business.bookingQuestions ?? [];
-    const answersById = new Map((body.answers ?? []).map(a => [a.questionId, a.answer?.trim() ?? '']));
-    for (const q of questions) {
-      if (q.required && !answersById.get(q.id)) {
-        throw new ApiError(httpStatus.BAD_REQUEST, `Please answer: ${q.question}`);
-      }
-    }
-    const answers = questions
-      .filter(q => answersById.get(q.id))
-      .map(q => ({ question: q.question, answer: answersById.get(q.id) }));
+    // The service's questionnaire, or the business's general booking questions
+    const questionnaire = await loadQuestionnaire(business, service);
+    const answers = resolveAnswers(
+      questionnaire ? questionnaire.questions : legacyQuestions(business.bookingQuestions),
+      body.answers
+    );
+    // Uploaded beforehand (signed-in customers); checked to be theirs and still stored
+    const attachments = await BusinessAttachmentService.resolveForBooking(
+      business,
+      user?.id ?? null,
+      body.attachments,
+      { allowed: !!questionnaire?.allowAttachments }
+    );
 
-    const pricing = priceBooking(service, business);
-    const staffPool = await eligibleStaff(business, service);
+    // Seats (group session) or guests (private event)
+    const partySize = body.partySize ?? 1;
+    const sizeProblem = partySizeProblem(service, partySize);
+    if (sizeProblem) throw new ApiError(httpStatus.BAD_REQUEST, sizeProblem);
+    const group = isGroup(service);
+    if (group && !body.groupSessionId) {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'Pick a session to book');
+    }
+
+    const addOns = await resolveAddOns(business, service, body.addOnIds);
+    const pricing = priceBooking(service, business, addOns, { partySize });
+    // Slot length includes the add-ons' extra minutes
+    const bookedService = withAddOnTime(service, addOns);
+    const staffPool = group ? [] : await eligibleStaff(business, service);
     const candidates = body.staffId ? staffPool.filter(s => s.id === body.staffId) : staffPool;
-    if (!candidates.length) {
+    if (!group && !candidates.length) {
       throw new ApiError(httpStatus.CONFLICT, 'That staff member is not available for this service');
     }
 
@@ -658,23 +1170,11 @@ export class BusinessBookingService {
     const { liability } = await PlusTaxLiabilityService.resolveLiability(business.ownerId);
     const taxLiability = liability ? liability.type : 'none';
 
-    // Lock the candidate staff, re-check the slot, insert the hold — all in one transaction
+    // Lock, re-check the slot (or the session's seats), insert the hold — all in one transaction
     const booking = await db.transaction(async tx => {
-      for (const s of [...candidates].sort((a, b) => a.id.localeCompare(b.id))) {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${'business_staff:' + s.id}))`);
-      }
-      const byStaff = await slotsForStaffList({
-        business,
-        service,
-        staffList: candidates,
-        date: body.date,
-        tx,
-      });
-      const staff = candidates.find(s => byStaff.get(s.id)?.some(sl => sl.time === body.time));
-      if (!staff) {
-        throw new ApiError(httpStatus.CONFLICT, 'That time was just taken. Please pick another slot.');
-      }
-      const slot = byStaff.get(staff.id).find(sl => sl.time === body.time);
+      const { staff, slot } = group
+        ? await holdGroupSeats(tx, business, service, body.groupSessionId, partySize)
+        : await holdSlot(tx, business, bookedService, candidates, body);
 
       const [row] = await tx
         .insert(businessBookings)
@@ -688,12 +1188,18 @@ export class BusinessBookingService {
           customerPhone: body.customer?.phone?.trim() || null,
           serviceName: service.name,
           staffName: staff.name,
-          durationMins: service.durationMins,
-          bufferMins: service.bufferMins,
+          durationMins: group
+            ? Math.round((new Date(slot.endAt) - new Date(slot.startAt)) / 60_000)
+            : bookedService.durationMins,
+          bufferMins: group ? 0 : service.bufferMins,
           startAt: new Date(slot.startAt),
           endAt: new Date(slot.endAt),
           timezone: business.timezone,
+          groupSessionId: group ? body.groupSessionId : null,
+          partySize,
           status: 'awaiting_payment',
+          addOns: addOns.map(a => ({ id: a.id, name: a.name, priceCents: a.priceCents, durationMins: a.durationMins })),
+          addOnsCents: pricing.addOnsCents,
           paymentModel: pricing.paymentModel,
           servicePriceCents: pricing.servicePriceCents,
           amountDueNowCents: pricing.amountDueNowCents,
@@ -701,8 +1207,11 @@ export class BusinessBookingService {
           platformCommissionCents: pricing.platformCommissionCents,
           notes: body.notes?.trim() || null,
           answers,
+          attachments,
           taxLiability,
           reserveAmountCents: 0,
+          // Snapshot now, so editing the service mid-checkout doesn't change the outcome
+          needsApproval: !!service.requiresApproval,
         })
         .returning();
       return row;
@@ -749,10 +1258,9 @@ export class BusinessBookingService {
           unit_amount: pricing.amountDueNowCents,
           tax_behavior: 'exclusive',
           product_data: {
-            name:
-              pricing.paymentModel === 'deposit'
-                ? `Deposit: ${service.name} at ${business.name}`
-                : `${service.name} at ${business.name}`,
+            name: `${pricing.paymentModel === 'deposit' ? 'Deposit: ' : ''}${service.name}${
+              addOns.length ? ` + ${addOns.map(a => a.name).join(', ')}` : ''
+            } at ${business.name}`.slice(0, 250),
             description: `${when} with ${booking.staffName}`,
             tax_code: SERVICE_TAX_CODE,
           },
@@ -953,7 +1461,8 @@ export class BusinessBookingService {
       return;
     }
 
-    const manual = existing.staff?.bookingConfirmation === 'manual';
+    // A request when the staff member confirms by hand, or the service requires approval
+    const manual = existing.staff?.bookingConfirmation === 'manual' || !!existing.needsApproval;
     const now = new Date();
     const acceptDeadline = manual
       ? new Date(Math.min(now.getTime() + ACCEPT_WINDOW_HOURS * 3_600_000, existing.startAt.getTime()))
@@ -1324,11 +1833,16 @@ export class BusinessBookingService {
     const fullIds = owned.map(b => b.id);
     const ownStaff = []; // [{ businessId, staffId }] for staff-role members
     const manageIds = new Set(fullIds);
+    // Refunds: owners, admins and managers (not staff-role members)
+    const refundIds = new Set(fullIds);
     for (const m of memberships) {
       if (!m.business || m.business.deletedAt) continue;
       const perms = permissionsForRole(m.role);
       if (!perms.includes(BUSINESS_PERMISSIONS.BOOKINGS_VIEW)) continue;
-      if (perms.includes(BUSINESS_PERMISSIONS.BOOKINGS_MANAGE)) manageIds.add(m.businessId);
+      if (perms.includes(BUSINESS_PERMISSIONS.BOOKINGS_MANAGE)) {
+        manageIds.add(m.businessId);
+        if (m.role !== 'staff') refundIds.add(m.businessId);
+      }
       if (m.role === 'staff') {
         if (m.staffId) ownStaff.push({ businessId: m.businessId, staffId: m.staffId });
       } else {
@@ -1358,6 +1872,7 @@ export class BusinessBookingService {
         ...serializeBooking(b, { forBusiness: true }),
         business: b.business,
         canManage: manageIds.has(b.businessId),
+        canRefund: refundIds.has(b.businessId),
       })),
       businesses: new Set([...fullIds, ...ownStaff.map(s => s.businessId)]).size,
     };
@@ -1406,10 +1921,22 @@ export class BusinessBookingService {
     return { booking: serializeBooking(row, { forBusiness: true }), refund };
   }
 
-  static async complete(business, bookingId, access) {
+  /**
+   * Close a visit. `charges` = extras done on the day ([{ label, amountCents }]),
+   * collected in person; 5% commission applies to them like the service price.
+   */
+  static async complete(business, bookingId, access, { charges } = {}) {
     const booking = await getBookingForBusiness(business, bookingId, access);
     if (booking.startAt > new Date()) throw new ApiError(httpStatus.CONFLICT, 'You can complete a booking once it has started');
-    const row = await transition(bookingId, ['confirmed'], { status: 'completed', completedAt: new Date() });
+    const extras = normalizeExtraCharges(charges);
+    if ((charges?.length ?? 0) !== extras.lines.length) {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'Each extra charge needs a description and an amount above $0');
+    }
+    const row = await transition(bookingId, ['confirmed'], {
+      status: 'completed',
+      completedAt: new Date(),
+      ...(extras.lines.length ? { extraCharges: extras.lines, extraChargesCents: extras.totalCents } : {}),
+    });
     // 5% of anything the customer paid in person (the cron backfills if this fails)
     await BusinessCommissionService.recordForCompletedBooking(row, business).catch(err =>
       logger.error(`[businessBooking] commission record failed ${row.id}: ${err.message}`)
@@ -1426,6 +1953,197 @@ export class BusinessBookingService {
     return serializeBooking(row, { forBusiness: true });
   }
 
+  /**
+   * Refund all or part of what the customer paid online for the service (never
+   * the booking fee). Owners, admins and managers only, and only while the
+   * payout is still held. The booking's status doesn't change.
+   */
+  static async refundByBusiness(business, bookingId, access, { amountCents, reason } = {}) {
+    if (access?.role === 'staff') {
+      throw new ApiError(httpStatus.FORBIDDEN, 'Only owners, admins and managers can issue refunds');
+    }
+    const booking = await getBookingForBusiness(business, bookingId, access);
+    const max = businessRefundableCents(booking);
+    if (max <= 0) {
+      throw new ApiError(
+        httpStatus.CONFLICT,
+        payoutReleased(booking) && booking.amountPaidCents > booking.refundedCents
+          ? 'The payout for this booking has already been released, so it can’t be refunded here. Contact support.'
+          : 'There is nothing left to refund on this booking'
+      );
+    }
+    const amount = amountCents ?? max;
+    if (amount > max) {
+      throw new ApiError(httpStatus.BAD_REQUEST, `You can refund up to ${money(max)}`);
+    }
+
+    const refund = await refundBooking(booking, business, {
+      serviceRefundCents: amount,
+      refundFee: false,
+      // Unique per refund (refundedCents changes after each), so partial refunds don't collide
+      reason: `business_refund_${booking.refundedCents}`,
+    });
+    const row = await db.query.businessBookings.findFirst({ where: eq(businessBookings.id, booking.id) });
+    emailCustomer(row, business, `Refund from ${business.name}`, `${business.name} refunded you ${money(refund.refundedCents)}`, [
+      ['Refund', `${money(refund.refundedCents)} back to your card`],
+      ...(reason ? [['Note', escapeHtml(reason)]] : []),
+    ]);
+    return { booking: serializeBooking(row, { forBusiness: true }), refund };
+  }
+
+  /** Free times to move a booking to (dashboard). Staff-role members: their own calendar only. */
+  static async rescheduleSlotsForBusiness(business, bookingId, access, { date, staffId }) {
+    const booking = await getBookingForBusiness(business, bookingId, access);
+    if (booking.groupSessionId) throw new ApiError(httpStatus.CONFLICT, GROUP_MOVE_BLOCK);
+    const onlyStaff = access?.role === 'staff' ? access.staffId : staffId;
+    return rescheduleSlotsFor(business, booking, { date, staffId: onlyStaff });
+  }
+
+  /** Mark the customer as arrived (or undo it). Idempotent. */
+  static async checkIn(business, bookingId, access, { undo = false } = {}) {
+    const booking = await getBookingForBusiness(business, bookingId, access);
+    if (undo) {
+      if (!booking.checkedInAt) return { booking: serializeBooking(booking, { forBusiness: true }) };
+      const row = await transition(bookingId, ['confirmed'], { checkedInAt: null });
+      return { booking: serializeBooking(row, { forBusiness: true }) };
+    }
+    if (booking.checkedInAt) return { booking: serializeBooking(booking, { forBusiness: true }) };
+    const blocked = checkInBlock(booking);
+    if (blocked) throw new ApiError(httpStatus.CONFLICT, blocked);
+    const row = await transition(bookingId, ['confirmed'], { checkedInAt: new Date() });
+    return { booking: serializeBooking(row, { forBusiness: true }) };
+  }
+
+  /**
+   * Walk-in / phone booking added from the dashboard. Nothing is charged online
+   * (no booking fee); it's confirmed straight away, and 5% of the price is owed
+   * once it completes like any pay-in-person booking. Times outside working
+   * hours are allowed (it's the business's own calendar); clashes with another
+   * booking for the same staff member need `allowOverlap`.
+   */
+  static async createManual(business, access, body) {
+    if (business.pageType === 'standard') {
+      throw new ApiError(httpStatus.CONFLICT, 'Switch your page to Appointments to take bookings');
+    }
+    if (access?.role === 'staff' && body.staffId !== access.staffId) {
+      throw new ApiError(httpStatus.FORBIDDEN, 'You can only add bookings to your own calendar');
+    }
+    const staff = await db.query.businessStaff.findFirst({
+      where: and(
+        eq(businessStaff.id, body.staffId),
+        eq(businessStaff.businessId, business.id),
+        isNull(businessStaff.deletedAt)
+      ),
+    });
+    if (!staff) throw new ApiError(httpStatus.NOT_FOUND, 'That staff member no longer exists. Refresh and try again.');
+
+    let service = null;
+    if (body.serviceId) service = await loadService(business, body.serviceId);
+    if (isGroup(service)) {
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        'Group classes are booked into a scheduled session. Customers book seats from your page; to take a walk-in, add them as a custom service.'
+      );
+    }
+    const serviceName = service?.name ?? body.customService?.name?.trim();
+    const durationMins = service?.durationMins ?? body.customService?.durationMins;
+    if (!serviceName || !durationMins) {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'Choose a service, or name a custom one with its length');
+    }
+    const bufferMins = service?.bufferMins ?? 0;
+
+    const tz = business.timezone;
+    const start = dayjs.tz(`${body.date}T${body.time}:00`, tz);
+    if (!start.isValid()) throw new ApiError(httpStatus.BAD_REQUEST, 'Pick a valid date and time');
+    const startAt = start.toDate();
+    const endAt = new Date(startAt.getTime() + durationMins * 60_000);
+    const now = Date.now();
+    if (startAt.getTime() < now - MANUAL_BACKDATE_HOURS * 3_600_000) {
+      throw new ApiError(httpStatus.BAD_REQUEST, `Bookings can be added up to ${MANUAL_BACKDATE_HOURS} hours in the past`);
+    }
+    if (startAt.getTime() > now + 365 * 86_400_000) {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'Bookings can be added up to a year ahead');
+    }
+
+    const email = body.customer.email?.trim().toLowerCase() || null;
+    const row = await db.transaction(async tx => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${'business_staff:' + staff.id}))`);
+      if (!body.allowOverlap) {
+        const busy = await busyForStaff([staff.id], startAt, endAt, tx);
+        const clash = overlappingBookings(busy, startAt, endAt, bufferMins)[0];
+        if (clash) {
+          const at = dayjs(clash.startAt).tz(tz).format('h:mm A');
+          throw new ApiError(
+            httpStatus.CONFLICT,
+            `${staff.name} already has a booking at ${at} that overlaps this time.`,
+            true,
+            '',
+            { code: 'BOOKING_OVERLAP' }
+          );
+        }
+      }
+      const [inserted] = await tx
+        .insert(businessBookings)
+        .values({
+          businessId: business.id,
+          serviceId: service?.id ?? null,
+          staffId: staff.id,
+          customerId: null,
+          customerName: body.customer.name.trim(),
+          customerEmail: email,
+          customerPhone: body.customer.phone?.trim() || null,
+          source: 'manual',
+          paymentArrangement: body.paymentArrangement,
+          serviceName,
+          staffName: staff.name,
+          durationMins,
+          bufferMins,
+          startAt,
+          endAt,
+          timezone: tz,
+          status: 'confirmed',
+          confirmedAt: new Date(),
+          paymentModel: 'in_person',
+          servicePriceCents: body.priceCents,
+          amountDueNowCents: 0,
+          customerFeeCents: 0,
+          platformCommissionCents: 0,
+          notes: body.notes?.trim() || null,
+          answers: [],
+          taxLiability: 'none',
+          reserveAmountCents: 0,
+        })
+        .returning();
+      return inserted;
+    });
+
+    if (body.notifyCustomer !== false) {
+      emailCustomer(row, business, `Booking confirmed: ${business.name}`, `You're booked at ${business.name}`, [
+        ['Price', `${money(row.servicePriceCents)}, paid at your visit`],
+      ]);
+    }
+    return { booking: serializeBooking(row, { forBusiness: true }) };
+  }
+
+  /** Business moves a booking; the customer is emailed the new time. */
+  static async rescheduleByBusiness(business, bookingId, access, { date, time, staffId, message }) {
+    const booking = await getBookingForBusiness(business, bookingId, access);
+    if (booking.groupSessionId) throw new ApiError(httpStatus.CONFLICT, GROUP_MOVE_BLOCK);
+    if (!RESCHEDULABLE_STATUSES.includes(booking.status)) {
+      throw new ApiError(httpStatus.CONFLICT, 'Only upcoming bookings can be rescheduled');
+    }
+    if (access?.role === 'staff' && staffId && staffId !== access.staffId) {
+      throw new ApiError(httpStatus.FORBIDDEN, 'You can only move bookings within your own calendar');
+    }
+    const row = await moveBooking(business, booking, { date, time, staffId }, 'business');
+    emailCustomer(row, business, `Booking rescheduled: ${business.name}`, `${business.name} moved your booking`, [
+      ['Was', escapeHtml(fmtWhen(booking))],
+      ...(row.staffId !== booking.staffId ? [['Previously with', escapeHtml(booking.staffName)]] : []),
+      ...(message ? [['Message', escapeHtml(message)]] : []),
+    ]);
+    return { booking: serializeBooking(row, { forBusiness: true }) };
+  }
+
   // ── Customer ───────────────────────────────────────────────────────────────
 
   static async listForCustomer(userId, { tab = 'upcoming' }) {
@@ -1434,11 +2152,36 @@ export class BusinessBookingService {
     conds.push(tab === 'past' ? lt(businessBookings.startAt, now) : gte(businessBookings.endAt, now));
     const rows = await db.query.businessBookings.findMany({
       where: and(...conds),
-      with: { business: { columns: { id: true, slug: true, name: true, logoUrl: true, freeCancellationHours: true, lateCancellationRefundPercent: true } } },
+      with: {
+        business: {
+          columns: {
+            id: true,
+            slug: true,
+            name: true,
+            logoUrl: true,
+            freeCancellationHours: true,
+            lateCancellationRefundPercent: true,
+            allowCustomerRescheduling: true,
+            reschedulingNoticeDays: true,
+          },
+        },
+      },
       orderBy: [tab === 'past' ? desc(businessBookings.startAt) : asc(businessBookings.startAt)],
       limit: 100,
     });
-    return rows.map(b => ({ ...serializeBooking(b), business: b.business }));
+    const reviews = await BusinessReviewService.forBookings(
+      rows.filter(b => b.status === 'completed').map(b => b.id)
+    );
+    return rows.map(b => {
+      const review = reviews.get(b.id) ?? null;
+      return {
+        ...serializeBooking(b),
+        business: b.business,
+        review,
+        canReview: !review && canReviewBooking(b, userId, now),
+        canReschedule: !customerRescheduleBlock(b, b.business, now),
+      };
+    });
   }
 
   static async cancelByCustomer(user, bookingId, reason) {
@@ -1464,6 +2207,51 @@ export class BusinessBookingService {
     );
     await notifyOwner(business, 'Booking cancelled', `${row.customerName} cancelled ${row.serviceName} on ${fmtWhen(row)}.`, row);
     return { booking: serializeBooking(row), refund: { ...refund, rule: policy.rule } };
+  }
+
+  /** Free times the customer can move their booking to (same staff member unless they pick another). */
+  /** Customer uploads a file before checkout (sent back as attachments: [{ key, name }]). */
+  static async uploadAttachment(idOrSlug, user, file) {
+    const business = await loadPublicBusiness(idOrSlug);
+    if (business.pageType === 'standard') {
+      throw new ApiError(httpStatus.CONFLICT, 'This business does not take bookings on Briteside');
+    }
+    return BusinessAttachmentService.upload(business, user.id, file);
+  }
+
+  /** 5-minute link to one of the customer's attachments (business side). */
+  static async attachmentUrlForBusiness(business, bookingId, access, index) {
+    const booking = await getBookingForBusiness(business, bookingId, access);
+    return attachmentLink(booking, index);
+  }
+
+  /** …and for the customer who attached it. */
+  static async attachmentUrlForCustomer(user, bookingId, index) {
+    const booking = await loadCustomerBooking(user, bookingId);
+    return attachmentLink(booking, index);
+  }
+
+  static async rescheduleSlotsForCustomer(user, bookingId, { date, staffId }) {
+    const booking = await loadCustomerBooking(user, bookingId);
+    const blocked = customerRescheduleBlock(booking, booking.business);
+    if (blocked) throw new ApiError(httpStatus.CONFLICT, blocked);
+    return rescheduleSlotsFor(booking.business, booking, { date, staffId });
+  }
+
+  /** Customer moves their own booking within the business's rescheduling policy. */
+  static async rescheduleByCustomer(user, bookingId, { date, time, staffId }) {
+    const booking = await loadCustomerBooking(user, bookingId);
+    const business = booking.business;
+    const blocked = customerRescheduleBlock(booking, business);
+    if (blocked) throw new ApiError(httpStatus.CONFLICT, blocked);
+    const row = await moveBooking(business, booking, { date, time, staffId }, 'customer');
+    await notifyOwner(
+      business,
+      'Booking rescheduled',
+      `${row.customerName} moved ${row.serviceName} from ${fmtWhen(booking)} to ${fmtWhen(row)}.`,
+      row
+    );
+    return { booking: serializeBooking(row) };
   }
 
   // ── Cron ───────────────────────────────────────────────────────────────────

@@ -46,6 +46,9 @@ export const businesses = pgTable(
     slug: varchar('slug', { length: 120 }).notNull(),
 
     name: varchar('name', { length: 150 }).notNull(),
+    // 'appointments' — bookable services/staff (the default)
+    // 'standard'     — profile page only: Posts / Wall / Activities, no booking
+    pageType: varchar('page_type', { length: 20 }).notNull().default('appointments'),
     // Single-line banner on the public page (max 100 chars)
     announcement: varchar('announcement', { length: 100 }),
     // One of BUSINESS_CATEGORIES keys (constants/businessCategories.js)
@@ -72,6 +75,8 @@ export const businesses = pgTable(
     longitude: decimal('longitude', { precision: 10, scale: 7 }),
     phone: varchar('phone', { length: 40 }),
     email: varchar('email', { length: 255 }),
+    // Public website (http/https only — validated on write)
+    websiteUrl: text('website_url'),
     // IANA timezone — all "HH:mm" hours/schedules are interpreted in this zone
     timezone: varchar('timezone', { length: 64 }).notNull().default('America/New_York'),
 
@@ -96,6 +101,8 @@ export const businesses = pgTable(
     lateArrivalPolicy: text('late_arrival_policy'),
     noShowPolicy: text('no_show_policy'),
     refundPolicy: text('refund_policy'),
+    // Anything else the business wants customers to know (dress code, parking…)
+    additionalPolicies: text('additional_policies'),
     allowCustomerRescheduling: boolean('allow_customer_rescheduling').notNull().default(false),
     reschedulingNoticeDays: integer('rescheduling_notice_days'),
     // Policies — structured, drive automatic refunds on customer cancellation:
@@ -133,6 +140,112 @@ export const businesses = pgTable(
       sql`${table.lateCancellationRefundPercent} BETWEEN 0 AND 100`
     ),
     check('chk_businesses_free_cancel_hours', sql`${table.freeCancellationHours} >= 0`),
+    check('chk_businesses_page_type', sql`${table.pageType} IN ('appointments', 'standard')`),
+  ]
+);
+
+// ─── WALL (standard business pages) ─────────────────────────────────────────
+/**
+ * Short messages signed-in users leave on a standard business page.
+ * Like the profile wall, other people's posts start 'pending' (a request) and
+ * only show publicly once someone who can edit the business approves them;
+ * rejecting deletes the row. Posts by the business's own team are 'approved'
+ * immediately. Removable by the author or a moderator at any time.
+ */
+export const businessWallPosts = pgTable(
+  'business_wall_posts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    authorId: uuid('author_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    text: text('text').notNull(),
+    // 'pending' (awaiting the business's approval) | 'approved' (public)
+    status: varchar('status', { length: 20 }).notNull().default('pending'),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    index('idx_business_wall_posts_business_created').on(table.businessId, table.createdAt),
+    index('idx_business_wall_posts_business_status').on(table.businessId, table.status),
+    index('idx_business_wall_posts_author').on(table.authorId),
+    check('chk_business_wall_posts_text', sql`char_length(${table.text}) BETWEEN 1 AND 2000`),
+    check('chk_business_wall_posts_status', sql`${table.status} IN ('pending', 'approved')`),
+  ]
+);
+
+/** One like per user per wall post. Only approved (public) posts can be liked. */
+export const businessWallPostLikes = pgTable(
+  'business_wall_post_likes',
+  {
+    postId: uuid('post_id')
+      .notNull()
+      .references(() => businessWallPosts.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    primaryKey({ columns: [table.postId, table.userId] }),
+    index('idx_business_wall_post_likes_user').on(table.userId),
+  ]
+);
+
+/**
+ * Comments on approved wall posts. Public as soon as they're written (the post
+ * itself was already approved). Removable by the commenter or a moderator;
+ * editable by the commenter. One level of replies: `parentId` always points at a
+ * top-level comment (replying to a reply attaches to its root). Deleting a
+ * comment deletes its replies.
+ */
+export const businessWallPostComments = pgTable(
+  'business_wall_post_comments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    postId: uuid('post_id')
+      .notNull()
+      .references(() => businessWallPosts.id, { onDelete: 'cascade' }),
+    authorId: uuid('author_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    parentId: uuid('parent_id').references(() => businessWallPostComments.id, {
+      onDelete: 'cascade',
+    }),
+    text: text('text').notNull(),
+    // Users tagged in the text: [{ userId, username }] — resolved when written
+    mentions: jsonb('mentions')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    index('idx_business_wall_post_comments_post_created').on(table.postId, table.createdAt),
+    index('idx_business_wall_post_comments_parent').on(table.parentId, table.createdAt),
+    index('idx_business_wall_post_comments_author').on(table.authorId),
+    check('chk_business_wall_post_comments_text', sql`char_length(${table.text}) BETWEEN 1 AND 1000`),
+  ]
+);
+
+/** One like per user per wall comment. */
+export const businessWallCommentLikes = pgTable(
+  'business_wall_comment_likes',
+  {
+    commentId: uuid('comment_id')
+      .notNull()
+      .references(() => businessWallPostComments.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    primaryKey({ columns: [table.commentId, table.userId] }),
+    index('idx_business_wall_comment_likes_user').on(table.userId),
   ]
 );
 
@@ -216,8 +329,27 @@ export const businessServices = pgTable(
     priceCents: integer('price_cents').notNull(),
     // NULL = businesses.defaultPaymentModel
     paymentModel: varchar('payment_model', { length: 20 }),
-    // Only for 'deposit'. NULL = 20% of price.
+    // Only for 'deposit'. A percentage wins over a fixed amount; neither = 20% of price.
+    // (The service layer keeps at most one of the two set.)
     depositCents: integer('deposit_cents'),
+    depositPercent: integer('deposit_percent'),
+    // Bookings for this service arrive as requests, whatever the staff member's own setting
+    requiresApproval: boolean('requires_approval').notNull().default(false),
+    // Questions customers answer when booking this service. NULL = the business's
+    // general booking questions (businesses.bookingQuestions).
+    questionnaireId: uuid('questionnaire_id').references(() => businessQuestionnaires.id, {
+      onDelete: 'set null',
+    }),
+    // 'individual' (default) | 'group' (scheduled sessions, priceCents per seat)
+    // | 'private_group' (one party books a slot, priceCents per person, minimum total)
+    sessionType: varchar('session_type', { length: 20 }).notNull().default('individual'),
+    // group: seats per session (default for new sessions) and whether customers see seats left
+    capacity: integer('capacity'),
+    showRemainingSeats: boolean('show_remaining_seats').notNull().default(true),
+    // private_group: party size limits and the least an event costs
+    minGuests: integer('min_guests'),
+    maxGuests: integer('max_guests'),
+    minimumTotalCents: integer('minimum_total_cents'),
     bufferMins: integer('buffer_mins').notNull().default(10),
     // true = every active staff member can perform it; false = see business_service_staff
     allStaff: boolean('all_staff').notNull().default(true),
@@ -232,6 +364,19 @@ export const businessServices = pgTable(
     check('chk_business_services_duration', sql`${table.durationMins} > 0`),
     check('chk_business_services_price', sql`${table.priceCents} >= 0`),
     check('chk_business_services_buffer', sql`${table.bufferMins} >= 0`),
+    check(
+      'chk_business_services_deposit_percent',
+      sql`${table.depositPercent} IS NULL OR ${table.depositPercent} BETWEEN 1 AND 100`
+    ),
+    check(
+      'chk_business_services_session_type',
+      sql`${table.sessionType} IN ('individual', 'group', 'private_group')`
+    ),
+    check('chk_business_services_capacity', sql`${table.capacity} IS NULL OR ${table.capacity} BETWEEN 1 AND 500`),
+    check(
+      'chk_business_services_guests',
+      sql`${table.minGuests} IS NULL OR ${table.maxGuests} IS NULL OR (${table.minGuests} >= 1 AND ${table.minGuests} <= ${table.maxGuests})`
+    ),
   ]
 );
 
@@ -316,17 +461,21 @@ export const businessBookings = pgTable(
     businessId: uuid('business_id')
       .notNull()
       .references(() => businesses.id, { onDelete: 'cascade' }),
-    serviceId: uuid('service_id')
-      .notNull()
-      .references(() => businessServices.id),
+    // NULL for a manual booking of a one-off custom service (name/length snapshotted below)
+    serviceId: uuid('service_id').references(() => businessServices.id),
     staffId: uuid('staff_id')
       .notNull()
       .references(() => businessStaff.id),
     // NULL for guest checkout
     customerId: uuid('customer_id').references(() => users.id, { onDelete: 'set null' }),
     customerName: varchar('customer_name', { length: 150 }).notNull(),
-    customerEmail: varchar('customer_email', { length: 255 }).notNull(),
+    // NULL only for manual bookings taken with a phone number
+    customerEmail: varchar('customer_email', { length: 255 }),
     customerPhone: varchar('customer_phone', { length: 40 }),
+    // 'online' (customer booked on Briteside) | 'manual' (added by the business: walk-in / phone)
+    source: varchar('source', { length: 20 }).notNull().default('online'),
+    // Manual bookings: how the customer will pay — 'cash' | 'card_in_person' | 'bank_transfer' | 'other'
+    paymentArrangement: varchar('payment_arrangement', { length: 20 }),
 
     // Snapshots so history survives menu edits
     serviceName: varchar('service_name', { length: 150 }).notNull(),
@@ -367,21 +516,53 @@ export const businessBookings = pgTable(
     // Total charged on the balance payment incl. tax — caps refunds against that payment
     balanceChargedCents: integer('balance_charged_cents').notNull().default(0),
 
+    // Add-ons picked when booking: [{ id, name, priceCents, durationMins }] (snapshot).
+    // Already included in servicePriceCents and durationMins; addOnsCents is their total.
+    addOns: jsonb('add_ons')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    addOnsCents: integer('add_ons_cents').notNull().default(0),
+
+    // Added by the business when completing: [{ label, amountCents }], collected in person.
+    // 5% commission applies to them like the service price (see businessCommission.inPersonCents).
+    extraCharges: jsonb('extra_charges')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    extraChargesCents: integer('extra_charges_cents').notNull().default(0),
+
     notes: text('notes'),
-    // [{ question, answer }] — question text snapshotted
+    // [{ question, answer }] — question text snapshotted; typed answers stored as text
     answers: jsonb('answers')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    // Public group session this booking holds seats in (null = individual / private event)
+    groupSessionId: uuid('group_session_id').references(() => businessGroupSessions.id, {
+      onDelete: 'set null',
+    }),
+    // Seats (group session) or guests (private event); 1 for individual bookings
+    partySize: integer('party_size').notNull().default(1),
+    // Files the customer attached: [{ key, name, size, type }]. Private bucket —
+    // only the business gets short-lived signed links (BusinessAttachmentService).
+    attachments: jsonb('attachments')
       .notNull()
       .default(sql`'[]'::jsonb`),
 
     // Lifecycle
+    // Snapshot of the service's "requires approval" at checkout → arrives as a request when paid
+    needsApproval: boolean('needs_approval').notNull().default(false),
     acceptDeadline: timestamp('accept_deadline', { withTimezone: true }),
     confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+    checkedInAt: timestamp('checked_in_at', { withTimezone: true }),
     completedAt: timestamp('completed_at', { withTimezone: true }),
     cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
     // 'customer' | 'business' | 'system'
     cancelledBy: varchar('cancelled_by', { length: 20 }),
     cancellationReason: text('cancellation_reason'),
     rescheduledFromId: uuid('rescheduled_from_id'),
+    // Moved in place (same booking, payments untouched). 'customer' | 'business'
+    rescheduledAt: timestamp('rescheduled_at', { withTimezone: true }),
+    rescheduledBy: varchar('rescheduled_by', { length: 20 }),
+    rescheduleCount: integer('reschedule_count').notNull().default(0),
 
     // Reminders (idempotency)
     reminder24hSentAt: timestamp('reminder_24h_sent_at', { withTimezone: true }),
@@ -485,7 +666,80 @@ export const businessCommissionCollections = pgTable(
   ]
 );
 
+// ─── REVIEWS ────────────────────────────────────────────────────────────────
+/**
+ * One review per completed booking, written by the signed-in customer who made it.
+ * businesses.rating / reviewCount are recomputed from this table on every change
+ * (see businessReview.service.js).
+ */
+export const businessReviews = pgTable(
+  'business_reviews',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    bookingId: uuid('booking_id')
+      .notNull()
+      .references(() => businessBookings.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    // Who did the service (snapshot of the booking's staff)
+    staffId: uuid('staff_id').references(() => businessStaff.id, { onDelete: 'set null' }),
+    rating: integer('rating').notNull(),
+    comment: text('comment'),
+    // Public response from the business
+    ownerReply: text('owner_reply'),
+    ownerRepliedAt: timestamp('owner_replied_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    uniqueIndex('uq_business_reviews_booking').on(table.bookingId),
+    index('idx_business_reviews_business_created').on(table.businessId, table.createdAt),
+    index('idx_business_reviews_user').on(table.userId),
+    check('chk_business_reviews_rating', sql`${table.rating} BETWEEN 1 AND 5`),
+  ]
+);
+
 // ─── RELATIONS ──────────────────────────────────────────────────────────────
+export const businessWallPostsRelations = relations(businessWallPosts, ({ one, many }) => ({
+  business: one(businesses, { fields: [businessWallPosts.businessId], references: [businesses.id] }),
+  author: one(users, { fields: [businessWallPosts.authorId], references: [users.id] }),
+  likes: many(businessWallPostLikes),
+  comments: many(businessWallPostComments),
+}));
+
+export const businessWallPostLikesRelations = relations(businessWallPostLikes, ({ one }) => ({
+  post: one(businessWallPosts, { fields: [businessWallPostLikes.postId], references: [businessWallPosts.id] }),
+  user: one(users, { fields: [businessWallPostLikes.userId], references: [users.id] }),
+}));
+
+export const businessWallPostCommentsRelations = relations(businessWallPostComments, ({ one, many }) => ({
+  post: one(businessWallPosts, {
+    fields: [businessWallPostComments.postId],
+    references: [businessWallPosts.id],
+  }),
+  author: one(users, { fields: [businessWallPostComments.authorId], references: [users.id] }),
+  likes: many(businessWallCommentLikes),
+}));
+
+export const businessWallCommentLikesRelations = relations(businessWallCommentLikes, ({ one }) => ({
+  comment: one(businessWallPostComments, {
+    fields: [businessWallCommentLikes.commentId],
+    references: [businessWallPostComments.id],
+  }),
+  user: one(users, { fields: [businessWallCommentLikes.userId], references: [users.id] }),
+}));
+
+export const businessReviewsRelations = relations(businessReviews, ({ one }) => ({
+  business: one(businesses, { fields: [businessReviews.businessId], references: [businesses.id] }),
+  booking: one(businessBookings, { fields: [businessReviews.bookingId], references: [businessBookings.id] }),
+  user: one(users, { fields: [businessReviews.userId], references: [users.id] }),
+  staff: one(businessStaff, { fields: [businessReviews.staffId], references: [businessStaff.id] }),
+}));
+
 export const businessCommissionChargesRelations = relations(businessCommissionCharges, ({ one }) => ({
   business: one(businesses, { fields: [businessCommissionCharges.businessId], references: [businesses.id] }),
   booking: one(businessBookings, { fields: [businessCommissionCharges.bookingId], references: [businessBookings.id] }),
@@ -561,4 +815,200 @@ export const businessBookingsRelations = relations(businessBookings, ({ one }) =
     references: [businessStaff.id],
   }),
   customer: one(users, { fields: [businessBookings.customerId], references: [users.id] }),
+}));
+
+// ─── ADD-ONS ────────────────────────────────────────────────────────────────
+/**
+ * Optional extras a customer can pick with a service when booking (e.g. "Deep
+ * conditioning +$25, +15 min"). Price and minutes are added to the booking —
+ * fee tier, 5% commission and % deposits use the total (see priceBooking).
+ * The chosen ones are snapshotted on business_bookings.addOns.
+ */
+export const businessAddOns = pgTable(
+  'business_add_ons',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 120 }).notNull(),
+    priceCents: integer('price_cents').notNull(),
+    durationMins: integer('duration_mins').notNull().default(0),
+    // Services it can be picked with; [] = every service
+    serviceIds: jsonb('service_ids')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    active: boolean('active').notNull().default(true),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  },
+  table => [
+    index('idx_business_add_ons_business').on(table.businessId),
+    check('chk_business_add_ons_price', sql`${table.priceCents} >= 0`),
+    check('chk_business_add_ons_duration', sql`${table.durationMins} BETWEEN 0 AND 480`),
+  ]
+);
+
+export const businessAddOnsRelations = relations(businessAddOns, ({ one }) => ({
+  business: one(businesses, { fields: [businessAddOns.businessId], references: [businesses.id] }),
+}));
+
+// ─── QUESTIONNAIRES ─────────────────────────────────────────────────────────
+/**
+ * Named sets of typed questions a business attaches to services
+ * (businessServices.questionnaireId). Answers are snapshotted as text on
+ * business_bookings.answers, so editing or deleting one never changes past bookings.
+ */
+export const businessQuestionnaires = pgTable(
+  'business_questionnaires',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 120 }).notNull(),
+    // [{ id, label, type, options, required, active, placeholder }]
+    questions: jsonb('questions')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    // Customers may attach up to 3 images / PDFs when booking
+    allowAttachments: boolean('allow_attachments').notNull().default(false),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  },
+  table => [index('idx_business_questionnaires_business').on(table.businessId)]
+);
+
+// ─── GALLERY ENGAGEMENT ─────────────────────────────────────────────────────
+/**
+ * Likes / comments on the photos in businesses.gallery ("Posts" on the page).
+ * Gallery items are plain URLs, so each is addressed by postKey = a short hash
+ * of its URL (see utils/businessGallery.js). Removing a photo hides its likes
+ * and comments; adding it back brings them back.
+ */
+export const businessGalleryLikes = pgTable(
+  'business_gallery_likes',
+  {
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    postKey: varchar('post_key', { length: 32 }).notNull(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    primaryKey({ columns: [table.businessId, table.postKey, table.userId] }),
+    index('idx_business_gallery_likes_user').on(table.userId),
+  ]
+);
+
+export const businessGalleryComments = pgTable(
+  'business_gallery_comments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    postKey: varchar('post_key', { length: 32 }).notNull(),
+    authorId: uuid('author_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    // Reply to a top-level comment (one level, like the feed); its replies go with it
+    parentId: uuid('parent_id').references(() => businessGalleryComments.id, { onDelete: 'cascade' }),
+    text: text('text').notNull(),
+    // Users tagged in the text: [{ userId, username }] — resolved when written
+    mentions: jsonb('mentions')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    index('idx_business_gallery_comments_post').on(table.businessId, table.postKey, table.createdAt),
+    index('idx_business_gallery_comments_parent').on(table.parentId, table.createdAt),
+    index('idx_business_gallery_comments_author').on(table.authorId, table.createdAt),
+    check('chk_business_gallery_comments_text', sql`char_length(${table.text}) BETWEEN 1 AND 1000`),
+  ]
+);
+
+export const businessGalleryCommentLikes = pgTable(
+  'business_gallery_comment_likes',
+  {
+    commentId: uuid('comment_id')
+      .notNull()
+      .references(() => businessGalleryComments.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    primaryKey({ columns: [table.commentId, table.userId] }),
+    index('idx_business_gallery_comment_likes_user').on(table.userId),
+  ]
+);
+
+export const businessGalleryCommentsRelations = relations(businessGalleryComments, ({ one, many }) => ({
+  business: one(businesses, { fields: [businessGalleryComments.businessId], references: [businesses.id] }),
+  author: one(users, { fields: [businessGalleryComments.authorId], references: [users.id] }),
+  likes: many(businessGalleryCommentLikes),
+}));
+
+// ─── GROUP SESSIONS ─────────────────────────────────────────────────────────
+/**
+ * A scheduled run of a 'group' service (e.g. "Pottery class, Sat 10:00"). Customers
+ * book seats in it — each booking is a business_bookings row with groupSessionId
+ * and partySize = seats. The session blocks its staff member's calendar.
+ */
+export const businessGroupSessions = pgTable(
+  'business_group_sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    serviceId: uuid('service_id')
+      .notNull()
+      .references(() => businessServices.id, { onDelete: 'cascade' }),
+    // Host — the session occupies their calendar
+    staffId: uuid('staff_id')
+      .notNull()
+      .references(() => businessStaff.id, { onDelete: 'cascade' }),
+    startAt: timestamp('start_at', { withTimezone: true }).notNull(),
+    endAt: timestamp('end_at', { withTimezone: true }).notNull(),
+    bufferMins: integer('buffer_mins').notNull().default(0),
+    capacity: integer('capacity').notNull(),
+    // 'scheduled' | 'cancelled'
+    status: varchar('status', { length: 20 }).notNull().default('scheduled'),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    cancellationReason: text('cancellation_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    index('idx_business_group_sessions_business_start').on(table.businessId, table.startAt),
+    index('idx_business_group_sessions_service_start').on(table.serviceId, table.startAt),
+    index('idx_business_group_sessions_staff_start').on(table.staffId, table.startAt),
+    check('chk_business_group_sessions_capacity', sql`${table.capacity} BETWEEN 1 AND 500`),
+    check('chk_business_group_sessions_time', sql`${table.endAt} > ${table.startAt}`),
+  ]
+);
+
+export const businessGroupSessionsRelations = relations(businessGroupSessions, ({ one }) => ({
+  business: one(businesses, { fields: [businessGroupSessions.businessId], references: [businesses.id] }),
+  service: one(businessServices, { fields: [businessGroupSessions.serviceId], references: [businessServices.id] }),
+  staff: one(businessStaff, { fields: [businessGroupSessions.staffId], references: [businessStaff.id] }),
+}));
+
+export const businessQuestionnairesRelations = relations(businessQuestionnaires, ({ one }) => ({
+  business: one(businesses, {
+    fields: [businessQuestionnaires.businessId],
+    references: [businesses.id],
+  }),
 }));
