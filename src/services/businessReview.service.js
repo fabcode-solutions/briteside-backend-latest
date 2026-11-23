@@ -7,6 +7,7 @@ import httpStatus from 'http-status';
 import { and, desc, eq, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { businesses, businessBookings, businessReviews, users } from '../db/schema/index.js';
+import { bookingsAtLocations, viewLocationIds } from './businessLocation.service.js';
 import ApiError from '../utils/api-error.js';
 import logger from '../config/logger.js';
 import { isBusinessPublic } from './business.service.js';
@@ -69,8 +70,23 @@ async function recomputeAggregates(businessId, tx = db) {
     .where(eq(businesses.id, businessId));
 }
 
-async function listFor(businessId, { page = 1, limit = 10, rating }) {
-  const conds = [eq(businessReviews.businessId, businessId)];
+/** Reviews of visits at one of `locationIds`. */
+async function locationCondition(businessId, locationIds) {
+  return inArray(
+    businessReviews.bookingId,
+    db
+      .select({ id: businessBookings.id })
+      .from(businessBookings)
+      .where(and(eq(businessBookings.businessId, businessId), await bookingsAtLocations(businessId, locationIds)))
+  );
+}
+
+/** `locationIds`: only reviews of visits there (null = every location). */
+async function listFor(businessId, { page = 1, limit = 10, rating }, locationIds = null) {
+  // Summary / distribution follow the location but not the star filter
+  const scope = [eq(businessReviews.businessId, businessId)];
+  if (locationIds?.length) scope.push(await locationCondition(businessId, locationIds));
+  const conds = [...scope];
   if (rating) conds.push(eq(businessReviews.rating, rating));
   const where = and(...conds);
   const offset = (page - 1) * limit;
@@ -89,7 +105,7 @@ async function listFor(businessId, { page = 1, limit = 10, rating }) {
     db
       .select({ rating: businessReviews.rating, count: sql`count(*)`.mapWith(Number) })
       .from(businessReviews)
-      .where(eq(businessReviews.businessId, businessId))
+      .where(and(...scope))
       .groupBy(businessReviews.rating),
   ]);
   const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
@@ -131,13 +147,14 @@ export class BusinessReviewService {
     if (!business || !isBusinessPublic(business, business.owner)) {
       throw new ApiError(httpStatus.NOT_FOUND, 'Business not found');
     }
-    return listFor(business.id, query);
+    return listFor(business.id, query, query.locationId ? [query.locationId] : null);
   }
 
   // ── Dashboard ─────────────────────────────────────────────────────────────
 
-  static async listForBusiness(business, query) {
-    return listFor(business.id, query);
+  /** Location managers only see reviews of visits at their locations. */
+  static async listForBusiness(business, query, access) {
+    return listFor(business.id, query, viewLocationIds(access, query.locationId));
   }
 
   /** Set (or with an empty reply, remove) the business's public response. */

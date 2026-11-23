@@ -18,6 +18,7 @@ import { businessBookings } from '../db/schema/index.js';
 import { payoutLedgerEntries, paymentDisputes } from '../db/schema/stripeConnect.js';
 import ApiError from '../utils/api-error.js';
 import { PayoutLedgerService } from './payoutLedger.service.js';
+import { bookingsAtLocations, viewLocationIds } from './businessLocation.service.js';
 import { StripeConnectService } from './stripeConnect.service.js';
 import { requestLedgerWithdrawal } from './payoutWithdrawal.service.js';
 
@@ -41,13 +42,17 @@ export class BusinessEarningsService {
    * Summary for bookings MADE in [from, to] (same convention as the dashboard's
    * client-side "collections"), plus payouts RELEASED in [from, to].
    */
-  static async summary(business, { from, to } = {}) {
+  static async summary(business, { from, to, locationId } = {}, access = null) {
     const start = from ? new Date(from) : null;
     const end = to ? new Date(to) : null;
+    // One location (or a location manager's own): every figure below is tied to a booking
+    const locationIds = viewLocationIds(access, locationId);
+    const atLocation = locationIds?.length ? [await bookingsAtLocations(business.id, locationIds)] : [];
 
     const bookingConds = [
       eq(businessBookings.businessId, business.id),
       notInArray(businessBookings.status, EXCLUDED_STATUSES),
+      ...atLocation,
     ];
     if (start) bookingConds.push(gte(businessBookings.createdAt, start));
     if (end) bookingConds.push(lte(businessBookings.createdAt, end));
@@ -56,6 +61,7 @@ export class BusinessEarningsService {
       eq(payoutLedgerEntries.sourceType, SOURCE_TYPE),
       eq(payoutLedgerEntries.bucket, 'available'),
       eq(businessBookings.businessId, business.id),
+      ...atLocation,
     ];
     if (start) ledgerConds.push(gte(payoutLedgerEntries.createdAt, start));
     if (end) ledgerConds.push(lte(payoutLedgerEntries.createdAt, end));
@@ -79,7 +85,13 @@ export class BusinessEarningsService {
           nextReleaseAt: sql`min(${businessBookings.completedAt}) filter (where ${businessBookings.status} in ('completed', 'no_show') and ${businessBookings.standardReleasedAt} is null and ${businessBookings.reserveAmountCents} > 0)`,
         })
         .from(businessBookings)
-        .where(and(eq(businessBookings.businessId, business.id), sql`${businessBookings.reserveAmountCents} > 0`)),
+        .where(
+          and(
+            eq(businessBookings.businessId, business.id),
+            sql`${businessBookings.reserveAmountCents} > 0`,
+            ...atLocation
+          )
+        ),
       db
         .select({
           releasedCents: sql`coalesce(sum(${payoutLedgerEntries.amountCents}) filter (where ${payoutLedgerEntries.amountCents} > 0), 0)`.mapWith(Number),
@@ -102,6 +114,7 @@ export class BusinessEarningsService {
         .where(
           and(
             eq(businessBookings.businessId, business.id),
+            ...atLocation,
             inArray(paymentDisputes.status, CHARGEBACK_STATUSES),
             ...(start ? [gte(paymentDisputes.openedAt, start)] : []),
             ...(end ? [lte(paymentDisputes.openedAt, end)] : [])

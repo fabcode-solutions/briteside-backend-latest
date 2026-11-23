@@ -8,6 +8,9 @@ import { BusinessCommissionService } from '../services/businessCommission.servic
 import { BusinessReviewService } from '../services/businessReview.service.js';
 import { BusinessEarningsService } from '../services/businessEarnings.service.js';
 import { BusinessWallService } from '../services/businessWall.service.js';
+import { BusinessInquiryService } from '../services/businessInquiry.service.js';
+import { BusinessLocationService } from '../services/businessLocation.service.js';
+import { BusinessCustomOfferService } from '../services/businessCustomOffer.service.js';
 
 // ─── Public ─────────────────────────────────────────────────────────────────
 export const getCategories = catchAsync(async (req, res) => {
@@ -120,6 +123,27 @@ export const deleteService = catchAsync(async (req, res) => {
 });
 
 // ─── Staff ──────────────────────────────────────────────────────────────────
+// Locations (branches)
+export const createLocation = catchAsync(async (req, res) => {
+  const location = await BusinessLocationService.create(req.business, req.body);
+  res.status(httpStatus.CREATED).json({ success: true, data: { location } });
+});
+
+export const updateLocation = catchAsync(async (req, res) => {
+  const location = await BusinessLocationService.update(req.business, req.params.locationId, req.body);
+  res.json({ success: true, data: { location } });
+});
+
+export const makePrimaryLocation = catchAsync(async (req, res) => {
+  const location = await BusinessLocationService.makePrimary(req.business, req.params.locationId);
+  res.json({ success: true, data: { location } });
+});
+
+export const deleteLocation = catchAsync(async (req, res) => {
+  await BusinessLocationService.remove(req.business, req.params.locationId);
+  res.json({ success: true });
+});
+
 export const createStaff = catchAsync(async (req, res) => {
   const staff = await BusinessService.createStaff(req.business, req.body);
   res.status(httpStatus.CREATED).json({ success: true, data: { staff } });
@@ -185,9 +209,40 @@ export const updateTeamMember = catchAsync(async (req, res) => {
     req.business,
     req.user,
     req.params.memberId,
-    req.body.role
+    req.body.role,
+    req.body.locationIds
   );
   res.json({ success: true, data: { member } });
+});
+
+export const updateStaffLocationSchedules = catchAsync(async (req, res) => {
+  const staff = await BusinessService.updateStaffLocationSchedules(
+    req.business,
+    req.params.staffId,
+    req.body.schedules,
+    req.businessAccess
+  );
+  res.json({ success: true, data: { staff } });
+});
+
+export const addLocationClosure = catchAsync(async (req, res) => {
+  const data = await BusinessLocationService.addClosure(
+    req.business,
+    req.params.locationId,
+    req.body,
+    req.businessAccess
+  );
+  res.status(httpStatus.CREATED).json({ success: true, data });
+});
+
+export const removeLocationClosure = catchAsync(async (req, res) => {
+  await BusinessLocationService.removeClosure(
+    req.business,
+    req.params.locationId,
+    req.params.closureId,
+    req.businessAccess
+  );
+  res.json({ success: true });
 });
 
 export const revokeTeamMember = catchAsync(async (req, res) => {
@@ -213,7 +268,8 @@ export const getBookingQuote = catchAsync(async (req, res) => {
     req.params.idOrSlug,
     query.serviceId,
     query.addOnIds,
-    query.partySize ?? 1
+    query.partySize ?? 1,
+    query.locationId
   );
   res.json({ success: true, data: { pricing } });
 });
@@ -308,7 +364,11 @@ export const unlikeGalleryComment = catchAsync(async (req, res) => {
 
 export const listPublicGroupSessions = catchAsync(async (req, res) => {
   const query = req.validatedQuery ?? req.query;
-  const data = await BusinessBookingService.listPublicGroupSessions(req.params.idOrSlug, query.serviceId);
+  const data = await BusinessBookingService.listPublicGroupSessions(
+    req.params.idOrSlug,
+    query.serviceId,
+    query.locationId
+  );
   res.json({ success: true, data });
 });
 
@@ -522,7 +582,11 @@ export const listPublicReviews = catchAsync(async (req, res) => {
 });
 
 export const listBusinessReviews = catchAsync(async (req, res) => {
-  const data = await BusinessReviewService.listForBusiness(req.business, req.validatedQuery ?? req.query);
+  const data = await BusinessReviewService.listForBusiness(
+    req.business,
+    req.validatedQuery ?? req.query,
+    req.businessAccess
+  );
   res.json({ success: true, data });
 });
 
@@ -549,6 +613,37 @@ export const listWallPosts = catchAsync(async (req, res) => {
     req.validatedQuery ?? req.query
   );
   res.json({ success: true, data });
+});
+
+export const openInquiryConversation = catchAsync(async (req, res) => {
+  const data = await BusinessInquiryService.openConversation(req.user, req.params.idOrSlug);
+  res.json({ success: true, data });
+});
+
+// ─── Custom price offers ────────────────────────────────────────────────────
+export const createCustomOffer = catchAsync(async (req, res) => {
+  const offer = await BusinessCustomOfferService.create(req.business, req.user, req.body);
+  res.status(httpStatus.CREATED).json({ success: true, data: { offer } });
+});
+
+export const listCustomOffers = catchAsync(async (req, res) => {
+  const data = await BusinessCustomOfferService.listForBusiness(req.business, req.validatedQuery ?? req.query);
+  res.json({ success: true, data });
+});
+
+export const withdrawCustomOffer = catchAsync(async (req, res) => {
+  const offer = await BusinessCustomOfferService.withdraw(req.business, req.params.offerId);
+  res.json({ success: true, data: { offer } });
+});
+
+export const getCustomOffer = catchAsync(async (req, res) => {
+  const offer = await BusinessCustomOfferService.getForUser(req.user, req.params.offerId);
+  res.json({ success: true, data: { offer } });
+});
+
+export const declineCustomOffer = catchAsync(async (req, res) => {
+  const offer = await BusinessCustomOfferService.decline(req.user, req.params.offerId);
+  res.json({ success: true, data: { offer } });
 });
 
 export const createWallPost = catchAsync(async (req, res) => {
@@ -647,7 +742,11 @@ export const unlikeWallComment = catchAsync(async (req, res) => {
 
 // ─── Earnings & wallet ──────────────────────────────────────────────────────
 export const getEarnings = catchAsync(async (req, res) => {
-  const data = await BusinessEarningsService.summary(req.business, req.validatedQuery ?? req.query);
+  const data = await BusinessEarningsService.summary(
+    req.business,
+    req.validatedQuery ?? req.query,
+    req.businessAccess
+  );
   res.json({ success: true, data });
 });
 

@@ -15,6 +15,7 @@ import {
   businessAddOns,
   businessQuestionnaires,
   businessGroupSessions,
+  businessLocations,
 } from '../db/schema/index.js';
 import { normalizeQuestion } from '../utils/businessQuestionnaire.js';
 import { sessionSettingsProblem } from '../utils/businessSession.js';
@@ -23,6 +24,16 @@ import logger from '../config/logger.js';
 import { sendMail } from './mail.service.js';
 import { BusinessCommissionService } from './businessCommission.service.js';
 import { serviceDepositCents } from '../utils/businessDeposit.js';
+import {
+  listLocations,
+  serializeLocation,
+  setServiceLocations,
+  setServiceOverrides,
+  setStaffLocations,
+  setStaffLocationSchedules,
+  staffLocationMap,
+  syncPrimaryFromBusiness,
+} from './businessLocation.service.js';
 import { emailWrapper, ctaRow, ctaButton, appUrl } from '../templates/emailLayout.js';
 import {
   BUSINESS_CATEGORIES,
@@ -67,6 +78,8 @@ const serializeService = (service, business) => {
     categoryName: service.categoryName,
     durationMins: service.durationMins,
     priceCents: service.priceCents,
+    // "Inquire for pricing" — no public price / self-booking; booked through a custom offer
+    priceOnRequest: !!service.priceOnRequest,
     paymentModel: service.paymentModel, // null = inherits business default
     effectivePaymentModel: paymentModel,
     depositCents: service.depositCents,
@@ -86,6 +99,14 @@ const serializeService = (service, business) => {
     bufferMins: service.bufferMins,
     // [] = every staff member
     eligibleStaffIds: service.allStaff ? [] : (service.staffLinks ?? []).map(l => l.staffId),
+    // [] = offered at every location
+    locationIds: (service.locationLinks ?? []).map(l => l.locationId),
+    // Different price / length at some locations (null = the service's own)
+    locationOverrides: (service.locationOverrides ?? []).map(o => ({
+      locationId: o.locationId,
+      priceCents: o.priceCents ?? null,
+      durationMins: o.durationMins ?? null,
+    })),
     // What the customer is charged on top (shown in booking flow)
     customerFeeCents: calculateBusinessBookingFeeCents(service.priceCents),
     sortOrder: service.sortOrder,
@@ -103,6 +124,10 @@ const serializeStaff = (staff, { includePrivate = false } = {}) => ({
   acceptingBookings: staff.acceptingBookings,
   bookingConfirmation: staff.bookingConfirmation,
   sortOrder: staff.sortOrder,
+  // [] = works at every location
+  locationIds: (staff.locationLinks ?? []).map(l => l.locationId),
+  // { locationId: weekly hours } — when set, they're bookable at a location only in its hours
+  locationSchedules: Object.fromEntries((staff.locationSchedules ?? []).map(s => [s.locationId, s.schedule])),
   ...(includePrivate ? { userId: staff.userId } : {}),
 });
 
@@ -128,7 +153,7 @@ export const serializeQuestionnaire = (q, { includeInactive = true } = {}) => ({
 
 const serializeBusiness = (
   b,
-  { services = [], staff = [], addOns = [], questionnaires = [], includePrivate = false } = {}
+  { services = [], staff = [], addOns = [], questionnaires = [], locations = [], includePrivate = false } = {}
 ) => ({
   id: b.id,
   slug: b.slug,
@@ -141,6 +166,8 @@ const serializeBusiness = (
   logoUrl: b.logoUrl,
   heroUrl: b.heroUrl,
   gallery: b.gallery,
+  // { url: [locationId] } — posts shown only at those locations (missing = everywhere)
+  galleryLocations: b.galleryLocations ?? {},
   amenities: b.amenities,
   locationType: b.locationType,
   city: b.city,
@@ -150,6 +177,9 @@ const serializeBusiness = (
   phone: b.phone,
   email: b.email,
   websiteUrl: b.websiteUrl ?? null,
+  // 'inbox' → the owner's Inquiry inbox only; 'email' → also emailed to inquiryEmail
+  // (dashboard only — customers never see the address)
+  inquiryChannel: b.inquiryChannel ?? 'email',
   timezone: b.timezone,
   hours: b.hours,
   acceptingBookings: b.acceptingBookings,
@@ -169,7 +199,14 @@ const serializeBusiness = (
   },
   rating: Number(b.rating ?? 0),
   reviewCount: b.reviewCount,
-  services: services.map(s => serializeService(s, b)),
+  // Branches, primary first (the flat location fields above mirror the primary)
+  locations: locations.map(serializeLocation),
+  services: services.map(s =>
+    // "Inquire for pricing": the guide price is the owner's own note — never public
+    !includePrivate && s.priceOnRequest
+      ? { ...serializeService(s, b), priceCents: 0, depositCents: null, effectiveDepositCents: null, locationOverrides: [], customerFeeCents: 0 }
+      : serializeService(s, b)
+  ),
   staff: staff.map(s => serializeStaff(s, { includePrivate })),
   // Public: active only. Dashboard: all (inactive ones are kept but not offered).
   addOns: (includePrivate ? addOns : addOns.filter(a => a.active)).map(serializeAddOn),
@@ -179,7 +216,13 @@ const serializeBusiness = (
     : questionnaires.filter(q => services.some(s => s.questionnaireId === q.id))
   ).map(q => serializeQuestionnaire(q, { includeInactive: includePrivate })),
   ...(includePrivate
-    ? { ownerId: b.ownerId, isPublished: b.isPublished, createdAt: b.createdAt, updatedAt: b.updatedAt }
+    ? {
+        ownerId: b.ownerId,
+        isPublished: b.isPublished,
+        inquiryEmail: b.inquiryEmail ?? null,
+        createdAt: b.createdAt,
+        updatedAt: b.updatedAt,
+      }
     : {}),
 });
 
@@ -203,14 +246,15 @@ async function generateUniqueSlug(name, tx = db) {
 }
 
 async function loadServicesAndStaff(businessId) {
-  const [services, staff, addOns, questionnaires] = await Promise.all([
+  const [services, staff, addOns, questionnaires, locations] = await Promise.all([
     db.query.businessServices.findMany({
       where: and(eq(businessServices.businessId, businessId), isNull(businessServices.deletedAt)),
-      with: { staffLinks: true },
+      with: { staffLinks: true, locationLinks: true, locationOverrides: true },
       orderBy: [asc(businessServices.sortOrder), asc(businessServices.createdAt)],
     }),
     db.query.businessStaff.findMany({
       where: and(eq(businessStaff.businessId, businessId), isNull(businessStaff.deletedAt)),
+      with: { locationLinks: true, locationSchedules: true },
       orderBy: [asc(businessStaff.sortOrder), asc(businessStaff.createdAt)],
     }),
     db.query.businessAddOns.findMany({
@@ -221,8 +265,9 @@ async function loadServicesAndStaff(businessId) {
       where: and(eq(businessQuestionnaires.businessId, businessId), isNull(businessQuestionnaires.deletedAt)),
       orderBy: [asc(businessQuestionnaires.sortOrder), asc(businessQuestionnaires.createdAt)],
     }),
+    listLocations(businessId),
   ]);
-  return { services, staff, addOns, questionnaires };
+  return { services, staff, addOns, questionnaires, locations };
 }
 
 const SESSION_FIELDS = ['sessionType', 'capacity', 'showRemainingSeats', 'minGuests', 'maxGuests', 'minimumTotalCents'];
@@ -299,6 +344,24 @@ async function assertStaffBelong(businessId, staffIds, tx = db) {
   }
 }
 
+/** Every id is an active location of this business. */
+async function assertLocationIdsBelong(businessId, ids) {
+  if (!ids.length) return;
+  const rows = await db
+    .select({ id: businessLocations.id })
+    .from(businessLocations)
+    .where(
+      and(
+        eq(businessLocations.businessId, businessId),
+        inArray(businessLocations.id, ids),
+        isNull(businessLocations.deletedAt)
+      )
+    );
+  if (rows.length !== ids.length) {
+    throw new ApiError(httpStatus.BAD_REQUEST, 'One of the chosen locations no longer exists. Refresh and try again.');
+  }
+}
+
 function assertServiceCategory(business, categoryName) {
   if (categoryName && !(business.serviceCategories ?? []).includes(categoryName)) {
     throw new ApiError(httpStatus.BAD_REQUEST, `Unknown service category "${categoryName}"`);
@@ -346,7 +409,18 @@ export class BusinessService {
       eq(users.isBritesidePlus, true),
     ];
     if (category) conditions.push(eq(businesses.category, category));
-    if (city) conditions.push(ilike(businesses.city, city));
+    // Any of the business's locations can match the city. Contains-match, so a
+    // city from the user's current location ("Chicago") finds a business whose
+    // city was typed with more detail ("357 Main St, Chicago, IL").
+    if (city?.trim()) {
+      const pattern = `%${city.trim().replace(/[\\%_]/g, m => `\\${m}`)}%`;
+      conditions.push(
+        or(
+          ilike(businesses.city, pattern),
+          sql`exists (select 1 from ${businessLocations} l where l.business_id = ${businesses.id} and l.deleted_at is null and l.city ilike ${pattern})`
+        )
+      );
+    }
     if (q) {
       const tsQuery = q
         .split(/\s+/)
@@ -368,8 +442,10 @@ export class BusinessService {
     const where = and(...conditions);
     const offset = (page - 1) * limit;
 
-    const minPrice = sql`(select min(s.price_cents) from ${businessServices} s where s.business_id = ${businesses.id} and s.deleted_at is null)`;
+    // "Inquire for pricing" services have no public price, so they don't set the "from $X"
+    const minPrice = sql`(select min(s.price_cents) from ${businessServices} s where s.business_id = ${businesses.id} and s.deleted_at is null and s.price_on_request = false)`;
     const firstDuration = sql`(select s.duration_mins from ${businessServices} s where s.business_id = ${businesses.id} and s.deleted_at is null order by s.sort_order, s.created_at limit 1)`;
+    const locationCount = sql`(select count(*) from ${businessLocations} l where l.business_id = ${businesses.id} and l.deleted_at is null)`;
 
     const [rows, [{ total }]] = await Promise.all([
       db
@@ -377,6 +453,7 @@ export class BusinessService {
           business: businesses,
           minPriceCents: minPrice.mapWith(v => (v == null ? null : Number(v))),
           firstServiceDurationMins: firstDuration.mapWith(v => (v == null ? null : Number(v))),
+          locationCount: locationCount.mapWith(Number),
         })
         .from(businesses)
         .innerJoin(users, eq(users.id, businesses.ownerId))
@@ -412,6 +489,7 @@ export class BusinessService {
         reviewCount: r.business.reviewCount,
         minPriceCents: r.minPriceCents,
         firstServiceDurationMins: r.firstServiceDurationMins,
+        locationCount: Math.max(1, r.locationCount ?? 1),
       })),
       pagination: {
         page,
@@ -435,7 +513,7 @@ export class BusinessService {
     if (!business || !isBusinessPublic(business, business.owner)) {
       throw new ApiError(httpStatus.NOT_FOUND, 'Business not found');
     }
-    const [{ services, staff, addOns, questionnaires }, paused] = await Promise.all([
+    const [{ services, staff, addOns, questionnaires, locations }, paused] = await Promise.all([
       loadServicesAndStaff(business.id),
       BusinessCommissionService.isBookingPaused(business.id),
     ]);
@@ -445,6 +523,7 @@ export class BusinessService {
       staff,
       addOns,
       questionnaires,
+      locations,
     });
   }
 
@@ -487,6 +566,21 @@ export class BusinessService {
   static async create(user, body) {
     const isStandard = body.pageType === 'standard';
     const result = await db.transaction(async tx => {
+      // One business account per user (more branches become locations of it).
+      // The per-user lock stops two simultaneous creates both passing the check.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`business-owner:${user.id}`}))`);
+      const [owned] = await tx
+        .select({ id: businesses.id })
+        .from(businesses)
+        .where(and(eq(businesses.ownerId, user.id), isNull(businesses.deletedAt)))
+        .limit(1);
+      if (owned) {
+        throw new ApiError(
+          httpStatus.CONFLICT,
+          'You already have a business. Add more branches as locations of it instead.'
+        );
+      }
+
       const slug = await generateUniqueSlug(body.name, tx);
       const [business] = await tx
         .insert(businesses)
@@ -516,6 +610,18 @@ export class BusinessService {
         })
         .returning();
 
+      // Its first (primary) location — more branches can be added from the dashboard
+      await tx.insert(businessLocations).values({
+        businessId: business.id,
+        name: body.locationName?.trim() || business.city,
+        locationType: business.locationType,
+        city: business.city,
+        address: business.address,
+        timezone: business.timezone,
+        hours: business.hours,
+        isPrimary: true,
+      });
+
       if (body.ownerStaff && !isStandard) {
         await tx.insert(businessStaff).values({
           businessId: business.id,
@@ -541,8 +647,15 @@ export class BusinessService {
   }
 
   static async getForManage(business) {
-    const { services, staff, addOns, questionnaires } = await loadServicesAndStaff(business.id);
-    return serializeBusiness(business, { services, staff, addOns, questionnaires, includePrivate: true });
+    const { services, staff, addOns, questionnaires, locations } = await loadServicesAndStaff(business.id);
+    return serializeBusiness(business, {
+      services,
+      staff,
+      addOns,
+      questionnaires,
+      locations,
+      includePrivate: true,
+    });
   }
 
   /**
@@ -726,20 +839,62 @@ export class BusinessService {
       }
     }
 
-    const values = { ...patch, updatedAt: new Date() };
-    for (const k of ['subcategory', 'bio', 'address', 'phone', 'email', 'announcement', 'websiteUrl']) {
+    const { galleryLocations, ...fields } = patch;
+    const values = { ...fields, updatedAt: new Date() };
+    // Post → locations, sent in the same order as `gallery` ([] = every location).
+    // Stored by URL; posts no longer in the gallery are dropped.
+    const gallery = values.gallery ?? business.gallery ?? [];
+    if (galleryLocations !== undefined) {
+      const ids = [...new Set(galleryLocations.flat())];
+      if (ids.length) {
+        const rows = await db
+          .select({ id: businessLocations.id })
+          .from(businessLocations)
+          .where(
+            and(
+              eq(businessLocations.businessId, business.id),
+              inArray(businessLocations.id, ids),
+              isNull(businessLocations.deletedAt)
+            )
+          );
+        if (rows.length !== ids.length) {
+          throw new ApiError(httpStatus.BAD_REQUEST, 'One of the chosen locations no longer exists. Refresh and try again.');
+        }
+      }
+      values.galleryLocations = Object.fromEntries(
+        gallery.map((url, i) => [url, [...new Set(galleryLocations[i] ?? [])]]).filter(([, l]) => l.length)
+      );
+    } else if (values.gallery) {
+      const kept = business.galleryLocations ?? {};
+      values.galleryLocations = Object.fromEntries(Object.entries(kept).filter(([url]) => gallery.includes(url)));
+    }
+    for (const k of ['subcategory', 'bio', 'address', 'phone', 'email', 'announcement', 'websiteUrl', 'inquiryEmail']) {
       if (k in values) values[k] = emptyToNull(values[k]);
+    }
+    // Email inquiries need an address to go to (the inquiry email, else the contact email)
+    if ('inquiryChannel' in values || 'inquiryEmail' in values || 'email' in values) {
+      const channel = values.inquiryChannel ?? business.inquiryChannel;
+      const inquiryEmail = 'inquiryEmail' in values ? values.inquiryEmail : business.inquiryEmail;
+      const email = 'email' in values ? values.email : business.email;
+      if (channel === 'email' && !inquiryEmail && !email) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Enter the email address inquiries should go to');
+      }
     }
     if (values.latitude !== undefined && values.latitude !== null) values.latitude = String(values.latitude);
     if (values.longitude !== undefined && values.longitude !== null) values.longitude = String(values.longitude);
     const locationType = values.locationType ?? business.locationType;
     if (locationType === 'mobile') values.address = values.city ?? business.city;
 
-    const [updated] = await db
-      .update(businesses)
-      .set(values)
-      .where(eq(businesses.id, business.id))
-      .returning();
+    const updated = await db.transaction(async tx => {
+      const [row] = await tx
+        .update(businesses)
+        .set(values)
+        .where(eq(businesses.id, business.id))
+        .returning();
+      // The business-level address / hours are the primary location's
+      await syncPrimaryFromBusiness(business.id, values, tx);
+      return row;
+    });
     return this.getForManage(updated);
   }
 
@@ -803,6 +958,7 @@ export class BusinessService {
           categoryName: emptyToNull(body.categoryName),
           durationMins: body.durationMins,
           priceCents: body.priceCents,
+          priceOnRequest: body.priceOnRequest ?? false,
           paymentModel: body.paymentModel ?? null,
           // At most one of the two (validation rejects both)
           depositCents: body.depositPercent != null ? null : (body.depositCents ?? null),
@@ -820,6 +976,10 @@ export class BusinessService {
           .insert(businessServiceStaff)
           .values(staffIds.map(staffId => ({ serviceId: service.id, staffId })));
       }
+      if (body.locationIds?.length) await setServiceLocations(business.id, service.id, body.locationIds, tx);
+      if (body.locationOverrides?.length) {
+        await setServiceOverrides(business.id, service.id, body.locationOverrides, tx);
+      }
       return service.id;
     });
     return this.getService(business, id);
@@ -832,7 +992,7 @@ export class BusinessService {
         eq(businessServices.businessId, business.id),
         isNull(businessServices.deletedAt)
       ),
-      with: { staffLinks: true },
+      with: { staffLinks: true, locationLinks: true, locationOverrides: true },
     });
     if (!service) throw new ApiError(httpStatus.NOT_FOUND, 'Service not found');
     return serializeService(service, business);
@@ -862,7 +1022,7 @@ export class BusinessService {
       throw new ApiError(httpStatus.BAD_REQUEST, 'The deposit can’t be more than the price');
     }
 
-    const { eligibleStaffIds, ...rest } = patch;
+    const { eligibleStaffIds, locationIds, locationOverrides, ...rest } = patch;
     const staffIds = eligibleStaffIds ? [...new Set(eligibleStaffIds)] : null;
     if (staffIds) await assertStaffBelong(business.id, staffIds);
 
@@ -881,6 +1041,10 @@ export class BusinessService {
             .values(staffIds.map(staffId => ({ serviceId, staffId })));
         }
       }
+      if (locationIds !== undefined) await setServiceLocations(business.id, serviceId, locationIds, tx);
+      if (locationOverrides !== undefined) {
+        await setServiceOverrides(business.id, serviceId, locationOverrides, tx);
+      }
     });
     return this.getService(business, serviceId);
   }
@@ -898,38 +1062,69 @@ export class BusinessService {
   // ── Staff ─────────────────────────────────────────────────────────────────
 
   static async createStaff(business, body) {
-    const [staff] = await db
-      .insert(businessStaff)
-      .values({
-        businessId: business.id,
-        name: body.name,
-        title: body.title || 'Staff',
-        bio: emptyToNull(body.bio),
-        avatarUrl: emptyToNull(body.avatarUrl),
-        specialties: body.specialties ?? [],
-        schedule: body.schedule ?? null,
-        acceptingBookings: body.acceptingBookings ?? true,
-        bookingConfirmation: body.bookingConfirmation ?? 'automatic',
-        sortOrder: body.sortOrder ?? 0,
-      })
-      .returning();
+    const id = await db.transaction(async tx => {
+      const [staff] = await tx
+        .insert(businessStaff)
+        .values({
+          businessId: business.id,
+          name: body.name,
+          title: body.title || 'Staff',
+          bio: emptyToNull(body.bio),
+          avatarUrl: emptyToNull(body.avatarUrl),
+          specialties: body.specialties ?? [],
+          schedule: body.schedule ?? null,
+          acceptingBookings: body.acceptingBookings ?? true,
+          bookingConfirmation: body.bookingConfirmation ?? 'automatic',
+          sortOrder: body.sortOrder ?? 0,
+        })
+        .returning({ id: businessStaff.id });
+      if (body.locationIds?.length) await setStaffLocations(business.id, staff.id, body.locationIds, tx);
+      return staff.id;
+    });
+    return this.getStaff(id);
+  }
+
+  static async getStaff(staffId) {
+    const staff = await db.query.businessStaff.findFirst({
+      where: eq(businessStaff.id, staffId),
+      with: { locationLinks: true, locationSchedules: true },
+    });
     return serializeStaff(staff, { includePrivate: true });
+  }
+
+  /**
+   * Weekly hours per location for someone who works at several ({} = one
+   * schedule everywhere). Only locations they work at are kept.
+   */
+  static async updateStaffLocationSchedules(business, staffId, schedules, access) {
+    assertOwnStaff(access, staffId);
+    await getStaffOr404(business, staffId);
+    const worksAt = (await staffLocationMap([staffId])).get(staffId) ?? [];
+    const kept = Object.fromEntries(
+      Object.entries(schedules).filter(([locationId]) => !worksAt.length || worksAt.includes(locationId))
+    );
+    await db.transaction(tx => setStaffLocationSchedules(business.id, staffId, kept, tx));
+    return this.getStaff(staffId);
   }
 
   static async updateStaff(business, staffId, patch, access) {
     assertOwnStaff(access, staffId);
     await getStaffOr404(business, staffId);
-    const values = { ...patch, updatedAt: new Date() };
+    const { locationIds, ...rest } = patch;
+    // Which branches someone works at is a manager decision, not a self-service one
+    if (locationIds !== undefined && access?.role === 'staff') {
+      throw new ApiError(httpStatus.FORBIDDEN, 'Ask a manager to change which locations you work at');
+    }
+    const values = { ...rest, updatedAt: new Date() };
     for (const k of ['bio', 'avatarUrl']) {
       if (k in values) values[k] = emptyToNull(values[k]);
     }
     if ('title' in values && !values.title) values.title = 'Staff';
-    const [updated] = await db
-      .update(businessStaff)
-      .set(values)
-      .where(eq(businessStaff.id, staffId))
-      .returning();
-    return serializeStaff(updated, { includePrivate: true });
+    await db.transaction(async tx => {
+      await tx.update(businessStaff).set(values).where(eq(businessStaff.id, staffId));
+      if (locationIds !== undefined) await setStaffLocations(business.id, staffId, locationIds, tx);
+    });
+    return this.getStaff(staffId);
   }
 
   /**
@@ -990,12 +1185,8 @@ export class BusinessService {
     if (acceptingBookings !== undefined) values.acceptingBookings = acceptingBookings;
     assertOwnStaff(access, staffId);
     await getStaffOr404(business, staffId);
-    const [updated] = await db
-      .update(businessStaff)
-      .set(values)
-      .where(eq(businessStaff.id, staffId))
-      .returning();
-    return serializeStaff(updated, { includePrivate: true });
+    await db.update(businessStaff).set(values).where(eq(businessStaff.id, staffId));
+    return this.getStaff(staffId);
   }
 
   /** { 'yyyy-MM-dd': [{start,end}] } for today … +90 days. [] = closed that day. */
@@ -1079,6 +1270,7 @@ export class BusinessService {
       email: m.email,
       role: m.role,
       staffId: m.staffId,
+      locationIds: m.locationIds ?? [],
       status: m.status,
       user: m.user ?? null,
       // Pending only — lets the business copy / resend the link by hand
@@ -1095,7 +1287,7 @@ export class BusinessService {
    * Switch a dashboard member between admin and manager. Staff-role members
    * are tied to a staff record and are managed from the staff schedule instead.
    */
-  static async updateMemberRole(business, actor, memberId, role) {
+  static async updateMemberRole(business, actor, memberId, role, locationIds) {
     const member = await db.query.businessTeamMembers.findFirst({
       where: and(
         eq(businessTeamMembers.id, memberId),
@@ -1114,11 +1306,18 @@ export class BusinessService {
       throw new ApiError(httpStatus.BAD_REQUEST, "You can't change your own access level");
     }
 
+    const values = {};
+    if (role && member.role !== role) values.role = role;
+    if (locationIds !== undefined) {
+      const ids = [...new Set(locationIds)];
+      await assertLocationIdsBelong(business.id, ids);
+      values.locationIds = ids;
+    }
     let updated = member;
-    if (member.role !== role) {
+    if (Object.keys(values).length) {
       [updated] = await db
         .update(businessTeamMembers)
-        .set({ role, updatedAt: new Date() })
+        .set({ ...values, updatedAt: new Date() })
         .where(eq(businessTeamMembers.id, member.id))
         .returning();
     }
@@ -1127,6 +1326,7 @@ export class BusinessService {
       email: updated.email,
       role: updated.role,
       staffId: updated.staffId,
+      locationIds: updated.locationIds ?? [],
       status: updated.status,
       user: member.user ?? null,
       inviteUrl:
@@ -1138,8 +1338,11 @@ export class BusinessService {
     };
   }
 
-  static async invite(business, inviter, { email, role, staffId }) {
+  static async invite(business, inviter, { email, role, staffId, locationIds = [] }) {
     if (staffId) await getStaffOr404(business, staffId);
+    // Staff-role members are scoped by their staff record instead
+    const scope = role === 'staff' ? [] : [...new Set(locationIds)];
+    await assertLocationIdsBelong(business.id, scope);
 
     const owner = await db.query.users.findFirst({
       where: eq(users.id, business.ownerId),
@@ -1159,6 +1362,7 @@ export class BusinessService {
           email,
           role,
           staffId: role === 'staff' ? staffId : null,
+          locationIds: scope,
           inviteToken,
           invitedBy: inviter.id,
         })
@@ -1189,6 +1393,7 @@ export class BusinessService {
       email: member.email,
       role: member.role,
       staffId: member.staffId,
+      locationIds: member.locationIds ?? [],
       status: member.status,
       inviteUrl,
       createdAt: member.createdAt,

@@ -7,6 +7,7 @@ import {
   eventTickets,
   eventSchedules,
   users,
+  refunds,
 } from '../db/schema/index.js';
 import { eq, and, inArray, or, ilike, count, desc, ne, sql, isNull } from 'drizzle-orm';
 import { getUserById, findByEmail, findByPhone } from './user.service.js';
@@ -14,10 +15,12 @@ import { generateTicketCode } from '../utils/code-generator.js';
 import QRCode from 'qrcode';
 import { UploadService } from './upload.service.js';
 import ApiError from '../utils/api-error.js';
-import { sendTicketPurchaseEmail } from './eventMail.helper.js';
+import { sendTicketPurchaseEmail, sendTicketTransferEmail } from './eventMail.helper.js';
+import { createNotification } from './notification.service.js';
+import { isTicketUsed } from '../utils/refund-helpers.js';
 import { EventScheduleService } from './eventSchedule.service.js';
 import { VirtualDetailsService } from './virtualDetails.service.js';
-import { subscribeWithRetry } from '../utils/aws.util.js';
+import { subscribeWithRetry, unsubscribeFromEvent } from '../utils/aws.util.js';
 import { eventTicketScheduleInventory } from '../db/schema/events.js';
 import { generateTicketViewToken, buildTicketViewUrl } from '../utils/helper.js';
 
@@ -359,6 +362,241 @@ export class TicketService {
       ...ticket,
       event: eventMap[ticket.eventId] ?? null,
     }));
+  }
+
+  /**
+   * Hand a ticket over to another Briteside user.
+   *
+   * Ownership is `purchased_tickets.userId`, so moving that puts the event in
+   * the recipient's My Events, event chat, reminders, etc. with no other
+   * changes. The ticket gets a fresh ticketCode + viewToken and a regenerated
+   * QR (the scanner checks the QR's holderName against the row), so the
+   * sender's old QR / emailed link stop working.
+   *
+   * The money stays with the buyer's order: an organizer-cancelled event still
+   * refunds the buyer, but the buyer can't self-refund a ticket they gave away
+   * (see RefundService.checkRefundEligibility).
+   */
+  static async transferTicket(senderId, ticketId, recipientUserId) {
+    if (!recipientUserId) throw new ApiError(400, 'Recipient is required');
+    if (recipientUserId === senderId) {
+      throw new ApiError(400, "You can't transfer a ticket to yourself");
+    }
+
+    const [recipient, sender] = await Promise.all([
+      db.query.users.findFirst({
+        where: and(eq(users.id, recipientUserId), isNull(users.deletedAt)),
+        columns: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          username: true,
+          email: true,
+          phoneNumber: true,
+        },
+      }),
+      db.query.users.findFirst({
+        where: eq(users.id, senderId),
+        columns: { id: true, firstName: true, lastName: true, username: true },
+      }),
+    ]);
+    if (!recipient) throw new ApiError(404, 'Recipient not found');
+
+    const recipientName =
+      `${recipient.firstName ?? ''} ${recipient.lastName ?? ''}`.trim() ||
+      recipient.username ||
+      'Ticket holder';
+    const senderName =
+      `${sender?.firstName ?? ''} ${sender?.lastName ?? ''}`.trim() ||
+      sender?.username ||
+      'Someone';
+
+    const newTicketCode = generateTicketCode();
+    const now = new Date();
+
+    const { ticket, event, oldSnsArn } = await db.transaction(async tx => {
+      // Lock the row so a concurrent transfer / scan can't race this one.
+      const [current] = await tx
+        .select()
+        .from(purchasedTickets)
+        .where(eq(purchasedTickets.id, ticketId))
+        .for('update');
+
+      if (!current || current.userId !== senderId) {
+        throw new ApiError(404, 'Ticket not found');
+      }
+      if (current.status !== 'active') {
+        throw new ApiError(400, 'Only active tickets can be transferred');
+      }
+      if (isTicketUsed(current)) {
+        throw new ApiError(400, 'This ticket has already been checked in');
+      }
+
+      const eventRow = await tx.query.events.findFirst({
+        where: eq(events.id, current.eventId),
+        with: { venue: true },
+      });
+      if (!eventRow) throw new ApiError(404, 'Event not found');
+      if (eventRow.eventStatus === 'cancelled') {
+        throw new ApiError(400, 'This event has been cancelled');
+      }
+      if (eventRow.endDate && new Date(eventRow.endDate) < now) {
+        throw new ApiError(400, 'This event has already ended');
+      }
+
+      const [pendingRefund] = await tx
+        .select({ id: refunds.id })
+        .from(refunds)
+        .where(
+          and(
+            inArray(refunds.status, ['requested', 'pending', 'approved']),
+            sql`${refunds.refundedItems} @> ${JSON.stringify([{ type: 'ticket', id: ticketId }])}::jsonb`
+          )
+        )
+        .limit(1);
+      if (pendingRefund) {
+        throw new ApiError(400, 'This ticket has a refund in progress and cannot be transferred');
+      }
+
+      // Keep the QR payload's other fields (session, orderId, virtual details)
+      // and swap in the new code + holder. Legacy plain-text QRs stay plain.
+      let qrCode = newTicketCode;
+      try {
+        const parsed = current.qrCode ? JSON.parse(current.qrCode) : null;
+        if (parsed && typeof parsed === 'object') {
+          qrCode = JSON.stringify({
+            ...parsed,
+            ticketCode: newTicketCode,
+            holderName: recipientName,
+            isUsed: false,
+            usedAt: null,
+          });
+        }
+      } catch {
+        // not JSON: keep the plain code
+      }
+
+      const [updated] = await tx
+        .update(purchasedTickets)
+        .set({
+          userId: recipient.id,
+          holderName: recipientName,
+          holderEmail: recipient.email ?? null,
+          holderPhone: recipient.phoneNumber ?? null,
+          ticketCode: newTicketCode,
+          qrCode,
+          qrCodeUrl: null,
+          qrImageS3Key: null,
+          viewToken: generateTicketViewToken(),
+          viewTokenExpiresAt: new Date(now.getTime() + TICKET_VIEW_TOKEN_TTL_MS),
+          snsSubscriptionArn: null,
+          transferredTo: recipient.id,
+          transferredAt: now,
+          updatedAt: now,
+        })
+        .where(eq(purchasedTickets.id, ticketId))
+        .returning();
+
+      return { ticket: updated, event: eventRow, oldSnsArn: current.snsSubscriptionArn };
+    });
+
+    // ── Best-effort side effects; the transfer itself is already committed ──
+
+    // QR image for the new code (same as at purchase).
+    try {
+      const pngBuffer = await QRCode.toBuffer(ticket.qrCode, {
+        type: 'png',
+        width: 300,
+        errorCorrectionLevel: 'M',
+      });
+      const uploadRes = await UploadService.uploadFile(
+        {
+          originalname: `${ticket.ticketCode}.png`,
+          buffer: pngBuffer,
+          mimetype: 'image/png',
+          size: pngBuffer.length,
+        },
+        'tickets',
+        ticket.id
+      );
+      await db
+        .update(purchasedTickets)
+        .set({ qrCodeUrl: uploadRes.url, qrImageS3Key: uploadRes.s3Key, updatedAt: new Date() })
+        .where(eq(purchasedTickets.id, ticket.id));
+    } catch (err) {
+      console.error('Failed to generate QR image for transferred ticket', ticket.id, err);
+    }
+
+    // Event SMS blasts: move the subscription to the recipient. SNS returns the
+    // same subscription ARN when one phone holds several tickets, so only drop
+    // the sender's if no other ticket still uses it.
+    if (event.snsTopicArn) {
+      try {
+        if (oldSnsArn) {
+          const [stillUsed] = await db
+            .select({ id: purchasedTickets.id })
+            .from(purchasedTickets)
+            .where(
+              and(
+                eq(purchasedTickets.snsSubscriptionArn, oldSnsArn),
+                ne(purchasedTickets.status, 'refunded')
+              )
+            )
+            .limit(1);
+          if (!stillUsed) await unsubscribeFromEvent(oldSnsArn);
+        }
+        if (recipient.phoneNumber) {
+          const arn = await subscribeWithRetry(event.snsTopicArn, recipient.phoneNumber);
+          await db
+            .update(purchasedTickets)
+            .set({ snsSubscriptionArn: arn })
+            .where(eq(purchasedTickets.id, ticket.id));
+        }
+      } catch (snsError) {
+        console.error('Failed to move SNS subscription for transferred ticket:', snsError);
+      }
+    }
+
+    try {
+      await createNotification({
+        userId: recipient.id,
+        title: `${senderName} sent you a ticket`,
+        message: `You received a ticket for ${event.title}. It's in your My Events.`,
+        type: 'ticket_transfer',
+        relatedId: event.id,
+        redirectTo: `/events/${event.slug}/ticket`,
+        metadata: {
+          ticketId: ticket.id,
+          eventId: event.id,
+          senderId,
+          actorUserId: senderId,
+        },
+      });
+    } catch (err) {
+      console.error('Failed to create ticket transfer notification:', err);
+    }
+
+    if (recipient.email) {
+      try {
+        await sendTicketTransferEmail(recipient.email, {
+          recipientName,
+          senderName,
+          event,
+          venue: event.venue,
+          ticket,
+          viewUrl: buildTicketViewUrl(ticket.viewToken),
+        });
+      } catch (err) {
+        console.error('Failed to send ticket transfer email:', err);
+      }
+    }
+
+    return {
+      ticketId: ticket.id,
+      eventId: event.id,
+      recipient: { id: recipient.id, name: recipientName },
+      transferredAt: ticket.transferredAt,
+    };
   }
 
   /**

@@ -39,3 +39,22 @@ export const BUSINESS_ROLE_PERMISSIONS = {
 };
 
 export const permissionsForRole = role => BUSINESS_ROLE_PERMISSIONS[role] ?? [];
+
+// Business-wide settings and money a location manager (an admin / manager
+// limited to some locations) can't touch — they'd affect other locations.
+const BUSINESS_WIDE = [
+  P.PROFILE_EDIT,
+  P.POLICIES_MANAGE,
+  P.SERVICES_MANAGE,
+  P.TEAM_MANAGE,
+  P.EARNINGS_VIEW,
+  P.WALLET_MANAGE,
+  P.TAXES_MANAGE,
+  P.DELETE,
+];
+
+/** Permissions for a team member, narrowed when they're limited to some locations. */
+export const permissionsForMember = (role, locationIds = []) => {
+  const base = permissionsForRole(role);
+  return role !== 'staff' && locationIds.length ? base.filter(p => !BUSINESS_WIDE.includes(p)) : base;
+};

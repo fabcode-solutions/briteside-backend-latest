@@ -61,6 +61,9 @@ router.get(
   c.getBookingByCheckoutSession
 );
 router.get('/bookings/mine', authMiddleware, validateMiddleware(v.myBookingsSchema), c.listMyBookings);
+// Custom price offers — read by the customer it was sent to or the owner (chat card); declined by the customer
+router.get('/offers/:offerId', authMiddleware, validateMiddleware(v.customOfferSchema), c.getCustomOffer);
+router.post('/offers/:offerId/decline', authMiddleware, validateMiddleware(v.customOfferSchema), c.declineCustomOffer);
 // In-app card checkout (NativeCheckoutModal) for a held booking — guests may pay too
 router.post('/bookings/:bookingId/native-tax-preview', optionalAuthMiddleware, validateMiddleware(v.nativeIntentSchema), c.bookingNativeTaxPreview);
 router.post('/bookings/:bookingId/native-intent', optionalAuthMiddleware, validateMiddleware(v.nativeIntentSchema), c.bookingNativeIntent);
@@ -149,6 +152,13 @@ router.get('/:idOrSlug/reviews', validateMiddleware(v.listPublicReviewsSchema), 
 // requests), members post requests, the business approves or rejects them
 router.get('/:idOrSlug/wall', optionalAuthMiddleware, validateMiddleware(v.listWallPostsSchema), c.listWallPosts);
 router.post('/:idOrSlug/wall', authMiddleware, validateMiddleware(v.createWallPostSchema), c.createWallPost);
+// "Send inquiry" when the business takes inquiries in its inbox → conversation with the owner
+router.post(
+  '/:idOrSlug/inquiries/conversation',
+  authMiddleware,
+  validateMiddleware(v.inquiryConversationSchema),
+  c.openInquiryConversation
+);
 router.put(
   '/:idOrSlug/wall/:postId/status',
   authMiddleware,
@@ -365,6 +375,35 @@ router.post(
   c.cancelGroupSession
 );
 
+// Locations (branches): address, hours and timezone per branch
+router.post('/:businessId/locations', ...scoped(P.PROFILE_EDIT, v.createLocationSchema), c.createLocation);
+router.patch(
+  '/:businessId/locations/:locationId',
+  ...scoped(P.PROFILE_EDIT, v.updateLocationSchema),
+  c.updateLocation
+);
+router.post(
+  '/:businessId/locations/:locationId/primary',
+  ...scoped(P.PROFILE_EDIT, v.locationIdSchema),
+  c.makePrimaryLocation
+);
+router.delete(
+  '/:businessId/locations/:locationId',
+  ...scoped(P.PROFILE_EDIT, v.locationIdSchema),
+  c.deleteLocation
+);
+// Closed dates (holidays, renovations) per location
+router.post(
+  '/:businessId/locations/:locationId/closures',
+  ...scoped(P.SCHEDULE_MANAGE, v.addLocationClosureSchema),
+  c.addLocationClosure
+);
+router.delete(
+  '/:businessId/locations/:locationId/closures/:closureId',
+  ...scoped(P.SCHEDULE_MANAGE, v.locationClosureIdSchema),
+  c.removeLocationClosure
+);
+
 // Staff
 router.post('/:businessId/staff', ...scoped(P.STAFF_MANAGE, v.createStaffSchema), c.createStaff);
 router.patch(
@@ -382,6 +421,12 @@ router.put(
   '/:businessId/staff/:staffId/schedule',
   ...scoped(P.SCHEDULE_MANAGE, v.updateStaffScheduleSchema),
   c.updateStaffSchedule
+);
+// Different weekly hours at each location (staff-role members: own record only)
+router.put(
+  '/:businessId/staff/:staffId/location-schedules',
+  ...scoped(P.SCHEDULE_MANAGE, v.updateStaffLocationSchedulesSchema),
+  c.updateStaffLocationSchedules
 );
 router.get(
   '/:businessId/staff/:staffId/date-overrides',
@@ -421,6 +466,14 @@ router.post(
   '/:businessId/bookings/:bookingId/check-in',
   ...scoped(P.BOOKINGS_MANAGE, v.checkInSchema),
   c.checkInBooking
+);
+// Custom price offers (sent from the inquiry chat; listed for dashboard metrics)
+router.post('/:businessId/offers', ...scoped(P.BOOKINGS_MANAGE, v.createCustomOfferSchema), c.createCustomOffer);
+router.get('/:businessId/offers', ...scoped(P.BOOKINGS_VIEW, v.listCustomOffersSchema), c.listCustomOffers);
+router.post(
+  '/:businessId/offers/:offerId/withdraw',
+  ...scoped(P.BOOKINGS_MANAGE, v.businessCustomOfferSchema),
+  c.withdrawCustomOffer
 );
 for (const [action, handler] of [
   ['confirm', c.confirmBooking],

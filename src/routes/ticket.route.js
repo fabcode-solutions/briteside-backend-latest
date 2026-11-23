@@ -14,6 +14,7 @@ import {
   getOrganizerAllSales,
   issueTicketForUser,
   getTicketsByViewToken,
+  transferTicket,
 } from '../controllers/ticket.controller.js';
 
 const router = express.Router();
@@ -27,6 +28,8 @@ router.get('/view/:tokens', getTicketsByViewToken);
 router.post('/purchase', authMiddleware, purchaseTickets);
 router.post('/verify', authMiddleware, verifyTicket);
 router.get('/user', authMiddleware, getUserTickets);
+// Owner sends one of their tickets to another Briteside user.
+router.post('/:ticketId/transfer', authMiddleware, transferTicket);
 
 // Organizer-only / event team routes
 // GET  /tickets/organizer/event/:eventId  — sold tickets for a specific event (with buyer info + search)

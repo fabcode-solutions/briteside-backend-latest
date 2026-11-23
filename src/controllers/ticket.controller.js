@@ -55,6 +55,23 @@ export const getUserTickets = catchAsync(async (req, res) => {
   });
 });
 
+export const transferTicket = catchAsync(async (req, res) => {
+  const { ticketId } = req.params;
+  const { recipientUserId } = req.body || {};
+
+  if (!recipientUserId || typeof recipientUserId !== 'string') {
+    throw new ApiError(400, 'recipientUserId is required');
+  }
+
+  const result = await TicketService.transferTicket(req.user.id, ticketId, recipientUserId);
+
+  res.json({
+    success: true,
+    message: `Ticket transferred to ${result.recipient.name}`,
+    data: result,
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Organizer-only endpoints
 // ---------------------------------------------------------------------------
