@@ -3,11 +3,12 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { businesses, businessTeamMembers } from '../db/schema/index.js';
 import ApiError from '../utils/api-error.js';
-import { ALL_BUSINESS_PERMISSIONS, permissionsForRole } from '../config/business-permissions.js';
+import { ALL_BUSINESS_PERMISSIONS, permissionsForMember } from '../config/business-permissions.js';
 
 /**
  * The user's access to `business`, or null when they have none.
- * { role: 'owner'|'admin'|'manager'|'staff'|'platform_admin', permissions, staffId }
+ * { role: 'owner'|'admin'|'manager'|'staff'|'platform_admin', permissions, staffId, locationIds? }
+ * locationIds (team members only): the locations they're limited to; [] / missing = all.
  */
 export async function resolveBusinessAccess(business, user) {
   if (!user?.id) return null;
@@ -25,7 +26,13 @@ export async function resolveBusinessAccess(business, user) {
     ),
   });
   return member
-    ? { role: member.role, permissions: permissionsForRole(member.role), staffId: member.staffId }
+    ? {
+        role: member.role,
+        permissions: permissionsForMember(member.role, member.locationIds ?? []),
+        staffId: member.staffId,
+        // Admins / managers limited to some locations ([] = all)
+        locationIds: member.locationIds ?? [],
+      }
     : null;
 }
 
@@ -34,9 +41,6 @@ export async function resolveBusinessAccess(business, user) {
  * Must run after authMiddleware. Sets:
  *   req.business        — the business row
  *   req.businessAccess  — { role: 'owner'|'admin'|'manager'|'staff'|'platform_admin', permissions, staffId }
- *
- * Note: the owner's BriteSide Plus status is NOT checked here — a lapsed owner keeps
- * dashboard access; lapsing only hides the business publicly and blocks new bookings.
  */
 export const requireBusinessPermission = permission => async (req, res, next) => {
   try {

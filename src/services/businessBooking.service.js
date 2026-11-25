@@ -30,11 +30,28 @@ import {
   businessAddOns,
   businessQuestionnaires,
   businessGroupSessions,
+  businessLocations,
+  businessCustomOffers,
 } from '../db/schema/index.js';
+import {
+  atLocation,
+  atRecordLocation,
+  filterStaffByLocation,
+  isLocationClosed,
+  resolveLocation,
+  scopedLocationIds,
+  serviceAtLocation,
+  serviceOfferedAt,
+  staffAtLocation,
+  staffLocationMap,
+  staffLocationSchedules,
+} from './businessLocation.service.js';
 import { BUSINESS_PERMISSIONS, permissionsForRole } from '../config/business-permissions.js';
 import { legacyQuestions, resolveAnswers } from '../utils/businessQuestionnaire.js';
+import { withSale } from '../utils/businessSale.js';
 import { BusinessAttachmentService } from './businessAttachment.service.js';
 import ApiError from '../utils/api-error.js';
+import { businessByIdOrSlug } from '../utils/handles.js';
 import config from '../config/config.js';
 import logger from '../config/logger.js';
 import { isBusinessPublic } from './business.service.js';
@@ -86,7 +103,6 @@ const SOURCE_TYPE = 'business_booking';
 
 const HOLDING_STATUSES = ['awaiting_payment', 'pending', 'confirmed'];
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const toMins = t => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 const fromMins = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 const money = c => `$${(c / 100).toFixed(2)}`;
@@ -185,19 +201,18 @@ export function computeSlots({ windows, date, tz, durationMins, bufferMins, busy
 
 /**
  * Refund split for a customer cancellation under the business's policy.
- * Returns how much of the service payment and the booking fee go back.
+ * Returns how much of the service payment goes back. The booking fee is never refunded.
  */
 export function customerCancellationRefund(booking, business, now = new Date()) {
   if (booking.status === 'pending') {
-    return { serviceRefundCents: booking.amountPaidCents, refundFee: true, rule: 'not_yet_accepted' };
+    return { serviceRefundCents: booking.amountPaidCents, rule: 'not_yet_accepted' };
   }
   const hoursBefore = (booking.startAt.getTime() - now.getTime()) / 3_600_000;
   if (hoursBefore >= business.freeCancellationHours) {
-    return { serviceRefundCents: booking.amountPaidCents, refundFee: true, rule: 'free_window' };
+    return { serviceRefundCents: booking.amountPaidCents, rule: 'free_window' };
   }
   return {
     serviceRefundCents: Math.round((booking.amountPaidCents * business.lateCancellationRefundPercent) / 100),
-    refundFee: false,
     rule: 'late',
   };
 }
@@ -278,6 +293,11 @@ export function normalizeExtraCharges(charges = []) {
 
 // ─── Serializers ────────────────────────────────────────────────────────────
 
+// Location details loaded with booking lists (`with: { location: LOCATION_COLUMNS }`)
+const LOCATION_COLUMNS = {
+  columns: { id: true, name: true, locationType: true, city: true, address: true },
+};
+
 const serializeBooking = (b, { forBusiness = false } = {}) => ({
   id: b.id,
   businessId: b.businessId,
@@ -289,6 +309,22 @@ const serializeBooking = (b, { forBusiness = false } = {}) => ({
   startAt: b.startAt,
   endAt: b.endAt,
   timezone: b.timezone,
+  // Branch the visit is at (location details when the query loaded them)
+  locationId: b.locationId ?? null,
+  // Booked from a custom price the business sent
+  customOfferId: b.customOfferId ?? null,
+  ...(b.location
+    ? {
+        location: {
+          id: b.location.id,
+          name: b.location.name,
+          locationType: b.location.locationType,
+          city: b.location.city,
+          // A mobile location's address is the owner's home base — never sent out
+          address: b.location.locationType === 'mobile' ? b.location.city : b.location.address,
+        },
+      }
+    : {}),
   status: b.status,
   paymentModel: b.paymentModel,
   servicePriceCents: b.servicePriceCents,
@@ -348,10 +384,8 @@ const serializeBooking = (b, { forBusiness = false } = {}) => ({
 
 async function loadPublicBusiness(idOrSlug) {
   const business = await db.query.businesses.findFirst({
-    where: and(
-      UUID_RE.test(idOrSlug) ? eq(businesses.id, idOrSlug) : eq(businesses.slug, idOrSlug),
-      isNull(businesses.deletedAt)
-    ),
+    // id, slug or an old @username (renamed businesses' links keep working)
+    where: and(businessByIdOrSlug(idOrSlug), isNull(businesses.deletedAt)),
     with: { owner: { columns: { id: true, isBritesidePlus: true, email: true, firstName: true } } },
   });
   if (!business || !isBusinessPublic(business, business.owner)) {
@@ -367,10 +401,87 @@ async function loadService(business, serviceId) {
       eq(businessServices.businessId, business.id),
       isNull(businessServices.deletedAt)
     ),
-    with: { staffLinks: true },
+    with: { staffLinks: true, locationLinks: true, locationOverrides: true },
   });
   if (!service) throw new ApiError(httpStatus.NOT_FOUND, 'Service not found');
-  return service;
+  // A business viewed at one location (atLocation) only offers that location's services
+  if (!serviceOfferedAt(service, business.locationId)) {
+    throw new ApiError(httpStatus.CONFLICT, "This service isn't offered at that location. Please pick another.", true, '', {
+      code: 'SERVICE_NOT_AT_LOCATION',
+    });
+  }
+  // …at that location's own price / length, when it has them, less any running sale
+  return withSale(serviceAtLocation(service, business.locationId));
+}
+
+const quoteRequired = () =>
+  new ApiError(
+    httpStatus.CONFLICT,
+    'This service is priced on request. Send the business an inquiry and they’ll send you a custom price to book.',
+    true,
+    '',
+    { code: 'QUOTE_REQUIRED' }
+  );
+
+/**
+ * A custom price offer that can still be booked. `user` (when given) must be the
+ * customer it was sent to; slots skip that check (they only reveal its length).
+ */
+export async function loadBookableOffer(businessId, offerId, user) {
+  const offer = await db.query.businessCustomOffers.findFirst({
+    where: and(eq(businessCustomOffers.id, offerId), eq(businessCustomOffers.businessId, businessId)),
+  });
+  if (!offer) throw new ApiError(httpStatus.NOT_FOUND, 'This offer no longer exists');
+  if (user && offer.customerId !== user.id) {
+    throw new ApiError(httpStatus.FORBIDDEN, 'This offer was sent to someone else');
+  }
+  const problem =
+    offer.status === 'booked'
+      ? 'You’ve already booked this offer'
+      : offer.status === 'withdrawn'
+        ? 'The business withdrew this offer'
+        : offer.status === 'declined'
+          ? 'You declined this offer'
+          : offer.status === 'expired' || offer.expiresAt.getTime() < Date.now()
+            ? 'This offer has expired. Ask the business for a new one.'
+            : null;
+  if (problem) throw new ApiError(httpStatus.CONFLICT, problem, true, '', { code: 'OFFER_UNAVAILABLE' });
+  return offer;
+}
+
+/**
+ * The service a custom offer books: its menu service (when it still exists) with the
+ * offer's name, length, price and payment terms — or a one-off with the same shape.
+ * Always an individual appointment; the offer's staff member (if set) is the only one.
+ */
+async function offerService(business, offer) {
+  const base = offer.serviceId
+    ? await db.query.businessServices.findFirst({
+        where: and(
+          eq(businessServices.id, offer.serviceId),
+          eq(businessServices.businessId, business.id),
+          isNull(businessServices.deletedAt)
+        ),
+        with: { staffLinks: true, locationLinks: true, locationOverrides: true },
+      })
+    : null;
+  return {
+    ...(base ?? { id: null, allStaff: true, staffLinks: [], bufferMins: 10, questionnaireId: null }),
+    name: offer.serviceName,
+    durationMins: offer.durationMins,
+    priceCents: offer.priceCents,
+    priceOnRequest: false,
+    paymentModel: offer.paymentModel,
+    depositCents: offer.paymentModel === 'deposit' ? offer.depositCents : null,
+    depositPercent: null,
+    sessionType: 'individual',
+    minGuests: null,
+    maxGuests: null,
+    minimumTotalCents: null,
+    // The business already agreed the job with the customer
+    requiresApproval: false,
+    ...(offer.staffId ? { allStaff: false, staffLinks: [{ staffId: offer.staffId }] } : {}),
+  };
 }
 
 /**
@@ -487,9 +598,12 @@ const withAddOnTime = (service, addOns) => ({
   durationMins: service.durationMins + addOns.reduce((s, a) => s + a.durationMins, 0),
 });
 
-/** Active staff who can perform the service and are taking bookings. */
-async function eligibleStaff(business, service) {
-  const all = await db.query.businessStaff.findMany({
+/**
+ * Active staff who can perform the service and are taking bookings — and, for a
+ * business viewed at one location (atLocation), who work at that location.
+ */
+async function eligibleStaff(business, service, tx = db) {
+  const all = await tx.query.businessStaff.findMany({
     where: and(
       eq(businessStaff.businessId, business.id),
       isNull(businessStaff.deletedAt),
@@ -497,9 +611,9 @@ async function eligibleStaff(business, service) {
     ),
     orderBy: [asc(businessStaff.sortOrder), asc(businessStaff.createdAt)],
   });
-  if (service.allStaff) return all;
-  const allowed = new Set(service.staffLinks.map(l => l.staffId));
-  return all.filter(s => allowed.has(s.id));
+  const allowed = service.allStaff ? null : new Set(service.staffLinks.map(l => l.staffId));
+  const forService = allowed ? all.filter(s => allowed.has(s.id)) : all;
+  return filterStaffByLocation(forService, business.locationId, tx);
 }
 
 /**
@@ -597,12 +711,27 @@ async function slotsForStaffList({ business, service, staffList, date, tx = db, 
   const dayStart = dayjs.tz(`${date}T00:00:00`, tz).toDate();
   const dayEnd = dayjs.tz(`${date}T23:59:59`, tz).toDate();
   const ids = staffList.map(s => s.id);
-  const [busy, overrides] = await Promise.all([
+  const [busy, overrides, closed, locationSchedules] = await Promise.all([
     busyForStaff(ids, dayStart, dayEnd, tx, excludeBookingId),
     overridesFor(ids, date, tx),
+    // A closed location (holiday) has no times that day
+    isLocationClosed(business.locationId, date, tx),
+    business.locationId ? staffLocationSchedules(ids, tx) : new Map(),
   ]);
   const result = new Map();
-  for (const staff of staffList) {
+  if (closed) {
+    for (const s of staffList) result.set(s.id, []);
+    return result;
+  }
+  for (const member of staffList) {
+    // Someone with per-location hours works here only in this location's hours —
+    // and not at all at a location they have no hours for (date overrides included)
+    const perLocation = locationSchedules.get(member.id);
+    if (business.locationId && perLocation && Object.keys(perLocation).length && !perLocation[business.locationId]) {
+      result.set(member.id, []);
+      continue;
+    }
+    const staff = staffAtLocation(member, business.locationId, locationSchedules);
     const windows = staffWindowsForDate({
       business,
       staff,
@@ -632,6 +761,11 @@ async function getBookingForBusiness(business, bookingId, access) {
   if (access?.role === 'staff' && booking.staffId !== access.staffId) {
     throw new ApiError(httpStatus.NOT_FOUND, 'Booking not found');
   }
+  // Location managers only see their locations' bookings
+  const scope = scopedLocationIds(access);
+  if (scope && !scope.includes(booking.locationId)) {
+    throw new ApiError(httpStatus.NOT_FOUND, 'Booking not found');
+  }
   return booking;
 }
 
@@ -650,15 +784,16 @@ async function transition(bookingId, from, values) {
 
 /**
  * Refund via Stripe and adjust the business's held payout.
- * serviceRefundCents: part of the service payment going back; refundFee: whether the booking fee goes back.
- * Tax is refunded in proportion to the service refund.
+ * serviceRefundCents: part of the service payment going back.
+ * Tax is refunded in proportion to the service refund. The booking fee is
+ * non-refundable in every case (customer cancel, business decline/cancel, expiry).
  */
-async function refundBooking(booking, business, { serviceRefundCents, refundFee, reason }) {
+async function refundBooking(booking, business, { serviceRefundCents, reason }) {
   const serviceRefund = Math.max(0, Math.min(serviceRefundCents, booking.amountPaidCents - booking.refundedCents));
   const fraction = booking.amountPaidCents > 0 ? serviceRefund / booking.amountPaidCents : 0;
   const taxRefund = Math.round((booking.taxAmountCents ?? 0) * fraction);
-  const feeRefund = refundFee ? booking.customerFeeCents : 0;
-  const total = serviceRefund + taxRefund + feeRefund;
+  const feeRefund = 0;
+  const total = serviceRefund + taxRefund;
 
   // Claim the refund first: only succeeds if nobody refunded since `booking` was read,
   // so two refund paths (e.g. a business refund and a customer cancel) can't both pay out.
@@ -693,9 +828,7 @@ async function refundBooking(booking, business, { serviceRefundCents, refundFee,
       await releaseClaim();
       throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Refunds are unavailable right now');
     }
-    const fromBalance = booking.balancePaymentIntentId
-      ? Math.min(total - feeRefund, booking.balanceChargedCents)
-      : 0;
+    const fromBalance = booking.balancePaymentIntentId ? Math.min(total, booking.balanceChargedCents) : 0;
     const parts = [
       { pi: booking.balancePaymentIntentId, amount: fromBalance, key: 'balance' },
       { pi: booking.stripePaymentIntentId, amount: total - fromBalance, key: 'booking' },
@@ -816,7 +949,9 @@ async function rescheduleStaffPool(business, booking, onlyStaffId) {
 }
 
 /** Free times on `date` for moving `booking` (its own current slot doesn't block). */
-async function rescheduleSlotsFor(business, booking, { date, staffId }) {
+async function rescheduleSlotsFor(bookedBusiness, booking, { date, staffId }) {
+  // Moves stay at the booking's location (its hours, timezone and staff)
+  const business = await atRecordLocation(bookedBusiness, booking);
   const staffList = await rescheduleStaffPool(business, booking, staffId ?? booking.staffId);
   const base = { date, timezone: business.timezone, durationMins: booking.durationMins };
   if (!staffList.length) return { ...base, slots: [] };
@@ -837,7 +972,8 @@ async function rescheduleSlotsFor(business, booking, { date, staffId }) {
  * Move a booking in place: re-checks the slot under the staff lock (same as
  * checkout), keeps payments as they are, and re-arms the reminders.
  */
-async function moveBooking(business, booking, { date, time, staffId }, by) {
+async function moveBooking(base, booking, { date, time, staffId }, by) {
+  const business = await atRecordLocation(base, booking);
   const [staff] = await rescheduleStaffPool(business, booking, staffId ?? booking.staffId);
   if (!staff) throw new ApiError(httpStatus.CONFLICT, 'That staff member is not available for this booking');
 
@@ -940,22 +1076,36 @@ function emailCustomer(booking, business, subject, headline, extraRows = []) {
       metadata: { businessId: business.id, bookingId: booking.id, status: booking.status },
     }).catch(err => logger.error(`[businessBooking] customer notification failed ${booking.id}: ${err.message}`));
   }
-  const html = emailWrapper(`
-    <h2 style="margin:0 0 12px">${escapeHtml(headline)}</h2>
-    ${infoBox([
-      ['Business', escapeHtml(business.name)],
-      ['Service', escapeHtml(booking.serviceName)],
-      ['With', escapeHtml(booking.staffName)],
-      ['When', escapeHtml(fmtWhen(booking))],
-      ...extraRows,
-    ])}
-    ${ctaRow(ctaButton('View business', appUrl(`/business/${business.slug}`)))}
-  `);
   // Manual bookings may have only a phone number
   if (!booking.customerEmail) return;
-  sendMail(booking.customerEmail, subject, html).catch(err =>
-    logger.error(`[businessBooking] customer email failed ${booking.id}: ${err.message}`)
-  );
+  (async () => {
+    // Which branch to go to
+    const location = booking.locationId
+      ? await db.query.businessLocations.findFirst({ where: eq(businessLocations.id, booking.locationId) })
+      : null;
+    const html = emailWrapper(`
+      <h2 style="margin:0 0 12px">${escapeHtml(headline)}</h2>
+      ${infoBox([
+        ['Business', escapeHtml(business.name)],
+        ['Service', escapeHtml(booking.serviceName)],
+        ['With', escapeHtml(booking.staffName)],
+        ['When', escapeHtml(fmtWhen(booking))],
+        ...(location ? [['Where', escapeHtml(locationLine(location))]] : []),
+        ...extraRows,
+      ])}
+      ${ctaRow(ctaButton('View business', appUrl(`/business/${business.slug}`)))}
+    `);
+    await sendMail(booking.customerEmail, subject, html);
+  })().catch(err => logger.error(`[businessBooking] customer email failed ${booking.id}: ${err.message}`));
+}
+
+/** "Downtown · 12 King St, Toronto" / "Uptown · Mobile, serves Toronto" */
+function locationLine(l) {
+  const where =
+    l.locationType === 'mobile'
+      ? `Mobile, serves ${l.city}`
+      : [l.address, l.address?.toLowerCase().includes(l.city.toLowerCase()) ? null : l.city].filter(Boolean).join(', ');
+  return l.name && l.name !== l.city ? `${l.name} · ${where}` : where;
 }
 
 // ─── In-app card checkout (NativeCheckoutModal) ─────────────────────────────
@@ -1033,12 +1183,32 @@ export class BusinessBookingService {
    * Public slots for a service on a date (business-local yyyy-MM-dd).
    * With staffId → that staff member's slots. Without → union, each slot listing who is free.
    */
-  static async getSlots(idOrSlug, { serviceId, staffId, date, addOnIds }) {
-    const business = await loadPublicBusiness(idOrSlug);
-    const loaded = await loadService(business, serviceId);
-    // Add-on minutes make the appointment longer, so fewer times may fit
-    const service = withAddOnTime(loaded, await resolveAddOns(business, loaded, addOnIds));
-    const base = { date, timezone: business.timezone, durationMins: service.durationMins };
+  static async getSlots(idOrSlug, { serviceId, offerId, staffId, locationId, date, addOnIds }) {
+    const publicBusiness = await loadPublicBusiness(idOrSlug);
+    // A custom offer: its length / staff, at its location when it names one
+    const offer = offerId ? await loadBookableOffer(publicBusiness.id, offerId) : null;
+    // That location's hours, timezone and staff (main location when not given)
+    const business = atLocation(
+      publicBusiness,
+      await resolveLocation(publicBusiness, offer?.locationId ?? locationId)
+    );
+    let service;
+    if (offer) {
+      service = await offerService(business, offer);
+    } else {
+      const loaded = await loadService(business, serviceId);
+      // "Inquire for pricing" is booked only through a custom offer
+      if (loaded.priceOnRequest) throw quoteRequired();
+      // Add-on minutes make the appointment longer, so fewer times may fit
+      service = withAddOnTime(loaded, await resolveAddOns(business, loaded, addOnIds));
+    }
+    const loaded = service;
+    const base = {
+      date,
+      timezone: business.timezone,
+      locationId: business.locationId,
+      durationMins: service.durationMins,
+    };
     if (!business.acceptingBookings || business.pageType === 'standard') return { ...base, slots: [] };
     // Group services are booked into scheduled sessions (listGroupSessions), not free slots
     if (isGroup(loaded)) return { ...base, slots: [] };
@@ -1063,9 +1233,14 @@ export class BusinessBookingService {
   }
 
   /** Price breakdown for the booking flow summary. */
-  static async quote(idOrSlug, serviceId, addOnIds, partySize = 1) {
-    const business = await loadPublicBusiness(idOrSlug);
+  static async quote(idOrSlug, serviceId, addOnIds, partySize = 1, locationId) {
+    const publicBusiness = await loadPublicBusiness(idOrSlug);
+    // That location's price, when it has its own
+    const business = locationId
+      ? atLocation(publicBusiness, await resolveLocation(publicBusiness, locationId))
+      : publicBusiness;
     const service = await loadService(business, serviceId);
+    if (service.priceOnRequest) throw quoteRequired();
     const problem = partySizeProblem(service, partySize);
     if (problem) throw new ApiError(httpStatus.BAD_REQUEST, problem);
     const addOns = await resolveAddOns(business, service, addOnIds);
@@ -1076,8 +1251,11 @@ export class BusinessBookingService {
    * Upcoming sessions of a group service customers can book (next 90 days).
    * Seats left are shown only when the business allows it; `full` always is.
    */
-  static async listPublicGroupSessions(idOrSlug, serviceId) {
-    const business = await loadPublicBusiness(idOrSlug);
+  static async listPublicGroupSessions(idOrSlug, serviceId, locationId) {
+    const publicBusiness = await loadPublicBusiness(idOrSlug);
+    // Sessions at the chosen location (all locations when none is given)
+    const location = locationId ? await resolveLocation(publicBusiness, locationId) : null;
+    const business = location ? atLocation(publicBusiness, location) : publicBusiness;
     const service = await loadService(business, serviceId);
     if (!isGroup(service)) return { timezone: business.timezone, sessions: [] };
     const now = new Date();
@@ -1086,7 +1264,8 @@ export class BusinessBookingService {
         eq(businessGroupSessions.serviceId, service.id),
         eq(businessGroupSessions.status, 'scheduled'),
         gte(businessGroupSessions.startAt, new Date(now.getTime() + MIN_LEAD_MINS * 60_000)),
-        lte(businessGroupSessions.startAt, new Date(now.getTime() + 90 * 86_400_000))
+        lte(businessGroupSessions.startAt, new Date(now.getTime() + 90 * 86_400_000)),
+        ...(location ? [eq(businessGroupSessions.locationId, location.id)] : [])
       ),
       with: { staff: { columns: { id: true, name: true, deletedAt: true } } },
       orderBy: [asc(businessGroupSessions.startAt)],
@@ -1104,6 +1283,7 @@ export class BusinessBookingService {
           endAt: r.endAt,
           staffId: r.staffId,
           staffName: r.staff.name,
+          locationId: r.locationId ?? null,
           full: left === 0,
           ...(service.showRemainingSeats ? { capacity: r.capacity, seatsLeft: left } : {}),
         };
@@ -1118,7 +1298,31 @@ export class BusinessBookingService {
   static async createCheckout(idOrSlug, user, body) {
     if (!stripe) throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Payments are unavailable right now');
 
-    const business = await loadPublicBusiness(idOrSlug);
+    const publicBusiness = await loadPublicBusiness(idOrSlug);
+    // A custom price offer: only the signed-in customer it was sent to can book it
+    let offer = null;
+    if (body.offerId) {
+      if (!user) throw new ApiError(httpStatus.UNAUTHORIZED, 'Sign in to book this offer');
+      offer = await loadBookableOffer(publicBusiness.id, body.offerId, user);
+      body = { ...body, groupSessionId: undefined, addOnIds: [], partySize: 1 };
+    }
+    // The branch being booked: a group session's own location, else the chosen
+    // one (main location when none) — its hours, timezone and staff apply.
+    let business;
+    if (offer) {
+      business = atLocation(publicBusiness, await resolveLocation(publicBusiness, offer.locationId ?? body.locationId));
+    } else if (body.groupSessionId) {
+      const session = await db.query.businessGroupSessions.findFirst({
+        where: and(
+          eq(businessGroupSessions.id, body.groupSessionId),
+          eq(businessGroupSessions.businessId, publicBusiness.id)
+        ),
+        columns: { locationId: true },
+      });
+      business = await atRecordLocation(publicBusiness, session);
+    } else {
+      business = atLocation(publicBusiness, await resolveLocation(publicBusiness, body.locationId));
+    }
     // Standard pages are profile-only — no booking
     if (business.pageType === 'standard') {
       throw new ApiError(httpStatus.CONFLICT, 'This business does not take bookings on Briteside');
@@ -1126,7 +1330,9 @@ export class BusinessBookingService {
     if (!business.acceptingBookings || (await BusinessCommissionService.isBookingPaused(business.id))) {
       throw new ApiError(httpStatus.CONFLICT, 'This business is not taking bookings right now');
     }
-    const service = await loadService(business, body.serviceId);
+    const service = offer ? await offerService(business, offer) : await loadService(business, body.serviceId);
+    // "Inquire for pricing" is booked only through a custom offer
+    if (!offer && service.priceOnRequest) throw quoteRequired();
 
     // The service's questionnaire, or the business's general booking questions
     const questionnaire = await loadQuestionnaire(business, service);
@@ -1172,6 +1378,15 @@ export class BusinessBookingService {
 
     // Lock, re-check the slot (or the session's seats), insert the hold — all in one transaction
     const booking = await db.transaction(async tx => {
+      if (offer) {
+        // One payable hold per offer: an earlier unpaid attempt (another tab, a retry)
+        // stops holding its slot, and paying it late is refunded by the webhook.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${'business_offer:' + offer.id}))`);
+        await tx
+          .update(businessBookings)
+          .set({ status: 'expired', updatedAt: new Date() })
+          .where(and(eq(businessBookings.customOfferId, offer.id), eq(businessBookings.status, 'awaiting_payment')));
+      }
       const { staff, slot } = group
         ? await holdGroupSeats(tx, business, service, body.groupSessionId, partySize)
         : await holdSlot(tx, business, bookedService, candidates, body);
@@ -1180,7 +1395,9 @@ export class BusinessBookingService {
         .insert(businessBookings)
         .values({
           businessId: business.id,
-          serviceId: service.id,
+          // null for an offer of a one-off service (name / length snapshotted below)
+          serviceId: service.id ?? null,
+          customOfferId: offer?.id ?? null,
           staffId: staff.id,
           customerId: user?.id ?? null,
           customerName,
@@ -1195,6 +1412,7 @@ export class BusinessBookingService {
           startAt: new Date(slot.startAt),
           endAt: new Date(slot.endAt),
           timezone: business.timezone,
+          locationId: business.locationId,
           groupSessionId: group ? body.groupSessionId : null,
           partySize,
           status: 'awaiting_payment',
@@ -1510,6 +1728,15 @@ export class BusinessBookingService {
       return;
     }
 
+    // Booked from a custom price → the offer is done (even if it expired mid-checkout)
+    if (booking.customOfferId) {
+      await db
+        .update(businessCustomOffers)
+        .set({ status: 'booked', bookingId: booking.id, bookedAt: now, updatedAt: now })
+        .where(and(eq(businessCustomOffers.id, booking.customOfferId), ne(businessCustomOffers.status, 'booked')))
+        .catch(err => logger.error(`[businessBooking] offer ${booking.customOfferId} not marked booked: ${err.message}`));
+    }
+
     // Stripe's processing fee is bookkeeping only — recorded after the claim
     if (stripe && stripeSession.payment_intent) {
       try {
@@ -1793,8 +2020,12 @@ export class BusinessBookingService {
 
   // ── Business dashboard ─────────────────────────────────────────────────────
 
-  static async listForBusiness(business, access, { from, to, status, staffId, page = 1, limit = 50 }) {
+  static async listForBusiness(business, access, { from, to, status, staffId, locationId, page = 1, limit = 50 }) {
     const conds = [eq(businessBookings.businessId, business.id), ne(businessBookings.status, 'awaiting_payment'), ne(businessBookings.status, 'expired')];
+    if (locationId) conds.push(eq(businessBookings.locationId, locationId));
+    // Location managers: only their locations
+    const scope = scopedLocationIds(access);
+    if (scope) conds.push(inArray(businessBookings.locationId, scope));
     if (from) conds.push(gte(businessBookings.startAt, new Date(from)));
     if (to) conds.push(lte(businessBookings.startAt, new Date(to)));
     if (status?.length) conds.push(inArray(businessBookings.status, status));
@@ -1832,6 +2063,7 @@ export class BusinessBookingService {
 
     const fullIds = owned.map(b => b.id);
     const ownStaff = []; // [{ businessId, staffId }] for staff-role members
+    const scopedTo = []; // [{ businessId, locationIds }] for location managers
     const manageIds = new Set(fullIds);
     // Refunds: owners, admins and managers (not staff-role members)
     const refundIds = new Set(fullIds);
@@ -1845,6 +2077,8 @@ export class BusinessBookingService {
       }
       if (m.role === 'staff') {
         if (m.staffId) ownStaff.push({ businessId: m.businessId, staffId: m.staffId });
+      } else if (m.locationIds?.length) {
+        scopedTo.push({ businessId: m.businessId, locationIds: m.locationIds });
       } else {
         fullIds.push(m.businessId);
       }
@@ -1853,6 +2087,9 @@ export class BusinessBookingService {
     const scope = [
       ...(fullIds.length ? [inArray(businessBookings.businessId, fullIds)] : []),
       ...ownStaff.map(s => and(eq(businessBookings.businessId, s.businessId), eq(businessBookings.staffId, s.staffId))),
+      ...scopedTo.map(s =>
+        and(eq(businessBookings.businessId, s.businessId), inArray(businessBookings.locationId, s.locationIds))
+      ),
     ];
     if (!scope.length) return { bookings: [], businesses: 0 };
 
@@ -1863,7 +2100,10 @@ export class BusinessBookingService {
 
     const rows = await db.query.businessBookings.findMany({
       where: and(...conds),
-      with: { business: { columns: { id: true, slug: true, name: true, logoUrl: true, timezone: true } } },
+      with: {
+        business: { columns: { id: true, slug: true, name: true, logoUrl: true, timezone: true } },
+        location: LOCATION_COLUMNS,
+      },
       orderBy: [asc(businessBookings.startAt)],
       limit,
     });
@@ -1874,7 +2114,7 @@ export class BusinessBookingService {
         canManage: manageIds.has(b.businessId),
         canRefund: refundIds.has(b.businessId),
       })),
-      businesses: new Set([...fullIds, ...ownStaff.map(s => s.businessId)]).size,
+      businesses: new Set([...fullIds, ...ownStaff.map(s => s.businessId), ...scopedTo.map(s => s.businessId)]).size,
     };
   }
 
@@ -1893,7 +2133,7 @@ export class BusinessBookingService {
       business,
       ['pending'],
       { status: 'declined', cancelledAt: new Date(), cancelledBy: 'business', cancellationReason: reason ?? null, acceptDeadline: null },
-      { serviceRefundCents: booking.amountPaidCents, refundFee: true, reason: 'business_declined' }
+      { serviceRefundCents: booking.amountPaidCents, reason: 'business_declined' }
     );
     emailCustomer(row, business, `Booking request declined: ${business.name}`, `${business.name} couldn’t take this booking`, [
       ['Refund', `${money(refund.refundedCents)} back to your card`],
@@ -1901,7 +2141,7 @@ export class BusinessBookingService {
     return { booking: serializeBooking(row, { forBusiness: true }), refund };
   }
 
-  /** Business cancels: customer always gets everything back, booking fee included. */
+  /** Business cancels: customer gets the full service payment back (the booking fee is non-refundable). */
   static async cancelByBusiness(business, bookingId, access, reason) {
     const booking = await getBookingForBusiness(business, bookingId, access);
     if (!['pending', 'confirmed'].includes(booking.status)) {
@@ -1912,7 +2152,7 @@ export class BusinessBookingService {
       business,
       ['pending', 'confirmed'],
       { status: 'cancelled', cancelledAt: new Date(), cancelledBy: 'business', cancellationReason: reason ?? null },
-      { serviceRefundCents: booking.amountPaidCents, refundFee: true, reason: 'business_cancelled' }
+      { serviceRefundCents: booking.amountPaidCents, reason: 'business_cancelled' }
     );
     emailCustomer(row, business, `Booking cancelled: ${business.name}`, `${business.name} cancelled your booking`, [
       ['Refund', `${money(refund.refundedCents)} back to your card`],
@@ -1979,7 +2219,6 @@ export class BusinessBookingService {
 
     const refund = await refundBooking(booking, business, {
       serviceRefundCents: amount,
-      refundFee: false,
       // Unique per refund (refundedCents changes after each), so partial refunds don't collide
       reason: `business_refund_${booking.refundedCents}`,
     });
@@ -2021,8 +2260,8 @@ export class BusinessBookingService {
    * hours are allowed (it's the business's own calendar); clashes with another
    * booking for the same staff member need `allowOverlap`.
    */
-  static async createManual(business, access, body) {
-    if (business.pageType === 'standard') {
+  static async createManual(base, access, body) {
+    if (base.pageType === 'standard') {
       throw new ApiError(httpStatus.CONFLICT, 'Switch your page to Appointments to take bookings');
     }
     if (access?.role === 'staff' && body.staffId !== access.staffId) {
@@ -2031,11 +2270,29 @@ export class BusinessBookingService {
     const staff = await db.query.businessStaff.findFirst({
       where: and(
         eq(businessStaff.id, body.staffId),
-        eq(businessStaff.businessId, business.id),
+        eq(businessStaff.businessId, base.id),
         isNull(businessStaff.deletedAt)
       ),
     });
     if (!staff) throw new ApiError(httpStatus.NOT_FOUND, 'That staff member no longer exists. Refresh and try again.');
+
+    // Where the visit is: the chosen location, else the staff member's only one,
+    // else the manager's first location, else the main one
+    const scope = scopedLocationIds(access);
+    let locationId = body.locationId;
+    if (!locationId) {
+      const ids = (await staffLocationMap([staff.id])).get(staff.id) ?? [];
+      if (ids.length === 1) locationId = ids[0];
+      else if (scope) locationId = scope[0];
+    }
+    const location = await resolveLocation(base, locationId);
+    if (scope && !scope.includes(location?.id)) {
+      throw new ApiError(httpStatus.FORBIDDEN, "You don't manage that location");
+    }
+    if (location && !(await filterStaffByLocation([staff], location.id)).length) {
+      throw new ApiError(httpStatus.BAD_REQUEST, `${staff.name} doesn't work at ${location.name}`);
+    }
+    const business = atLocation(base, location);
 
     let service = null;
     if (body.serviceId) service = await loadService(business, body.serviceId);
@@ -2101,6 +2358,7 @@ export class BusinessBookingService {
           startAt,
           endAt,
           timezone: tz,
+          locationId: business.locationId,
           status: 'confirmed',
           confirmedAt: new Date(),
           paymentModel: 'in_person',
@@ -2165,6 +2423,7 @@ export class BusinessBookingService {
             reschedulingNoticeDays: true,
           },
         },
+        location: LOCATION_COLUMNS,
       },
       orderBy: [tab === 'past' ? desc(businessBookings.startAt) : asc(businessBookings.startAt)],
       limit: 100,
@@ -2271,7 +2530,7 @@ export class BusinessBookingService {
           booking.business,
           ['pending'],
           { status: 'expired', cancelledAt: new Date(), cancelledBy: 'system', cancellationReason: 'The business did not respond in time' },
-          { serviceRefundCents: booking.amountPaidCents, refundFee: true, reason: 'request_expired' }
+          { serviceRefundCents: booking.amountPaidCents, reason: 'request_expired' }
         );
         emailCustomer(row, booking.business, `Booking request expired: ${booking.business.name}`, 'Your request expired', [
           ['Refund', `${money(refund.refundedCents)} back to your card`],

@@ -19,6 +19,13 @@ import {
   overlappingBookings,
   seatsTakenBySession,
 } from './businessBooking.service.js';
+import {
+  filterStaffByLocation,
+  isLocationClosed,
+  resolveLocation,
+  scopedLocationIds,
+  serviceOfferedAt,
+} from './businessLocation.service.js';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -32,12 +39,16 @@ const ROSTER_STATUSES = ['pending', 'confirmed', 'completed', 'no_show'];
  * (everyone booked is refunded in full). Staff-role members: their own sessions.
  */
 export class BusinessGroupSessionService {
-  static async list(business, access, { from, to, serviceId } = {}) {
+  static async list(business, access, { from, to, serviceId, locationId } = {}) {
     const conds = [eq(businessGroupSessions.businessId, business.id)];
+    if (locationId) conds.push(eq(businessGroupSessions.locationId, locationId));
     conds.push(gte(businessGroupSessions.endAt, from ? new Date(from) : new Date(Date.now() - 86_400_000)));
     if (to) conds.push(lte(businessGroupSessions.startAt, new Date(to)));
     if (serviceId) conds.push(eq(businessGroupSessions.serviceId, serviceId));
     if (access?.role === 'staff') conds.push(eq(businessGroupSessions.staffId, access.staffId));
+    // Location managers: only their locations
+    const scope = scopedLocationIds(access);
+    if (scope) conds.push(inArray(businessGroupSessions.locationId, scope));
 
     const sessions = await db.query.businessGroupSessions.findMany({
       where: and(...conds),
@@ -68,7 +79,7 @@ export class BusinessGroupSessionService {
    * Schedule one session per date at `time` (business-local). All-or-nothing:
    * if the host is busy on any date, nothing is created and the clashes are listed.
    */
-  static async create(business, access, { serviceId, staffId, dates, time, capacity }) {
+  static async create(business, access, { serviceId, staffId, locationId, dates, time, capacity }) {
     if (access?.role === 'staff' && staffId !== access.staffId) {
       throw new ApiError(httpStatus.FORBIDDEN, 'You can only schedule sessions you host');
     }
@@ -78,7 +89,7 @@ export class BusinessGroupSessionService {
         eq(businessServices.businessId, business.id),
         isNull(businessServices.deletedAt)
       ),
-      with: { staffLinks: true },
+      with: { staffLinks: true, locationLinks: true },
     });
     if (!service) throw new ApiError(httpStatus.NOT_FOUND, 'That service no longer exists. Refresh and try again.');
     if (!isGroup(service)) {
@@ -91,8 +102,20 @@ export class BusinessGroupSessionService {
     if (!service.allStaff && !service.staffLinks.some(l => l.staffId === staff.id)) {
       throw new ApiError(httpStatus.BAD_REQUEST, `${staff.name} doesn't offer ${service.name}. Pick another host.`);
     }
+    // Runs at the chosen location (main one, or a manager's first one, when not given), in its timezone
+    const scope = scopedLocationIds(access);
+    const location = await resolveLocation(business, locationId ?? scope?.[0]);
+    if (scope && !scope.includes(location?.id)) {
+      throw new ApiError(httpStatus.FORBIDDEN, "You don't manage that location");
+    }
+    if (location && !(await filterStaffByLocation([staff], location.id)).length) {
+      throw new ApiError(httpStatus.BAD_REQUEST, `${staff.name} doesn't work at ${location.name}. Pick another host.`);
+    }
+    if (location && !serviceOfferedAt(service, location.id)) {
+      throw new ApiError(httpStatus.BAD_REQUEST, `${service.name} isn't offered at ${location.name}.`);
+    }
 
-    const tz = business.timezone;
+    const tz = location?.timezone ?? business.timezone;
     const seats = capacity ?? service.capacity;
     const unique = [...new Set(dates)].sort();
     const now = Date.now();
@@ -108,6 +131,22 @@ export class BusinessGroupSessionService {
     }
     if (planned.some(p => p.startAt.getTime() > now + 365 * 86_400_000)) {
       throw new ApiError(httpStatus.BAD_REQUEST, 'Sessions can be scheduled up to a year ahead');
+    }
+    // Not on days the location is closed
+    if (location) {
+      const closed = [];
+      for (const p of planned) if (await isLocationClosed(location.id, p.date)) closed.push(p);
+      if (closed.length) {
+        throw new ApiError(
+          httpStatus.CONFLICT,
+          `${location.name} is closed on ${closed.slice(0, 3).map(p => fmtDay(p.startAt, tz)).join(', ')}${
+            closed.length > 3 ? ` and ${closed.length - 3} more` : ''
+          }. Remove ${closed.length === 1 ? 'that date' : 'those dates'}.`,
+          true,
+          '',
+          { code: 'SESSION_OVERLAP', dates: closed.map(c => c.date) }
+        );
+      }
     }
 
     const created = await db.transaction(async tx => {
@@ -133,6 +172,7 @@ export class BusinessGroupSessionService {
             businessId: business.id,
             serviceId: service.id,
             staffId: staff.id,
+            locationId: location?.id ?? null,
             startAt: p.startAt,
             endAt: p.endAt,
             bufferMins: service.bufferMins,
@@ -173,7 +213,7 @@ export class BusinessGroupSessionService {
 
   /**
    * Cancel a session: no new seats, unfinished checkouts are released, and
-   * everyone booked is cancelled with a full refund (booking fee included) and
+   * everyone booked is cancelled with a full refund of the service payment (the booking fee is non-refundable) and
    * emailed. A refund that fails is reported back; that booking stays as it is
    * so it can be cancelled again from the appointment.
    */
@@ -234,6 +274,10 @@ async function loadSession(business, access, sessionId, tx = db) {
   if (!session || (access?.role === 'staff' && session.staffId !== access.staffId)) {
     throw new ApiError(httpStatus.NOT_FOUND, 'Session not found');
   }
+  const scope = scopedLocationIds(access);
+  if (scope && !scope.includes(session.locationId)) {
+    throw new ApiError(httpStatus.NOT_FOUND, 'Session not found');
+  }
   return session;
 }
 
@@ -247,6 +291,7 @@ function serializeSession(s, taken, roster) {
     serviceName: s.service?.name ?? null,
     staffId: s.staffId,
     staffName: s.staff?.name ?? null,
+    locationId: s.locationId ?? null,
     startAt: s.startAt,
     endAt: s.endAt,
     capacity: s.capacity,

@@ -2,9 +2,8 @@
  * Business accounts — service providers (salons, studios, mobile services…)
  * that list a service menu, bookable staff, and take customer bookings.
  *
- * A user may own many businesses. Owning one requires an active BriteSide
- * Plus subscription; when the owner's Plus lapses the business is hidden from
- * public listings and new bookings are refused (owner dashboard stays usable).
+ * A user may own one business (enforced in BusinessService.create). Business
+ * accounts do not require a BriteSide Plus subscription.
  *
  * Money is stored in integer cents throughout.
  */
@@ -62,6 +61,11 @@ export const businesses = pgTable(
     gallery: jsonb('gallery')
       .notNull()
       .default(sql`'[]'::jsonb`),
+    // Posts shown only at some locations: { "<gallery url>": ["<locationId>", …] }.
+    // A post that isn't listed shows at every location.
+    galleryLocations: jsonb('gallery_locations')
+      .notNull()
+      .default(sql`'{}'::jsonb`),
     // ["Wi-Fi", "Parking", …]
     amenities: jsonb('amenities')
       .notNull()
@@ -73,10 +77,25 @@ export const businesses = pgTable(
     address: text('address'),
     latitude: decimal('latitude', { precision: 10, scale: 7 }),
     longitude: decimal('longitude', { precision: 10, scale: 7 }),
+    // Mobile businesses: how far (miles) from their home base (address / lat-lng) they travel
+    serviceRadiusMiles: integer('service_radius_miles'),
     phone: varchar('phone', { length: 40 }),
     email: varchar('email', { length: 255 }),
     // Public website (http/https only — validated on write)
     websiteUrl: text('website_url'),
+    // Reserve Now (Food & Dining add-on, $20/mo): the page's "Reserve Now" button
+    // opens reservationUrl (their OpenTable / Resy / Tock… page). The link is only
+    // public while reserveNowStatus is 'active' or 'past_due'.
+    reservationUrl: text('reservation_url'),
+    // null (never subscribed) | 'pending' (checkout started) | 'active' | 'past_due' | 'canceled'
+    reserveNowStatus: varchar('reserve_now_status', { length: 20 }),
+    reserveNowSubscriptionId: varchar('reserve_now_subscription_id', { length: 255 }),
+    reserveNowPeriodEnd: timestamp('reserve_now_period_end', { withTimezone: true }),
+    reserveNowCancelAtPeriodEnd: boolean('reserve_now_cancel_at_period_end').notNull().default(false),
+    // Where "Send inquiry" goes: 'inbox' (owner's Inquiry inbox) | 'email'
+    inquiryChannel: varchar('inquiry_channel', { length: 10 }).notNull().default('email'),
+    // 'email' channel: the address inquiries go to (null = the contact email)
+    inquiryEmail: varchar('inquiry_email', { length: 255 }),
     // IANA timezone — all "HH:mm" hours/schedules are interpreted in this zone
     timezone: varchar('timezone', { length: 64 }).notNull().default('America/New_York'),
 
@@ -106,7 +125,7 @@ export const businesses = pgTable(
     allowCustomerRescheduling: boolean('allow_customer_rescheduling').notNull().default(false),
     reschedulingNoticeDays: integer('rescheduling_notice_days'),
     // Policies — structured, drive automatic refunds on customer cancellation:
-    //   cancelled >= freeCancellationHours before start → full refund (incl. booking fee)
+    //   cancelled >= freeCancellationHours before start → full service refund (booking fee is non-refundable)
     //   otherwise → lateCancellationRefundPercent of the amount paid for the service
     freeCancellationHours: integer('free_cancellation_hours').notNull().default(24),
     lateCancellationRefundPercent: integer('late_cancellation_refund_percent')
@@ -141,6 +160,56 @@ export const businesses = pgTable(
     ),
     check('chk_businesses_free_cancel_hours', sql`${table.freeCancellationHours} >= 0`),
     check('chk_businesses_page_type', sql`${table.pageType} IN ('appointments', 'standard')`),
+  ]
+);
+
+// ─── LOCATIONS (branches of one business) ───────────────────────────────────
+/**
+ * Where a business operates. Every business has exactly one primary location;
+ * owners can add more branches. Each location has its own address/map pin and
+ * its own weekly hours + timezone (the outer bound for booking slots there).
+ *
+ * The primary location is mirrored onto the flat location columns of
+ * `businesses` (city, address, lat/lng, timezone, hours, locationType) so the
+ * directory, search and older code keep reading one place.
+ */
+export const businessLocations = pgTable(
+  'business_locations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    // Short label customers pick from, e.g. "Downtown"
+    name: varchar('name', { length: 120 }).notNull(),
+    // 'physical' | 'mobile'
+    locationType: varchar('location_type', { length: 20 }).notNull().default('physical'),
+    city: varchar('city', { length: 120 }).notNull(),
+    address: text('address'),
+    latitude: decimal('latitude', { precision: 10, scale: 7 }),
+    longitude: decimal('longitude', { precision: 10, scale: 7 }),
+    // Mobile locations: address / lat-lng are the home base (owner-only; customers
+    // see the city and a rounded centre) and this is how far (miles) they travel
+    serviceRadiusMiles: integer('service_radius_miles'),
+    // Optional per-branch phone; falls back to the business phone
+    phone: varchar('phone', { length: 40 }),
+    timezone: varchar('timezone', { length: 64 }).notNull().default('America/New_York'),
+    // Same shape as businesses.hours
+    hours: jsonb('hours').notNull(),
+    isPrimary: boolean('is_primary').notNull().default(false),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    // Soft delete — past bookings keep pointing at this row
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  },
+  table => [
+    index('idx_business_locations_business').on(table.businessId),
+    index('idx_business_locations_city').on(table.city),
+    uniqueIndex('uq_business_locations_primary')
+      .on(table.businessId)
+      .where(sql`${table.isPrimary} AND ${table.deletedAt} IS NULL`),
+    check('chk_business_locations_type', sql`${table.locationType} IN ('physical', 'mobile')`),
   ]
 );
 
@@ -327,6 +396,10 @@ export const businessServices = pgTable(
 
     durationMins: integer('duration_mins').notNull(),
     priceCents: integer('price_cents').notNull(),
+    // "Inquire for pricing": no public price and no self-booking. Customers send an
+    // inquiry and the business answers with a custom price (business_custom_offers).
+    // priceCents is then only the menu's internal guide (may be 0).
+    priceOnRequest: boolean('price_on_request').notNull().default(false),
     // NULL = businesses.defaultPaymentModel
     paymentModel: varchar('payment_model', { length: 20 }),
     // Only for 'deposit'. A percentage wins over a fixed amount; neither = 20% of price.
@@ -351,6 +424,11 @@ export const businessServices = pgTable(
     maxGuests: integer('max_guests'),
     minimumTotalCents: integer('minimum_total_cents'),
     bufferMins: integer('buffer_mins').notNull().default(10),
+    // Sale: salePercent off the price (incl. per-location prices) between the two times.
+    // NULL percent = no sale; NULL start = from now; NULL end = until the business ends it.
+    salePercent: integer('sale_percent'),
+    saleStartsAt: timestamp('sale_starts_at', { withTimezone: true }),
+    saleEndsAt: timestamp('sale_ends_at', { withTimezone: true }),
     // true = every active staff member can perform it; false = see business_service_staff
     allStaff: boolean('all_staff').notNull().default(true),
     sortOrder: integer('sort_order').notNull().default(0),
@@ -372,7 +450,11 @@ export const businessServices = pgTable(
       'chk_business_services_session_type',
       sql`${table.sessionType} IN ('individual', 'group', 'private_group')`
     ),
-    check('chk_business_services_capacity', sql`${table.capacity} IS NULL OR ${table.capacity} BETWEEN 1 AND 500`),
+    check(
+      'chk_business_services_sale_percent',
+      sql`${table.salePercent} IS NULL OR ${table.salePercent} BETWEEN 1 AND 90`
+    ),
+    check('chk_business_services_capacity',sql`${table.capacity} IS NULL OR ${table.capacity} BETWEEN 1 AND 500`),
     check(
       'chk_business_services_guests',
       sql`${table.minGuests} IS NULL OR ${table.maxGuests} IS NULL OR (${table.minGuests} >= 1 AND ${table.minGuests} <= ${table.maxGuests})`
@@ -396,6 +478,113 @@ export const businessServiceStaff = pgTable(
   ]
 );
 
+/**
+ * Locations a service is offered at. No rows = offered at every location of the
+ * business (the default, so single-location businesses never need these).
+ */
+export const businessServiceLocations = pgTable(
+  'business_service_locations',
+  {
+    serviceId: uuid('service_id')
+      .notNull()
+      .references(() => businessServices.id, { onDelete: 'cascade' }),
+    locationId: uuid('location_id')
+      .notNull()
+      .references(() => businessLocations.id, { onDelete: 'cascade' }),
+  },
+  table => [
+    primaryKey({ columns: [table.serviceId, table.locationId] }),
+    index('idx_business_service_locations_location').on(table.locationId),
+  ]
+);
+
+/**
+ * A service's price / length at one location, when it differs there
+ * (null = the service's own value). Fees, commission and % deposits follow.
+ */
+export const businessServiceLocationOverrides = pgTable(
+  'business_service_location_overrides',
+  {
+    serviceId: uuid('service_id')
+      .notNull()
+      .references(() => businessServices.id, { onDelete: 'cascade' }),
+    locationId: uuid('location_id')
+      .notNull()
+      .references(() => businessLocations.id, { onDelete: 'cascade' }),
+    priceCents: integer('price_cents'),
+    durationMins: integer('duration_mins'),
+  },
+  table => [
+    primaryKey({ columns: [table.serviceId, table.locationId] }),
+    check('chk_business_service_location_overrides_price', sql`${table.priceCents} IS NULL OR ${table.priceCents} >= 0`),
+    check(
+      'chk_business_service_location_overrides_duration',
+      sql`${table.durationMins} IS NULL OR ${table.durationMins} BETWEEN 5 AND 1440`
+    ),
+  ]
+);
+
+/**
+ * A staff member's weekly hours at one location (same shape as businesses.hours).
+ * Once someone has any of these, they're bookable at a location only inside
+ * that location's schedule — e.g. Mon/Wed Downtown, Fri Uptown.
+ */
+export const businessStaffLocationSchedules = pgTable(
+  'business_staff_location_schedules',
+  {
+    staffId: uuid('staff_id')
+      .notNull()
+      .references(() => businessStaff.id, { onDelete: 'cascade' }),
+    locationId: uuid('location_id')
+      .notNull()
+      .references(() => businessLocations.id, { onDelete: 'cascade' }),
+    schedule: jsonb('schedule').notNull(),
+  },
+  table => [
+    primaryKey({ columns: [table.staffId, table.locationId] }),
+    index('idx_business_staff_location_schedules_location').on(table.locationId),
+  ]
+);
+
+/** Dates a location is closed (holidays, renovations). Inclusive, location-local. */
+export const businessLocationClosures = pgTable(
+  'business_location_closures',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    locationId: uuid('location_id')
+      .notNull()
+      .references(() => businessLocations.id, { onDelete: 'cascade' }),
+    startDate: date('start_date').notNull(),
+    endDate: date('end_date').notNull(),
+    reason: varchar('reason', { length: 120 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    index('idx_business_location_closures_location_end').on(table.locationId, table.endDate),
+    check('chk_business_location_closures_range', sql`${table.endDate} >= ${table.startDate}`),
+  ]
+);
+
+/**
+ * Locations a staff member works at. No rows = works at every location of the
+ * business (the default, so single-location businesses never need these).
+ */
+export const businessStaffLocations = pgTable(
+  'business_staff_locations',
+  {
+    staffId: uuid('staff_id')
+      .notNull()
+      .references(() => businessStaff.id, { onDelete: 'cascade' }),
+    locationId: uuid('location_id')
+      .notNull()
+      .references(() => businessLocations.id, { onDelete: 'cascade' }),
+  },
+  table => [
+    primaryKey({ columns: [table.staffId, table.locationId] }),
+    index('idx_business_staff_locations_location').on(table.locationId),
+  ]
+);
+
 // ─── TEAM ACCESS (dashboard users) ──────────────────────────────────────────
 /**
  * Dashboard access for people other than the owner. The owner is implicit
@@ -416,6 +605,11 @@ export const businessTeamMembers = pgTable(
     email: varchar('email', { length: 255 }).notNull(),
     role: varchar('role', { length: 20 }).notNull(),
     staffId: uuid('staff_id').references(() => businessStaff.id, { onDelete: 'cascade' }),
+    // Admins / managers limited to these locations ([] = every location).
+    // They only see and manage bookings, sessions and reports there.
+    locationIds: jsonb('location_ids')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     // 'pending' | 'active' | 'revoked'
     status: varchar('status', { length: 20 }).notNull().default('pending'),
     inviteToken: varchar('invite_token', { length: 64 }).notNull(),
@@ -541,6 +735,11 @@ export const businessBookings = pgTable(
     }),
     // Seats (group session) or guests (private event); 1 for individual bookings
     partySize: integer('party_size').notNull().default(1),
+    // Branch the visit is at (null only for rows from before locations existed)
+    locationId: uuid('location_id').references(() => businessLocations.id, { onDelete: 'set null' }),
+    // Booked from a custom price the business sent (business_custom_offers). The offer's
+    // price is in servicePriceCents; serviceId is null when the offer was a one-off service.
+    customOfferId: uuid('custom_offer_id'),
     // Files the customer attached: [{ key, name, size, type }]. Private bucket —
     // only the business gets short-lived signed links (BusinessAttachmentService).
     attachments: jsonb('attachments')
@@ -585,6 +784,8 @@ export const businessBookings = pgTable(
     index('idx_business_bookings_status').on(table.status),
     index('idx_business_bookings_stripe_session').on(table.stripeSessionId),
     index('idx_business_bookings_payment_intent').on(table.stripePaymentIntentId),
+    index('idx_business_bookings_location_start').on(table.locationId, table.startAt),
+    index('idx_business_bookings_custom_offer').on(table.customOfferId),
     check('chk_business_bookings_time', sql`${table.endAt} > ${table.startAt}`),
   ]
 );
@@ -751,6 +952,7 @@ export const businessesRelations = relations(businesses, ({ one, many }) => ({
   services: many(businessServices),
   teamMembers: many(businessTeamMembers),
   bookings: many(businessBookings),
+  locations: many(businessLocations),
 }));
 
 export const businessStaffRelations = relations(businessStaff, ({ one, many }) => ({
@@ -758,6 +960,8 @@ export const businessStaffRelations = relations(businessStaff, ({ one, many }) =
   user: one(users, { fields: [businessStaff.userId], references: [users.id] }),
   dateOverrides: many(businessStaffDateOverrides),
   serviceLinks: many(businessServiceStaff),
+  locationLinks: many(businessStaffLocations),
+  locationSchedules: many(businessStaffLocationSchedules),
 }));
 
 export const businessStaffDateOverridesRelations = relations(
@@ -776,6 +980,46 @@ export const businessServicesRelations = relations(businessServices, ({ one, man
     references: [businesses.id],
   }),
   staffLinks: many(businessServiceStaff),
+  locationLinks: many(businessServiceLocations),
+  locationOverrides: many(businessServiceLocationOverrides),
+}));
+
+export const businessServiceLocationOverridesRelations = relations(
+  businessServiceLocationOverrides,
+  ({ one }) => ({
+    service: one(businessServices, {
+      fields: [businessServiceLocationOverrides.serviceId],
+      references: [businessServices.id],
+    }),
+  })
+);
+
+export const businessStaffLocationSchedulesRelations = relations(
+  businessStaffLocationSchedules,
+  ({ one }) => ({
+    staff: one(businessStaff, {
+      fields: [businessStaffLocationSchedules.staffId],
+      references: [businessStaff.id],
+    }),
+  })
+);
+
+export const businessLocationClosuresRelations = relations(businessLocationClosures, ({ one }) => ({
+  location: one(businessLocations, {
+    fields: [businessLocationClosures.locationId],
+    references: [businessLocations.id],
+  }),
+}));
+
+export const businessServiceLocationsRelations = relations(businessServiceLocations, ({ one }) => ({
+  service: one(businessServices, {
+    fields: [businessServiceLocations.serviceId],
+    references: [businessServices.id],
+  }),
+  location: one(businessLocations, {
+    fields: [businessServiceLocations.locationId],
+    references: [businessLocations.id],
+  }),
 }));
 
 export const businessServiceStaffRelations = relations(businessServiceStaff, ({ one }) => ({
@@ -815,6 +1059,10 @@ export const businessBookingsRelations = relations(businessBookings, ({ one }) =
     references: [businessStaff.id],
   }),
   customer: one(users, { fields: [businessBookings.customerId], references: [users.id] }),
+  location: one(businessLocations, {
+    fields: [businessBookings.locationId],
+    references: [businessLocations.id],
+  }),
 }));
 
 // ─── ADD-ONS ────────────────────────────────────────────────────────────────
@@ -980,6 +1228,8 @@ export const businessGroupSessions = pgTable(
     staffId: uuid('staff_id')
       .notNull()
       .references(() => businessStaff.id, { onDelete: 'cascade' }),
+    // Branch the session runs at (null only for rows from before locations existed)
+    locationId: uuid('location_id').references(() => businessLocations.id, { onDelete: 'set null' }),
     startAt: timestamp('start_at', { withTimezone: true }).notNull(),
     endAt: timestamp('end_at', { withTimezone: true }).notNull(),
     bufferMins: integer('buffer_mins').notNull().default(0),
@@ -1004,6 +1254,24 @@ export const businessGroupSessionsRelations = relations(businessGroupSessions, (
   business: one(businesses, { fields: [businessGroupSessions.businessId], references: [businesses.id] }),
   service: one(businessServices, { fields: [businessGroupSessions.serviceId], references: [businessServices.id] }),
   staff: one(businessStaff, { fields: [businessGroupSessions.staffId], references: [businessStaff.id] }),
+  location: one(businessLocations, {
+    fields: [businessGroupSessions.locationId],
+    references: [businessLocations.id],
+  }),
+}));
+
+export const businessLocationsRelations = relations(businessLocations, ({ one, many }) => ({
+  business: one(businesses, { fields: [businessLocations.businessId], references: [businesses.id] }),
+  staffLinks: many(businessStaffLocations),
+  closures: many(businessLocationClosures),
+}));
+
+export const businessStaffLocationsRelations = relations(businessStaffLocations, ({ one }) => ({
+  staff: one(businessStaff, { fields: [businessStaffLocations.staffId], references: [businessStaff.id] }),
+  location: one(businessLocations, {
+    fields: [businessStaffLocations.locationId],
+    references: [businessLocations.id],
+  }),
 }));
 
 export const businessQuestionnairesRelations = relations(businessQuestionnaires, ({ one }) => ({
@@ -1011,4 +1279,78 @@ export const businessQuestionnairesRelations = relations(businessQuestionnaires,
     fields: [businessQuestionnaires.businessId],
     references: [businesses.id],
   }),
+}));
+
+// ─── CUSTOM PRICE OFFERS ────────────────────────────────────────────────────
+/**
+ * A custom price a business sends a customer, usually in answer to an inquiry
+ * about an "Inquire for pricing" service (like Digital Services custom offers).
+ * Based on a menu service (serviceId) or a one-off service (serviceId null; name and
+ * length snapshotted here). The customer books it like any service: picks a time,
+ * pays online (booking fee + 5% commission as usual) → the booking carries
+ * customOfferId and the offer becomes 'booked'.
+ *
+ * status: 'pending' (can be booked) | 'booked' | 'declined' (customer) |
+ *         'withdrawn' (business) | 'expired' (past expiresAt — computed on read too)
+ */
+export const businessCustomOffers = pgTable(
+  'business_custom_offers',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    customerId: uuid('customer_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    // Inquiry chat the offer was sent in (the card is a message there)
+    conversationId: uuid('conversation_id'),
+    serviceId: uuid('service_id').references(() => businessServices.id, { onDelete: 'set null' }),
+    serviceName: varchar('service_name', { length: 150 }).notNull(),
+    description: text('description'),
+    durationMins: integer('duration_mins').notNull(),
+    priceCents: integer('price_cents').notNull(),
+    // 'full' | 'deposit' | 'in_person'
+    paymentModel: varchar('payment_model', { length: 20 }).notNull(),
+    // Only for 'deposit' (fixed amount; null = 20% of the price)
+    depositCents: integer('deposit_cents'),
+    // Where it can be booked (null = any location that offers it)
+    locationId: uuid('location_id').references(() => businessLocations.id, { onDelete: 'set null' }),
+    // Who can perform it (null = whoever offers the service / everyone for a one-off)
+    staffId: uuid('staff_id').references(() => businessStaff.id, { onDelete: 'set null' }),
+    note: text('note'),
+    status: varchar('status', { length: 20 }).notNull().default('pending'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    bookingId: uuid('booking_id'),
+    bookedAt: timestamp('booked_at', { withTimezone: true }),
+    declinedAt: timestamp('declined_at', { withTimezone: true }),
+    withdrawnAt: timestamp('withdrawn_at', { withTimezone: true }),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    index('idx_business_custom_offers_business_created').on(table.businessId, table.createdAt),
+    index('idx_business_custom_offers_customer').on(table.customerId),
+    check('chk_business_custom_offers_price', sql`${table.priceCents} > 0`),
+    check('chk_business_custom_offers_duration', sql`${table.durationMins} > 0`),
+    check(
+      'chk_business_custom_offers_status',
+      sql`${table.status} IN ('pending', 'booked', 'declined', 'withdrawn', 'expired')`
+    ),
+  ]
+);
+
+export const businessCustomOffersRelations = relations(businessCustomOffers, ({ one }) => ({
+  business: one(businesses, { fields: [businessCustomOffers.businessId], references: [businesses.id] }),
+  customer: one(users, { fields: [businessCustomOffers.customerId], references: [users.id] }),
+  service: one(businessServices, {
+    fields: [businessCustomOffers.serviceId],
+    references: [businessServices.id],
+  }),
+  location: one(businessLocations, {
+    fields: [businessCustomOffers.locationId],
+    references: [businessLocations.id],
+  }),
+  staff: one(businessStaff, { fields: [businessCustomOffers.staffId], references: [businessStaff.id] }),
 }));

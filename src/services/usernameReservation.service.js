@@ -1,6 +1,8 @@
 import { db } from '../db/index.js';
 import { usernameReservations } from '../db/schema/usernameReservations.js';
 import { users } from '../db/schema/users.js';
+import { businesses } from '../db/schema/businesses.js';
+import { isHandleOnHold, isHeldForPendingSetup } from '../utils/handles.js';
 import { eq, and, or, desc, asc, ilike, sql, ne } from 'drizzle-orm';
 import ApiError from '../utils/api-error.js';
 import httpStatus from 'http-status';
@@ -41,6 +43,29 @@ export function isReservedUsername(username) {
   return RESERVED_USERNAMES.has(username.toLowerCase().trim());
 }
 
+/** ILIKE pattern that matches `s` literally (case-insensitive), not as a wildcard. */
+export const ilikeExact = s => s.replace(/[\\%_]/g, '\\$&');
+
+/**
+ * Personal usernames and business @usernames share one namespace: a name a
+ * business already uses (its slug — deleted businesses keep theirs) can't be
+ * a person's username.
+ */
+async function isBusinessHandle(normalizedUsername) {
+  // Includes a renamed business's old name while it's held for its redirect,
+  // and a name held for someone's unfinished business sign-up
+  if (await isHandleOnHold(normalizedUsername)) return true;
+  if (await isHeldForPendingSetup(normalizedUsername)) return true;
+  const [business] = await db
+    .select({ id: businesses.id })
+    .from(businesses)
+    .where(ilike(businesses.slug, ilikeExact(normalizedUsername)))
+    .limit(1);
+  return !!business;
+}
+
+const BUSINESS_TAKEN_REASON = 'This username is already used by a business';
+
 /**
  * Check if a username is available for reservation
  * Checks both existing users and pending/approved reservations
@@ -67,6 +92,10 @@ export const checkUsernameAvailability = async (username, { excludeUserId } = {}
 
   if (existingUser) {
     return { available: false, reason: 'Username is already taken by an existing user' };
+  }
+
+  if (await isBusinessHandle(normalizedUsername)) {
+    return { available: false, reason: BUSINESS_TAKEN_REASON };
   }
 
   // Check if username has a pending or approved reservation
@@ -377,6 +406,10 @@ export const checkUsernameForRegistration = async (username, email) => {
       canUse: false,
       message: 'This username is already taken',
     };
+  }
+
+  if (await isBusinessHandle(normalizedUsername)) {
+    return { isReserved: false, canUse: false, message: BUSINESS_TAKEN_REASON };
   }
 
   // Check for approved reservation

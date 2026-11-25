@@ -23,6 +23,8 @@ import {
   isHeldFromViewer,
 } from './moderation/mediaModeration.service.js';
 import { BlockService } from './social/block.service.js';
+import { InquiryContactService } from './inquiryContact.service.js';
+import { queueInquiryEmail } from './businessInquiryEmail.service.js';
 function orderUserPair(userId1, userId2) {
   return userId1 < userId2 ? { a: userId1, b: userId2 } : { a: userId2, b: userId1 };
 }
@@ -497,15 +499,25 @@ export class SocialChatService {
     // already vetted by a trusted delivery path (skipModeration) is never
     // re-checked here.
     let finalContent = content;
+    let finalMetadata = metadata;
     let messageModeration = { action: 'keep' };
+    // Inquiries keep contact details hidden until a booking on Briteside unlocks them
+    const contactsUnlocked =
+      messageType === 'inquiry' && (await InquiryContactService.isUnlocked(currentUserId, otherUserId));
     if (!skipModeration && (messageType === 'inquiry' || resolvedIsPriority)) {
       messageModeration = await TextModerationService.assertAllowed({
         entityType: TEXT_ENTITY.MESSAGE,
         entityCreatorId: currentUserId,
         texts: [content],
-        mask: true,
+        mask: !contactsUnlocked,
       });
       finalContent = messageModeration.texts[0];
+    }
+    if (messageType === 'inquiry' && !contactsUnlocked) {
+      ({ content: finalContent, metadata: finalMetadata } = InquiryContactService.hide({
+        content: finalContent,
+        metadata,
+      }));
     }
 
     const [msg] = await db
@@ -517,7 +529,7 @@ export class SocialChatService {
         content: finalContent,
         replyToId: replyToId || null,
         isPriority: resolvedIsPriority,
-        metadata,
+        metadata: finalMetadata,
         isSeen: false,
         createdBy: currentUserId,
         updatedBy: currentUserId,
@@ -529,6 +541,15 @@ export class SocialChatService {
         .update(socialConversations)
         .set({ lastMessageAt: msg.createdAt })
         .where(eq(socialConversations.id, convo.id));
+    } else {
+      // Business page inquiry → also emailed when the business takes inquiries by email
+      queueInquiryEmail({
+        senderId: currentUserId,
+        recipientId: otherUserId,
+        conversationId: convo.id,
+        content: msg.content,
+        metadata: msg.metadata,
+      });
     }
 
     await TextModerationService.recordIfFlagged(messageModeration, {
@@ -703,23 +724,37 @@ export class SocialChatService {
 
     // General (private 1:1) conversation is NOT moderated — only inquiry + priority.
     let finalContent = content;
+    let finalMetadata = metadata;
     let messageModeration = { action: 'keep' };
+    // Edits can't sneak contact details into an inquiry either
+    let contactsUnlocked = false;
+    if (message.messageType === 'inquiry') {
+      const convo = await this.getConversation(currentUserId, message.conversationId);
+      const otherUserId = convo.userAId === currentUserId ? convo.userBId : convo.userAId;
+      contactsUnlocked = await InquiryContactService.isUnlocked(currentUserId, otherUserId);
+    }
     if (message.messageType === 'inquiry' || message.isPriority) {
       messageModeration = await TextModerationService.assertAllowed({
         entityType: TEXT_ENTITY.MESSAGE,
         entityId: messageId,
         entityCreatorId: currentUserId,
         texts: [content],
-        mask: true,
+        mask: !contactsUnlocked,
       });
       finalContent = messageModeration.texts[0];
+    }
+    if (message.messageType === 'inquiry' && !contactsUnlocked) {
+      ({ content: finalContent, metadata: finalMetadata } = InquiryContactService.hide({
+        content: finalContent,
+        metadata,
+      }));
     }
 
     await db
       .update(socialMessages)
       .set({
         content: finalContent,
-        metadata,
+        metadata: finalMetadata,
         updatedBy: currentUserId,
         updatedAt: new Date(),
       })

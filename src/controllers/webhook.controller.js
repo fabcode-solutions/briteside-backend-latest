@@ -30,6 +30,7 @@ import { PriorityMessageService } from '../services/priorityMessage.service.js';
 import { TalentSessionService } from '../services/talentSession.service.js';
 import { BusinessBookingService } from '../services/businessBooking.service.js';
 import { BusinessCommissionService } from '../services/businessCommission.service.js';
+import { BusinessReserveNowService, RESERVE_NOW_TYPE } from '../services/businessReserveNow.service.js';
 import { ShopOrderService } from '../services/shop/shopOrder.service.js';
 import { ShopCustomOfferService } from '../services/shop/shopCustomOffer.service.js';
 import { handleDisputeCreated, handleDisputeClosed } from '../services/paymentDispute.service.js';
@@ -100,6 +101,11 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
       // Business paid its in-person commission from the dashboard
       if (session.metadata?.type === 'business_commission') {
         await BusinessCommissionService.handleCheckoutCompleted(session);
+        return;
+      }
+      // Restaurant subscribed to Reserve Now ($20/mo) — not a Plus subscription
+      if (session.metadata?.type === RESERVE_NOW_TYPE) {
+        await BusinessReserveNowService.handleCheckoutCompleted(session);
         return;
       }
 
@@ -247,6 +253,8 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
       const sub = event.data.object;
       if (sub.metadata?.type === 'group_subscription') {
         await GroupSubscriptionService.handleSubscriptionUpdated(sub);
+      } else if (sub.metadata?.type === RESERVE_NOW_TYPE) {
+        await BusinessReserveNowService.handleSubscriptionChanged(sub);
       } else {
         await SubscriptionService.handleSubscriptionUpdated(sub);
       }
@@ -254,13 +262,15 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
       // BriteSide Plus only — group subscriptions don't offer trials.
       // Requires trial_will_end enabled for this endpoint in the Stripe Dashboard.
       const sub = event.data.object;
-      if (sub.metadata?.type !== 'group_subscription') {
+      if (sub.metadata?.type !== 'group_subscription' && sub.metadata?.type !== RESERVE_NOW_TYPE) {
         await SubscriptionService.handleTrialWillEnd(sub);
       }
     } else if (event.type === 'customer.subscription.deleted') {
       const sub = event.data.object;
       if (sub.metadata?.type === 'group_subscription') {
         await GroupSubscriptionService.handleSubscriptionDeleted(sub);
+      } else if (sub.metadata?.type === RESERVE_NOW_TYPE) {
+        await BusinessReserveNowService.handleSubscriptionChanged(sub);
       } else {
         await SubscriptionService.handleSubscriptionDeleted(sub);
       }
@@ -270,6 +280,9 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
         const paidSub = await stripe.subscriptions.retrieve(paidInvoice.subscription);
         if (paidSub.metadata?.type === 'group_subscription') {
           await GroupSubscriptionService.handleInvoicePaid(paidInvoice);
+        } else if (paidSub.metadata?.type === RESERVE_NOW_TYPE) {
+          // Renewal: status / period come from customer.subscription.updated — just re-sync
+          await BusinessReserveNowService.handleSubscriptionChanged(paidSub);
         } else {
           await SubscriptionService.handleInvoicePaid(paidInvoice);
         }
@@ -282,6 +295,8 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
         const stripeSub = await stripe.subscriptions.retrieve(invoice.subscription);
         if (stripeSub.metadata?.type === 'group_subscription') {
           await GroupSubscriptionService.handleInvoicePaymentFailed(invoice);
+        } else if (stripeSub.metadata?.type === RESERVE_NOW_TYPE) {
+          await BusinessReserveNowService.handleSubscriptionChanged(stripeSub);
         } else {
           await SubscriptionService.handleInvoicePaymentFailed(invoice);
         }

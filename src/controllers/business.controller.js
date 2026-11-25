@@ -1,13 +1,19 @@
 import httpStatus from 'http-status';
 import { catchAsync } from '../utils/catch-async.js';
+import ApiError from '../utils/api-error.js';
 import { BusinessService } from '../services/business.service.js';
 import { BusinessBookingService } from '../services/businessBooking.service.js';
 import { BusinessGroupSessionService } from '../services/businessGroupSession.service.js';
 import { BusinessGalleryService } from '../services/businessGallery.service.js';
 import { BusinessCommissionService } from '../services/businessCommission.service.js';
+import { BusinessReserveNowService } from '../services/businessReserveNow.service.js';
 import { BusinessReviewService } from '../services/businessReview.service.js';
 import { BusinessEarningsService } from '../services/businessEarnings.service.js';
 import { BusinessWallService } from '../services/businessWall.service.js';
+import { BusinessInquiryService } from '../services/businessInquiry.service.js';
+import { BusinessLocationService } from '../services/businessLocation.service.js';
+import { BusinessCustomOfferService } from '../services/businessCustomOffer.service.js';
+import { BUSINESS_HANDLE_RE } from '../validations/business.validation.js';
 
 // ─── Public ─────────────────────────────────────────────────────────────────
 export const getCategories = catchAsync(async (req, res) => {
@@ -24,6 +30,21 @@ export const getPublicBusiness = catchAsync(async (req, res) => {
   res.json({ success: true, data: { business } });
 });
 
+/** { handle, valid, available } — `handle` is normalized (no @, lowercase). */
+export const checkHandleAvailable = catchAsync(async (req, res) => {
+  const query = req.validatedQuery ?? req.query;
+  const handle = String(query.handle ?? '').trim().replace(/^@/, '').toLowerCase();
+  const valid = BUSINESS_HANDLE_RE.test(handle);
+  // Signed in (optional): a name held for their own business sign-up is available to them
+  const available =
+    valid &&
+    (await BusinessService.isHandleAvailable(handle, {
+      forBusinessId: query.businessId,
+      forUserId: req.user?.id,
+    }));
+  res.json({ success: true, data: { handle, valid, available } });
+});
+
 export const quoteFees = catchAsync(async (req, res) => {
   const priceCents = Math.max(0, parseInt(req.query.priceCents, 10) || 0);
   res.json({ success: true, data: BusinessService.quoteFees(priceCents) });
@@ -33,6 +54,22 @@ export const quoteFees = catchAsync(async (req, res) => {
 export const listMyBusinesses = catchAsync(async (req, res) => {
   const businesses = await BusinessService.listMine(req.user.id);
   res.json({ success: true, data: { businesses } });
+});
+
+// Sign-up's business choices, kept until the business is created (any device)
+export const getPendingSetup = catchAsync(async (req, res) => {
+  const setup = await BusinessService.getPendingSetup(req.user.id);
+  res.json({ success: true, data: { setup } });
+});
+
+export const savePendingSetup = catchAsync(async (req, res) => {
+  const setup = await BusinessService.savePendingSetup(req.user.id, req.body);
+  res.json({ success: true, data: { setup } });
+});
+
+export const clearPendingSetup = catchAsync(async (req, res) => {
+  await BusinessService.clearPendingSetup(req.user.id);
+  res.status(httpStatus.NO_CONTENT).send();
 });
 
 export const createBusiness = catchAsync(async (req, res) => {
@@ -50,9 +87,23 @@ export const updateBusiness = catchAsync(async (req, res) => {
   res.json({ success: true, data: { business } });
 });
 
+/** Owner / admin only: the @username is the business's identity and URL. */
+export const updateBusinessHandle = catchAsync(async (req, res) => {
+  if (!['owner', 'admin'].includes(req.businessAccess?.role)) {
+    throw new ApiError(httpStatus.FORBIDDEN, 'Only the owner or an admin can change the business @username');
+  }
+  const business = await BusinessService.changeHandle(req.business, req.body.handle);
+  res.json({ success: true, data: { business } });
+});
+
 export const updatePolicies = catchAsync(async (req, res) => {
   const business = await BusinessService.update(req.business, req.body);
   res.json({ success: true, data: { business } });
+});
+
+export const setServiceSale = catchAsync(async (req, res) => {
+  const services = await BusinessService.setServiceSale(req.business, req.body);
+  res.json({ success: true, data: { services } });
 });
 
 export const saveAddOns = catchAsync(async (req, res) => {
@@ -120,6 +171,27 @@ export const deleteService = catchAsync(async (req, res) => {
 });
 
 // ─── Staff ──────────────────────────────────────────────────────────────────
+// Locations (branches)
+export const createLocation = catchAsync(async (req, res) => {
+  const location = await BusinessLocationService.create(req.business, req.body);
+  res.status(httpStatus.CREATED).json({ success: true, data: { location } });
+});
+
+export const updateLocation = catchAsync(async (req, res) => {
+  const location = await BusinessLocationService.update(req.business, req.params.locationId, req.body);
+  res.json({ success: true, data: { location } });
+});
+
+export const makePrimaryLocation = catchAsync(async (req, res) => {
+  const location = await BusinessLocationService.makePrimary(req.business, req.params.locationId);
+  res.json({ success: true, data: { location } });
+});
+
+export const deleteLocation = catchAsync(async (req, res) => {
+  await BusinessLocationService.remove(req.business, req.params.locationId);
+  res.json({ success: true });
+});
+
 export const createStaff = catchAsync(async (req, res) => {
   const staff = await BusinessService.createStaff(req.business, req.body);
   res.status(httpStatus.CREATED).json({ success: true, data: { staff } });
@@ -185,9 +257,40 @@ export const updateTeamMember = catchAsync(async (req, res) => {
     req.business,
     req.user,
     req.params.memberId,
-    req.body.role
+    req.body.role,
+    req.body.locationIds
   );
   res.json({ success: true, data: { member } });
+});
+
+export const updateStaffLocationSchedules = catchAsync(async (req, res) => {
+  const staff = await BusinessService.updateStaffLocationSchedules(
+    req.business,
+    req.params.staffId,
+    req.body.schedules,
+    req.businessAccess
+  );
+  res.json({ success: true, data: { staff } });
+});
+
+export const addLocationClosure = catchAsync(async (req, res) => {
+  const data = await BusinessLocationService.addClosure(
+    req.business,
+    req.params.locationId,
+    req.body,
+    req.businessAccess
+  );
+  res.status(httpStatus.CREATED).json({ success: true, data });
+});
+
+export const removeLocationClosure = catchAsync(async (req, res) => {
+  await BusinessLocationService.removeClosure(
+    req.business,
+    req.params.locationId,
+    req.params.closureId,
+    req.businessAccess
+  );
+  res.json({ success: true });
 });
 
 export const revokeTeamMember = catchAsync(async (req, res) => {
@@ -213,7 +316,8 @@ export const getBookingQuote = catchAsync(async (req, res) => {
     req.params.idOrSlug,
     query.serviceId,
     query.addOnIds,
-    query.partySize ?? 1
+    query.partySize ?? 1,
+    query.locationId
   );
   res.json({ success: true, data: { pricing } });
 });
@@ -308,7 +412,11 @@ export const unlikeGalleryComment = catchAsync(async (req, res) => {
 
 export const listPublicGroupSessions = catchAsync(async (req, res) => {
   const query = req.validatedQuery ?? req.query;
-  const data = await BusinessBookingService.listPublicGroupSessions(req.params.idOrSlug, query.serviceId);
+  const data = await BusinessBookingService.listPublicGroupSessions(
+    req.params.idOrSlug,
+    query.serviceId,
+    query.locationId
+  );
   res.json({ success: true, data });
 });
 
@@ -367,6 +475,45 @@ export const listMyBookings = catchAsync(async (req, res) => {
 
 export const cancelMyBooking = catchAsync(async (req, res) => {
   const data = await BusinessBookingService.cancelByCustomer(req.user, req.params.bookingId, req.body?.reason);
+  res.json({ success: true, data });
+});
+
+export const getReserveNow = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.summary(req.business.id);
+  res.json({ success: true, data });
+});
+
+export const reserveNowCheckout = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.createCheckout(req.business, req.body ?? {});
+  res.json({ success: true, data });
+});
+
+export const reserveNowNativeIntent = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.createNativeIntent(req.business, req.body ?? {});
+  res.json({ success: true, data });
+});
+
+export const reserveNowNativeFinalize = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.finalizeNative(
+    req.business,
+    req.body.subscriptionId,
+    req.body.paymentIntentId
+  );
+  res.json({ success: true, data });
+});
+
+export const reserveNowConfirm = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.confirmCheckout(req.business, req.body.sessionId);
+  res.json({ success: true, data });
+});
+
+export const reserveNowCancel = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.cancel(req.business);
+  res.json({ success: true, data });
+});
+
+export const reserveNowResume = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.resume(req.business);
   res.json({ success: true, data });
 });
 
@@ -522,7 +669,11 @@ export const listPublicReviews = catchAsync(async (req, res) => {
 });
 
 export const listBusinessReviews = catchAsync(async (req, res) => {
-  const data = await BusinessReviewService.listForBusiness(req.business, req.validatedQuery ?? req.query);
+  const data = await BusinessReviewService.listForBusiness(
+    req.business,
+    req.validatedQuery ?? req.query,
+    req.businessAccess
+  );
   res.json({ success: true, data });
 });
 
@@ -549,6 +700,42 @@ export const listWallPosts = catchAsync(async (req, res) => {
     req.validatedQuery ?? req.query
   );
   res.json({ success: true, data });
+});
+
+export const openInquiryConversation = catchAsync(async (req, res) => {
+  const data = await BusinessInquiryService.openConversation(req.user, req.params.idOrSlug);
+  res.json({ success: true, data });
+});
+
+// ─── Custom price offers ────────────────────────────────────────────────────
+export const createCustomOffer = catchAsync(async (req, res) => {
+  const offer = await BusinessCustomOfferService.create(req.business, req.user, req.body);
+  res.status(httpStatus.CREATED).json({ success: true, data: { offer } });
+});
+
+export const listCustomOffers = catchAsync(async (req, res) => {
+  const data = await BusinessCustomOfferService.listForBusiness(req.business, req.validatedQuery ?? req.query);
+  res.json({ success: true, data });
+});
+
+export const withdrawCustomOffer = catchAsync(async (req, res) => {
+  const offer = await BusinessCustomOfferService.withdraw(req.business, req.params.offerId);
+  res.json({ success: true, data: { offer } });
+});
+
+export const listMyCustomOffers = catchAsync(async (req, res) => {
+  const offers = await BusinessCustomOfferService.listForCustomer(req.user, req.validatedQuery ?? req.query);
+  res.json({ success: true, data: { offers } });
+});
+
+export const getCustomOffer = catchAsync(async (req, res) => {
+  const offer = await BusinessCustomOfferService.getForUser(req.user, req.params.offerId);
+  res.json({ success: true, data: { offer } });
+});
+
+export const declineCustomOffer = catchAsync(async (req, res) => {
+  const offer = await BusinessCustomOfferService.decline(req.user, req.params.offerId);
+  res.json({ success: true, data: { offer } });
 });
 
 export const createWallPost = catchAsync(async (req, res) => {
@@ -647,7 +834,11 @@ export const unlikeWallComment = catchAsync(async (req, res) => {
 
 // ─── Earnings & wallet ──────────────────────────────────────────────────────
 export const getEarnings = catchAsync(async (req, res) => {
-  const data = await BusinessEarningsService.summary(req.business, req.validatedQuery ?? req.query);
+  const data = await BusinessEarningsService.summary(
+    req.business,
+    req.validatedQuery ?? req.query,
+    req.businessAccess
+  );
   res.json({ success: true, data });
 });
 

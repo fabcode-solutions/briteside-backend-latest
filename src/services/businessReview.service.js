@@ -7,14 +7,15 @@ import httpStatus from 'http-status';
 import { and, desc, eq, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { businesses, businessBookings, businessReviews, users } from '../db/schema/index.js';
+import { bookingsAtLocations, viewLocationIds } from './businessLocation.service.js';
 import ApiError from '../utils/api-error.js';
+import { businessByIdOrSlug } from '../utils/handles.js';
 import logger from '../config/logger.js';
 import { isBusinessPublic } from './business.service.js';
 import { createNotification } from './notification.service.js';
 import { sendMail } from './mail.service.js';
 import { emailWrapper, ctaRow, ctaButton, appUrl } from '../templates/emailLayout.js';
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** How long after the visit a customer may still review it. */
 export const REVIEW_WINDOW_DAYS = 90;
@@ -46,6 +47,8 @@ const serializeReview = r => ({
   authorImage: r.user?.image ?? null,
   serviceName: r.booking?.serviceName ?? null,
   staffName: r.booking?.staffName ?? null,
+  // When the reviewed visit took place
+  visitDate: r.booking?.startAt ?? null,
   ownerReply: r.ownerReply,
   ownerRepliedAt: r.ownerRepliedAt,
   createdAt: r.createdAt,
@@ -55,6 +58,8 @@ const serializeReview = r => ({
 /** Whether `booking` (with completedAt/status/customerId) can be reviewed by `userId` now. */
 export function canReviewBooking(booking, userId, now = new Date()) {
   if (!userId || booking.customerId !== userId || booking.status !== 'completed') return false;
+  // Closed early by the business — wait until the service's scheduled end
+  if (new Date(booking.endAt).getTime() > now.getTime()) return false;
   const closedAt = booking.completedAt ?? booking.endAt;
   return now.getTime() - new Date(closedAt).getTime() <= REVIEW_WINDOW_DAYS * 86_400_000;
 }
@@ -69,8 +74,23 @@ async function recomputeAggregates(businessId, tx = db) {
     .where(eq(businesses.id, businessId));
 }
 
-async function listFor(businessId, { page = 1, limit = 10, rating }) {
-  const conds = [eq(businessReviews.businessId, businessId)];
+/** Reviews of visits at one of `locationIds`. */
+async function locationCondition(businessId, locationIds) {
+  return inArray(
+    businessReviews.bookingId,
+    db
+      .select({ id: businessBookings.id })
+      .from(businessBookings)
+      .where(and(eq(businessBookings.businessId, businessId), await bookingsAtLocations(businessId, locationIds)))
+  );
+}
+
+/** `locationIds`: only reviews of visits there (null = every location). */
+async function listFor(businessId, { page = 1, limit = 10, rating }, locationIds = null) {
+  // Summary / distribution follow the location but not the star filter
+  const scope = [eq(businessReviews.businessId, businessId)];
+  if (locationIds?.length) scope.push(await locationCondition(businessId, locationIds));
+  const conds = [...scope];
   if (rating) conds.push(eq(businessReviews.rating, rating));
   const where = and(...conds);
   const offset = (page - 1) * limit;
@@ -79,7 +99,7 @@ async function listFor(businessId, { page = 1, limit = 10, rating }) {
       where,
       with: {
         user: { columns: { firstName: true, lastName: true, username: true, image: true } },
-        booking: { columns: { serviceName: true, staffName: true } },
+        booking: { columns: { serviceName: true, staffName: true, startAt: true } },
       },
       orderBy: [desc(businessReviews.createdAt)],
       limit,
@@ -89,7 +109,7 @@ async function listFor(businessId, { page = 1, limit = 10, rating }) {
     db
       .select({ rating: businessReviews.rating, count: sql`count(*)`.mapWith(Number) })
       .from(businessReviews)
-      .where(eq(businessReviews.businessId, businessId))
+      .where(and(...scope))
       .groupBy(businessReviews.rating),
   ]);
   const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
@@ -121,23 +141,21 @@ export class BusinessReviewService {
 
   static async listPublic(idOrSlug, query) {
     const business = await db.query.businesses.findFirst({
-      where: and(
-        UUID_RE.test(idOrSlug) ? eq(businesses.id, idOrSlug) : eq(businesses.slug, idOrSlug),
-        isNull(businesses.deletedAt)
-      ),
+      where: and(businessByIdOrSlug(idOrSlug), isNull(businesses.deletedAt)),
       columns: { id: true, isPublished: true, deletedAt: true },
       with: { owner: { columns: { isBritesidePlus: true } } },
     });
     if (!business || !isBusinessPublic(business, business.owner)) {
       throw new ApiError(httpStatus.NOT_FOUND, 'Business not found');
     }
-    return listFor(business.id, query);
+    return listFor(business.id, query, query.locationId ? [query.locationId] : null);
   }
 
   // ── Dashboard ─────────────────────────────────────────────────────────────
 
-  static async listForBusiness(business, query) {
-    return listFor(business.id, query);
+  /** Location managers only see reviews of visits at their locations. */
+  static async listForBusiness(business, query, access) {
+    return listFor(business.id, query, viewLocationIds(access, query.locationId));
   }
 
   /** Set (or with an empty reply, remove) the business's public response. */
@@ -169,7 +187,7 @@ export class BusinessReviewService {
       where: eq(businessReviews.id, reviewId),
       with: {
         user: { columns: { firstName: true, lastName: true, username: true, image: true } },
-        booking: { columns: { serviceName: true, staffName: true } },
+        booking: { columns: { serviceName: true, staffName: true, startAt: true } },
       },
     });
     if (!row) throw new ApiError(httpStatus.NOT_FOUND, 'Review not found');
@@ -183,7 +201,7 @@ export class BusinessReviewService {
     if (!canReviewBooking(booking, user.id)) {
       throw new ApiError(
         httpStatus.CONFLICT,
-        booking.status === 'completed'
+        booking.status === 'completed' && new Date(booking.endAt) <= new Date()
           ? `Reviews can be left up to ${REVIEW_WINDOW_DAYS} days after your visit`
           : 'You can review a booking once it has been completed'
       );
@@ -257,7 +275,7 @@ export class BusinessReviewService {
       where: inArray(businessReviews.bookingId, bookingIds),
       with: {
         user: { columns: { firstName: true, lastName: true, username: true, image: true } },
-        booking: { columns: { serviceName: true, staffName: true } },
+        booking: { columns: { serviceName: true, staffName: true, startAt: true } },
       },
     });
     return new Map(rows.map(r => [r.bookingId, serializeReview(r)]));
@@ -268,6 +286,8 @@ export class BusinessReviewService {
   /**
    * Ask signed-in customers to review a visit ~24h after it completed.
    * Guests (no account) can't post reviews, so they're skipped.
+   * A business can close a booking as soon as it starts, so the reminder also
+   * waits until 24h past the booking's scheduled end — never mid-service.
    */
   static async sendReviewReminders() {
     const now = Date.now();
@@ -288,6 +308,7 @@ export class BusinessReviewService {
           isNull(businessReviews.id),
           isNull(businesses.deletedAt),
           lte(businessBookings.completedAt, new Date(now - REMINDER_AFTER_HOURS * 3_600_000)),
+          lte(businessBookings.endAt, new Date(now - REMINDER_AFTER_HOURS * 3_600_000)),
           gte(businessBookings.completedAt, new Date(now - REMINDER_MAX_AGE_DAYS * 86_400_000))
         )
       )

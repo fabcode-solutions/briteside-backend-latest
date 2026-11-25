@@ -172,6 +172,91 @@ export async function sendTicketPurchaseEmail(
   return sendMail(userEmail, subject, html, text);
 }
 
+const escapeHtml = value =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+/**
+ * Tell a user that someone transferred an event ticket to them.
+ * @param {string} userEmail
+ * @param {{ recipientName: string, senderName: string, event: object, venue?: object,
+ *           ticket: object, viewUrl: string }} params
+ */
+export async function sendTicketTransferEmail(
+  userEmail,
+  { recipientName, senderName, event, venue, ticket, viewUrl }
+) {
+  venue = venue || {};
+  const BORDER = '#e5e7eb';
+  const TEXT_DARK = '#1a1a1a';
+  const TEXT_MUTED = '#6b7280';
+  const myEventsUrl = `${FRONTEND_URL}/events/${encodeURIComponent(event.slug)}/ticket`;
+
+  const title = escapeHtml(event.title);
+  const sender = escapeHtml(senderName);
+  const recipient = escapeHtml(recipientName);
+  const venueText = venue.name
+    ? escapeHtml(`${venue.name}${venue.address ? `, ${venue.address}` : ''}`)
+    : '';
+
+  const detailRow = (label, value) =>
+    value
+      ? `<tr>
+          <td style="padding: 6px 0; font-family: 'Inter', Arial, sans-serif; font-size: 14px; color: ${TEXT_MUTED}; width: 110px; vertical-align: top;">${label}</td>
+          <td style="padding: 6px 0; font-family: 'Inter', Arial, sans-serif; font-size: 14px; color: ${TEXT_DARK}; font-weight: 500;">${value}</td>
+        </tr>`
+      : '';
+
+  const subject = `${senderName} sent you a ticket for ${event.title}`;
+  const html = `
+  <div style="background: #f3f4f6; padding: 32px 16px; font-family: 'Inter', Arial, sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto;">
+      <tr><td style="padding-bottom: 24px;">${header}</td></tr>
+      <tr>
+        <td style="background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid ${BORDER};">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="background: ${BRAND_COLOR}; padding: 28px 32px;">
+                <p style="margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: rgba(255,255,255,0.85);">You've received a ticket</p>
+                <h1 style="margin: 6px 0 0; font-size: 22px; color: #ffffff;">${title}</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 28px 32px 8px;">
+                <p style="margin: 0 0 16px; font-size: 15px; color: ${TEXT_DARK};">Hi ${recipient},</p>
+                <p style="margin: 0 0 20px; font-size: 15px; color: ${TEXT_DARK};"><strong>${sender}</strong> transferred a ticket to you on Briteside. It's now in your My Events.</p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  ${detailRow('Date', escapeHtml(new Date(event.startDate).toLocaleString()))}
+                  ${detailRow('Venue', venueText)}
+                  ${detailRow('Ticket Code', `<span style="font-family: 'Courier New', monospace;">${escapeHtml(ticket.ticketCode)}</span>`)}
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td align="center" style="padding: 28px 32px 32px;">
+                <a href="${myEventsUrl}" style="display: inline-block; background: ${BRAND_COLOR}; color: #ffffff; font-size: 15px; font-weight: 600; text-decoration: none; padding: 13px 32px; border-radius: 10px;">View My Ticket</a>
+                <p style="margin: 16px 0 0; font-size: 13px;"><a href="${viewUrl}" style="color: ${TEXT_MUTED}; text-decoration: underline;">View without logging in</a></p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+      <tr><td style="padding-top: 24px;">${footer()}</td></tr>
+    </table>
+  </div>
+  `;
+
+  const text = `Hi ${recipientName},\n\n${senderName} transferred a ticket for ${event.title} to you on Briteside. It's now in your My Events.\n\nDate: ${new Date(
+    event.startDate
+  ).toLocaleString()}${venue.name ? `\nVenue: ${venue.name}${venue.address ? `, ${venue.address}` : ''}` : ''}\nTicket Code: ${ticket.ticketCode}\n\nView your ticket: ${myEventsUrl}\nView without logging in: ${viewUrl}`;
+
+  return sendMail(userEmail, subject, html, text);
+}
+
 /**
  * Send event reminder email to user
  * @param {Object} event - Event object

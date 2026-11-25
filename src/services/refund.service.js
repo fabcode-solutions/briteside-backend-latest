@@ -169,6 +169,12 @@ export class RefundService {
     const refundableTickets = [];
     const nonRefundableTickets = [];
 
+    // A buyer can't self-refund a ticket they've transferred to someone else
+    // (that would cancel the recipient's ticket). Organizer/admin refunds
+    // (no userId) still cover it — the money goes back to the buyer.
+    const givenAway = ticket => Boolean(userId) && ticket.userId !== order.userId;
+    const notRefundable = ticket => isTicketUsed(ticket) || givenAway(ticket);
+
     for (const ticket of allTickets) {
       const ticketData = {
         id: ticket.id,
@@ -178,8 +184,8 @@ export class RefundService {
         refundStatus: pendingTicketIds.has(ticket.id) ? 'requested' : null,
       };
 
-      if (isTicketUsed(ticket)) {
-        // Already scanned — cannot refund
+      if (notRefundable(ticket)) {
+        // Already scanned, or transferred away — cannot refund
         nonRefundableTickets.push(ticketData);
       } else {
         refundableTickets.push(ticketData);
@@ -258,12 +264,12 @@ export class RefundService {
         itemType: item.itemType,
         refundableIds: (item.purchasedItemIds || []).filter(id =>
           item.itemType === 'ticket'
-            ? allTickets.find(t => t.id === id && !isTicketUsed(t) && !pendingTicketIds.has(id))
+            ? allTickets.find(t => t.id === id && !notRefundable(t) && !pendingTicketIds.has(id))
             : allMerch.find(m => m.id === id && m.status === 'active')
         ),
         nonRefundableIds: (item.purchasedItemIds || []).filter(id =>
           item.itemType === 'ticket'
-            ? allTickets.find(t => t.id === id && (isTicketUsed(t) || pendingTicketIds.has(id)))
+            ? allTickets.find(t => t.id === id && (notRefundable(t) || pendingTicketIds.has(id)))
             : allMerch.find(m => m.id === id && m.status !== 'active')
         ),
       })),
