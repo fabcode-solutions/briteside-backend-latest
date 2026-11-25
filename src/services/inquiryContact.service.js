@@ -33,6 +33,23 @@ export class InquiryContactService {
     return !!row;
   }
 
+  /** Business inbox: has this customer booked this business through Briteside? */
+  static async isUnlockedForBusiness(businessId, customerId) {
+    const [row] = await db
+      .select({ id: businessBookings.id })
+      .from(businessBookings)
+      .where(
+        and(
+          eq(businessBookings.businessId, businessId),
+          eq(businessBookings.customerId, customerId),
+          eq(businessBookings.source, 'online'),
+          inArray(businessBookings.status, UNLOCKING_STATUSES)
+        )
+      )
+      .limit(1);
+    return !!row;
+  }
+
   /**
    * The inquiry's content + subject with contact details hidden (call only while
    * locked). `hidden` → the message's metadata is marked so the apps can say why.

@@ -41,9 +41,6 @@ export async function resolveBusinessAccess(business, user) {
  * Must run after authMiddleware. Sets:
  *   req.business        — the business row
  *   req.businessAccess  — { role: 'owner'|'admin'|'manager'|'staff'|'platform_admin', permissions, staffId }
- *
- * Note: the owner's BriteSide Plus status is NOT checked here — a lapsed owner keeps
- * dashboard access; lapsing only hides the business publicly and blocks new bookings.
  */
 export const requireBusinessPermission = permission => async (req, res, next) => {
   try {

@@ -8,11 +8,12 @@ import ApiError from '../utils/api-error.js';
 import { ATTACHMENT_MAX_BYTES } from '../utils/businessQuestionnaire.js';
 import { ATTACHMENT_TYPES } from '../services/businessAttachment.service.js';
 import { validateMiddleware } from '../middlewares/validate.middleware.js';
-import { requireActiveSubscription } from '../middlewares/subscription.middleware.js';
 import { requireBusinessPermission } from '../middlewares/businessAccess.middleware.js';
 import { BUSINESS_PERMISSIONS as P } from '../config/business-permissions.js';
 import * as c from '../controllers/business.controller.js';
 import * as v from '../validations/business.validation.js';
+import * as inbox from '../controllers/businessInbox.controller.js';
+import * as vi from '../validations/businessInbox.validation.js';
 
 const router = express.Router();
 
@@ -49,6 +50,19 @@ const attachmentUploadLimiter = createLimiter({
   },
 });
 
+// Business inbox: sending messages (either side)
+const inboxSendLimiter = createLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: process.env.NODE_ENV !== 'production' ? 1000 : 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: req => (req.user?.id ? `user:${req.user.id}` : ipKeyGenerator(req.ip)),
+  message: {
+    success: false,
+    error: { code: 429, message: 'You are sending messages too fast. Please wait a moment.' },
+  },
+});
+
 // ─── Public ─────────────────────────────────────────────────────────────────
 router.get('/categories', c.getCategories);
 router.get('/fees/quote', c.quoteFees);
@@ -61,7 +75,31 @@ router.get(
   c.getBookingByCheckoutSession
 );
 router.get('/bookings/mine', authMiddleware, validateMiddleware(v.myBookingsSchema), c.listMyBookings);
+// Business inbox — customer side: my conversations with businesses (static paths, before /:idOrSlug)
+router.get('/messages', authMiddleware, validateMiddleware(vi.listMineSchema), inbox.listMine);
+router.get('/messages/unread-count', authMiddleware, inbox.unreadMine);
+router.get(
+  '/messages/:conversationId',
+  authMiddleware,
+  validateMiddleware(vi.myConversationSchema),
+  inbox.getMyConversation
+);
+router.post(
+  '/messages/:conversationId',
+  authMiddleware,
+  inboxSendLimiter,
+  validateMiddleware(vi.sendMineSchema),
+  inbox.sendMine
+);
+router.post(
+  '/messages/:conversationId/read',
+  authMiddleware,
+  validateMiddleware(vi.readMineSchema),
+  inbox.readMine
+);
 // Custom price offers — read by the customer it was sent to or the owner (chat card); declined by the customer
+// Mine: the ones sent to me (My Calendar → Requests). Before /offers/:offerId.
+router.get('/offers/mine', authMiddleware, validateMiddleware(v.myCustomOffersSchema), c.listMyCustomOffers);
 router.get('/offers/:offerId', authMiddleware, validateMiddleware(v.customOfferSchema), c.getCustomOffer);
 router.post('/offers/:offerId/decline', authMiddleware, validateMiddleware(v.customOfferSchema), c.declineCustomOffer);
 // In-app card checkout (NativeCheckoutModal) for a held booking — guests may pay too
@@ -135,11 +173,10 @@ router.post(
   validateMiddleware(v.acceptInvitationSchema),
   c.acceptInvitation
 );
-// Creating a business requires BriteSide Plus
+// Creating a business — open to any signed-in user (no BriteSide Plus needed)
 router.post(
   '/',
   authMiddleware,
-  requireActiveSubscription,
   validateMiddleware(v.createBusinessSchema),
   c.createBusiness
 );
@@ -152,7 +189,15 @@ router.get('/:idOrSlug/reviews', validateMiddleware(v.listPublicReviewsSchema), 
 // requests), members post requests, the business approves or rejects them
 router.get('/:idOrSlug/wall', optionalAuthMiddleware, validateMiddleware(v.listWallPostsSchema), c.listWallPosts);
 router.post('/:idOrSlug/wall', authMiddleware, validateMiddleware(v.createWallPostSchema), c.createWallPost);
-// "Send inquiry" when the business takes inquiries in its inbox → conversation with the owner
+// Business inbox: open (or reopen) my conversation with this business
+router.post(
+  '/:idOrSlug/messages/conversation',
+  authMiddleware,
+  validateMiddleware(vi.openForCustomerSchema),
+  inbox.openForCustomer
+);
+// LEGACY: opens a personal DM with the owner. Replaced by /:idOrSlug/messages/conversation
+// (business inbox); remove once the apps have switched over.
 router.post(
   '/:idOrSlug/inquiries/conversation',
   authMiddleware,
@@ -334,6 +379,12 @@ router.post(
   ...scoped(P.SERVICES_MANAGE, v.createServiceSchema),
   c.createService
 );
+// Sale on several services (before /:serviceId so "sale" isn't read as an id)
+router.put(
+  '/:businessId/services/sale',
+  ...scoped(P.SERVICES_MANAGE, v.setServiceSaleSchema),
+  c.setServiceSale
+);
 router.patch(
   '/:businessId/services/:serviceId',
   ...scoped(P.SERVICES_MANAGE, v.updateServiceSchema),
@@ -504,6 +555,36 @@ router.post(
   c.rescheduleBookingByBusiness
 );
 
+// Reserve Now ($20/mo add-on for Food & Dining): billing is wallet-level, like commission
+router.get(
+  '/:businessId/reserve-now',
+  ...scoped(P.VIEW, v.businessIdOnlySchema),
+  c.getReserveNow
+);
+router.post(
+  '/:businessId/reserve-now/checkout',
+  ...scoped(P.WALLET_MANAGE, v.reserveNowCheckoutSchema),
+  c.reserveNowCheckout
+);
+// In-app card form (web): intent → Stripe.js confirms → finalize
+router.post(
+  '/:businessId/reserve-now/native-intent',
+  ...scoped(P.WALLET_MANAGE, v.reserveNowNativeIntentSchema),
+  c.reserveNowNativeIntent
+);
+router.post(
+  '/:businessId/reserve-now/native-finalize',
+  ...scoped(P.WALLET_MANAGE, v.reserveNowNativeFinalizeSchema),
+  c.reserveNowNativeFinalize
+);
+router.post(
+  '/:businessId/reserve-now/confirm',
+  ...scoped(P.WALLET_MANAGE, v.reserveNowConfirmSchema),
+  c.reserveNowConfirm
+);
+router.post('/:businessId/reserve-now/cancel', ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema), c.reserveNowCancel);
+router.post('/:businessId/reserve-now/resume', ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema), c.reserveNowResume);
+
 // 5% commission on in-person payments: what's owed / collected, and paying it now
 router.get(
   '/:businessId/commission',
@@ -583,6 +664,33 @@ router.delete(
   '/:businessId/team/:memberId',
   ...scoped(P.TEAM_MANAGE, v.teamMemberIdSchema),
   c.revokeTeamMember
+);
+
+// Business inbox — the business side (owner, admins, managers)
+router.get('/:businessId/inbox', ...scoped(P.INBOX_MANAGE, vi.listInboxSchema), inbox.listInbox);
+router.get('/:businessId/inbox/unread-count', ...scoped(P.INBOX_MANAGE, vi.unreadInboxSchema), inbox.unreadInbox);
+router.post(
+  '/:businessId/inbox/conversations',
+  ...scoped(P.INBOX_MANAGE, vi.openForBusinessSchema),
+  inbox.openForBusiness
+);
+router.get(
+  '/:businessId/inbox/:conversationId',
+  ...scoped(P.INBOX_MANAGE, vi.inboxConversationSchema),
+  inbox.getInboxConversation
+);
+router.post(
+  '/:businessId/inbox/:conversationId',
+  authMiddleware,
+  inboxSendLimiter,
+  validateMiddleware(vi.sendInboxSchema),
+  requireBusinessPermission(P.INBOX_MANAGE),
+  inbox.sendInbox
+);
+router.post(
+  '/:businessId/inbox/:conversationId/read',
+  ...scoped(P.INBOX_MANAGE, vi.readInboxSchema),
+  inbox.readInbox
 );
 
 export default router;

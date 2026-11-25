@@ -1,7 +1,8 @@
 /**
  * Custom price offers — the business's answer to an inquiry about an "Inquire for
  * pricing" service (or any job that needs its own price), like Digital Services
- * custom offers.
+ * custom offers. Sent from the inquiry chat or from the dashboard to any customer;
+ * the customer finds them in My Calendar → Requests (listForCustomer).
  *
  * The business picks a menu service or names a new one (optionally saved to the
  * menu as "Inquire for pricing"), sets price / length / payment terms, and the
@@ -171,7 +172,8 @@ export class BusinessCustomOfferService {
         title: `Custom price from ${business.name}`,
         message: `${serviceName}: ${money(offer.priceCents)}. Book a time before it expires.`,
         type: 'business_booking',
-        redirectTo: `/business/${business.slug}/book?offer=${offer.id}`,
+        // My Calendar → Requests lists it with Book a time / Decline
+        redirectTo: '/bookings?tab=requests',
         relatedId: offer.id,
         metadata: { businessId: business.id, offerId: offer.id },
       });
@@ -216,6 +218,44 @@ export class BusinessCustomOfferService {
         pendingValueCents: by('pending').reduce((s, o) => s + o.priceCents, 0),
       },
     };
+  }
+
+  /**
+   * Customer side (My Calendar → Requests): custom prices businesses sent this
+   * user, newest first, shaped like the chat card's offer (role 'customer').
+   * 'pending' = still bookable (open and not past its expiry).
+   */
+  static async listForCustomer(user, { status = 'pending', limit = 100 } = {}) {
+    const rows = await db.query.businessCustomOffers.findMany({
+      where: and(
+        eq(businessCustomOffers.customerId, user.id),
+        ...(status === 'pending' ? [eq(businessCustomOffers.status, 'pending')] : [])
+      ),
+      with: {
+        business: { columns: { id: true, slug: true, name: true, logoUrl: true } },
+        location: { columns: { id: true, name: true } },
+        staff: { columns: { id: true, name: true } },
+      },
+      orderBy: [desc(businessCustomOffers.createdAt)],
+      limit,
+    });
+    const offers = rows
+      .filter(o => o.business)
+      .map(o =>
+        serializeOffer(o, {
+          role: 'customer',
+          business: {
+            id: o.business.id,
+            slug: o.business.slug,
+            name: o.business.name,
+            logoUrl: o.business.logoUrl ?? null,
+          },
+          locationName: o.location?.name ?? null,
+          staffName: o.staff?.name ?? null,
+        })
+      );
+    // Expiry is computed on read, so drop the ones that lapsed since they were stored as open
+    return status === 'pending' ? offers.filter(o => o.status === 'pending') : offers;
   }
 
   static async withdraw(business, offerId) {

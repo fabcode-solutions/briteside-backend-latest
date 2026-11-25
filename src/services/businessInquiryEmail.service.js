@@ -7,7 +7,7 @@
  */
 import { and, count, eq, gte, isNull } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { businesses, socialMessages, users } from '../db/schema/index.js';
+import { businesses, businessMessages, socialMessages, users } from '../db/schema/index.js';
 import logger from '../config/logger.js';
 import { sendMail } from './mail.service.js';
 import { emailWrapper, ctaRow, ctaButton, appUrl } from '../templates/emailLayout.js';
@@ -43,6 +43,55 @@ export async function emailInquiryIfNeeded({ senderId, recipientId, conversation
     );
   if (recent > EMAILS_PER_HOUR) return;
 
+  await sendInquiryEmail({
+    to,
+    business,
+    senderId,
+    content,
+    metadata,
+    replyUrl: appUrl('/messages', { tab: 'inquiry', conversationId }),
+  });
+}
+
+/**
+ * Business inbox (business_conversations): a customer's inquiry is emailed to
+ * the business when it takes inquiries by email. The reply link opens the
+ * thread in the business inbox, never anyone's personal messages.
+ */
+export async function emailBusinessInboxInquiry({ business, senderId, conversationId, content, metadata }) {
+  const to = business?.inquiryEmail || business?.email;
+  if (!business || business.inquiryChannel !== 'email' || !to) return;
+
+  const [{ recent }] = await db
+    .select({ recent: count() })
+    .from(businessMessages)
+    .where(
+      and(
+        eq(businessMessages.conversationId, conversationId),
+        eq(businessMessages.senderSide, 'customer'),
+        eq(businessMessages.messageType, 'inquiry'),
+        gte(businessMessages.createdAt, new Date(Date.now() - 3_600_000))
+      )
+    );
+  if (recent > EMAILS_PER_HOUR) return;
+
+  await sendInquiryEmail({
+    to,
+    business,
+    senderId,
+    content,
+    metadata,
+    replyUrl: appUrl('/business/inbox', { conversationId }),
+  });
+}
+
+export function queueBusinessInboxInquiryEmail(args) {
+  emailBusinessInboxInquiry(args).catch(err =>
+    logger.error(`[businessInquiry] inbox email failed: ${err.message}`)
+  );
+}
+
+async function sendInquiryEmail({ to, business, senderId, content, metadata, replyUrl }) {
   const sender = await db.query.users.findFirst({
     where: eq(users.id, senderId),
     columns: { firstName: true, lastName: true, username: true },
@@ -52,7 +101,6 @@ export async function emailInquiryIfNeeded({ senderId, recipientId, conversation
     sender?.username ||
     'A Briteside member';
   const subject = String(metadata?.inquirySubject ?? '').trim() || 'New inquiry';
-  const replyUrl = appUrl('/messages', { tab: 'inquiry', conversationId });
 
   await sendMail(
     to,

@@ -48,6 +48,7 @@ import {
 } from './businessLocation.service.js';
 import { BUSINESS_PERMISSIONS, permissionsForRole } from '../config/business-permissions.js';
 import { legacyQuestions, resolveAnswers } from '../utils/businessQuestionnaire.js';
+import { withSale } from '../utils/businessSale.js';
 import { BusinessAttachmentService } from './businessAttachment.service.js';
 import ApiError from '../utils/api-error.js';
 import config from '../config/config.js';
@@ -200,19 +201,18 @@ export function computeSlots({ windows, date, tz, durationMins, bufferMins, busy
 
 /**
  * Refund split for a customer cancellation under the business's policy.
- * Returns how much of the service payment and the booking fee go back.
+ * Returns how much of the service payment goes back. The booking fee is never refunded.
  */
 export function customerCancellationRefund(booking, business, now = new Date()) {
   if (booking.status === 'pending') {
-    return { serviceRefundCents: booking.amountPaidCents, refundFee: true, rule: 'not_yet_accepted' };
+    return { serviceRefundCents: booking.amountPaidCents, rule: 'not_yet_accepted' };
   }
   const hoursBefore = (booking.startAt.getTime() - now.getTime()) / 3_600_000;
   if (hoursBefore >= business.freeCancellationHours) {
-    return { serviceRefundCents: booking.amountPaidCents, refundFee: true, rule: 'free_window' };
+    return { serviceRefundCents: booking.amountPaidCents, rule: 'free_window' };
   }
   return {
     serviceRefundCents: Math.round((booking.amountPaidCents * business.lateCancellationRefundPercent) / 100),
-    refundFee: false,
     rule: 'late',
   };
 }
@@ -320,7 +320,8 @@ const serializeBooking = (b, { forBusiness = false } = {}) => ({
           name: b.location.name,
           locationType: b.location.locationType,
           city: b.location.city,
-          address: b.location.address,
+          // A mobile location's address is the owner's home base — never sent out
+          address: b.location.locationType === 'mobile' ? b.location.city : b.location.address,
         },
       }
     : {}),
@@ -411,8 +412,8 @@ async function loadService(business, serviceId) {
       code: 'SERVICE_NOT_AT_LOCATION',
     });
   }
-  // …at that location's own price / length, when it has them
-  return serviceAtLocation(service, business.locationId);
+  // …at that location's own price / length, when it has them, less any running sale
+  return withSale(serviceAtLocation(service, business.locationId));
 }
 
 const quoteRequired = () =>
@@ -785,15 +786,16 @@ async function transition(bookingId, from, values) {
 
 /**
  * Refund via Stripe and adjust the business's held payout.
- * serviceRefundCents: part of the service payment going back; refundFee: whether the booking fee goes back.
- * Tax is refunded in proportion to the service refund.
+ * serviceRefundCents: part of the service payment going back.
+ * Tax is refunded in proportion to the service refund. The booking fee is
+ * non-refundable in every case (customer cancel, business decline/cancel, expiry).
  */
-async function refundBooking(booking, business, { serviceRefundCents, refundFee, reason }) {
+async function refundBooking(booking, business, { serviceRefundCents, reason }) {
   const serviceRefund = Math.max(0, Math.min(serviceRefundCents, booking.amountPaidCents - booking.refundedCents));
   const fraction = booking.amountPaidCents > 0 ? serviceRefund / booking.amountPaidCents : 0;
   const taxRefund = Math.round((booking.taxAmountCents ?? 0) * fraction);
-  const feeRefund = refundFee ? booking.customerFeeCents : 0;
-  const total = serviceRefund + taxRefund + feeRefund;
+  const feeRefund = 0;
+  const total = serviceRefund + taxRefund;
 
   // Claim the refund first: only succeeds if nobody refunded since `booking` was read,
   // so two refund paths (e.g. a business refund and a customer cancel) can't both pay out.
@@ -828,9 +830,7 @@ async function refundBooking(booking, business, { serviceRefundCents, refundFee,
       await releaseClaim();
       throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Refunds are unavailable right now');
     }
-    const fromBalance = booking.balancePaymentIntentId
-      ? Math.min(total - feeRefund, booking.balanceChargedCents)
-      : 0;
+    const fromBalance = booking.balancePaymentIntentId ? Math.min(total, booking.balanceChargedCents) : 0;
     const parts = [
       { pi: booking.balancePaymentIntentId, amount: fromBalance, key: 'balance' },
       { pi: booking.stripePaymentIntentId, amount: total - fromBalance, key: 'booking' },
@@ -2135,7 +2135,7 @@ export class BusinessBookingService {
       business,
       ['pending'],
       { status: 'declined', cancelledAt: new Date(), cancelledBy: 'business', cancellationReason: reason ?? null, acceptDeadline: null },
-      { serviceRefundCents: booking.amountPaidCents, refundFee: true, reason: 'business_declined' }
+      { serviceRefundCents: booking.amountPaidCents, reason: 'business_declined' }
     );
     emailCustomer(row, business, `Booking request declined: ${business.name}`, `${business.name} couldn’t take this booking`, [
       ['Refund', `${money(refund.refundedCents)} back to your card`],
@@ -2143,7 +2143,7 @@ export class BusinessBookingService {
     return { booking: serializeBooking(row, { forBusiness: true }), refund };
   }
 
-  /** Business cancels: customer always gets everything back, booking fee included. */
+  /** Business cancels: customer gets the full service payment back (the booking fee is non-refundable). */
   static async cancelByBusiness(business, bookingId, access, reason) {
     const booking = await getBookingForBusiness(business, bookingId, access);
     if (!['pending', 'confirmed'].includes(booking.status)) {
@@ -2154,7 +2154,7 @@ export class BusinessBookingService {
       business,
       ['pending', 'confirmed'],
       { status: 'cancelled', cancelledAt: new Date(), cancelledBy: 'business', cancellationReason: reason ?? null },
-      { serviceRefundCents: booking.amountPaidCents, refundFee: true, reason: 'business_cancelled' }
+      { serviceRefundCents: booking.amountPaidCents, reason: 'business_cancelled' }
     );
     emailCustomer(row, business, `Booking cancelled: ${business.name}`, `${business.name} cancelled your booking`, [
       ['Refund', `${money(refund.refundedCents)} back to your card`],
@@ -2221,7 +2221,6 @@ export class BusinessBookingService {
 
     const refund = await refundBooking(booking, business, {
       serviceRefundCents: amount,
-      refundFee: false,
       // Unique per refund (refundedCents changes after each), so partial refunds don't collide
       reason: `business_refund_${booking.refundedCents}`,
     });
@@ -2533,7 +2532,7 @@ export class BusinessBookingService {
           booking.business,
           ['pending'],
           { status: 'expired', cancelledAt: new Date(), cancelledBy: 'system', cancellationReason: 'The business did not respond in time' },
-          { serviceRefundCents: booking.amountPaidCents, refundFee: true, reason: 'request_expired' }
+          { serviceRefundCents: booking.amountPaidCents, reason: 'request_expired' }
         );
         emailCustomer(row, booking.business, `Booking request expired: ${booking.business.name}`, 'Your request expired', [
           ['Refund', `${money(refund.refundedCents)} back to your card`],

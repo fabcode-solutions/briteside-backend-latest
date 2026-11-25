@@ -5,6 +5,7 @@ import { BusinessBookingService } from '../services/businessBooking.service.js';
 import { BusinessGroupSessionService } from '../services/businessGroupSession.service.js';
 import { BusinessGalleryService } from '../services/businessGallery.service.js';
 import { BusinessCommissionService } from '../services/businessCommission.service.js';
+import { BusinessReserveNowService } from '../services/businessReserveNow.service.js';
 import { BusinessReviewService } from '../services/businessReview.service.js';
 import { BusinessEarningsService } from '../services/businessEarnings.service.js';
 import { BusinessWallService } from '../services/businessWall.service.js';
@@ -56,6 +57,11 @@ export const updateBusiness = catchAsync(async (req, res) => {
 export const updatePolicies = catchAsync(async (req, res) => {
   const business = await BusinessService.update(req.business, req.body);
   res.json({ success: true, data: { business } });
+});
+
+export const setServiceSale = catchAsync(async (req, res) => {
+  const services = await BusinessService.setServiceSale(req.business, req.body);
+  res.json({ success: true, data: { services } });
 });
 
 export const saveAddOns = catchAsync(async (req, res) => {
@@ -430,6 +436,45 @@ export const cancelMyBooking = catchAsync(async (req, res) => {
   res.json({ success: true, data });
 });
 
+export const getReserveNow = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.summary(req.business.id);
+  res.json({ success: true, data });
+});
+
+export const reserveNowCheckout = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.createCheckout(req.business, req.body ?? {});
+  res.json({ success: true, data });
+});
+
+export const reserveNowNativeIntent = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.createNativeIntent(req.business, req.body ?? {});
+  res.json({ success: true, data });
+});
+
+export const reserveNowNativeFinalize = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.finalizeNative(
+    req.business,
+    req.body.subscriptionId,
+    req.body.paymentIntentId
+  );
+  res.json({ success: true, data });
+});
+
+export const reserveNowConfirm = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.confirmCheckout(req.business, req.body.sessionId);
+  res.json({ success: true, data });
+});
+
+export const reserveNowCancel = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.cancel(req.business);
+  res.json({ success: true, data });
+});
+
+export const reserveNowResume = catchAsync(async (req, res) => {
+  const data = await BusinessReserveNowService.resume(req.business);
+  res.json({ success: true, data });
+});
+
 export const getCommissionSummary = catchAsync(async (req, res) => {
   const data = await BusinessCommissionService.summaryForBusiness(req.business);
   res.json({ success: true, data });
@@ -634,6 +679,11 @@ export const listCustomOffers = catchAsync(async (req, res) => {
 export const withdrawCustomOffer = catchAsync(async (req, res) => {
   const offer = await BusinessCustomOfferService.withdraw(req.business, req.params.offerId);
   res.json({ success: true, data: { offer } });
+});
+
+export const listMyCustomOffers = catchAsync(async (req, res) => {
+  const offers = await BusinessCustomOfferService.listForCustomer(req.user, req.validatedQuery ?? req.query);
+  res.json({ success: true, data: { offers } });
 });
 
 export const getCustomOffer = catchAsync(async (req, res) => {

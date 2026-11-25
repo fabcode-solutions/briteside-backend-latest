@@ -179,3 +179,5 @@ export * from './analyticsRollupState.js';
 
 // Business accounts (service providers: profile, services, staff, team, bookings)
 export * from './businesses.js';
+// Business inbox (customer ↔ business conversations, separate from personal DMs)
+export * from './businessInbox.js';

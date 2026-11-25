@@ -213,7 +213,7 @@ export class BusinessGroupSessionService {
 
   /**
    * Cancel a session: no new seats, unfinished checkouts are released, and
-   * everyone booked is cancelled with a full refund (booking fee included) and
+   * everyone booked is cancelled with a full refund of the service payment (the booking fee is non-refundable) and
    * emailed. A refund that fails is reported back; that booking stays as it is
    * so it can be cancelled again from the appointment.
    */

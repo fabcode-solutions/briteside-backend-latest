@@ -48,24 +48,28 @@ const timezone = z.string().refine(
 
 const url = z.string().url().max(2048);
 const INQUIRY_CHANNELS = ['inbox', 'email'];
-// Public website: http(s) only, so a javascript:/data: link can't end up on the page
-const websiteUrl = z
-  .string()
-  .trim()
-  .max(2048)
-  .refine(
-    v => {
-      if (v === '') return true;
-      try {
-        const u = new URL(v);
-        return (u.protocol === 'http:' || u.protocol === 'https:') && !!u.hostname.includes('.');
-      } catch {
-        return false;
-      }
-    },
-    { message: 'Website must be a full http:// or https:// address' }
-  )
-  .nullable();
+// Public links: http(s) only, so a javascript:/data: link can't end up on the page
+const httpLink = message =>
+  z
+    .string()
+    .trim()
+    .max(2048)
+    .refine(
+      v => {
+        if (v === '') return true;
+        try {
+          const u = new URL(v);
+          return (u.protocol === 'http:' || u.protocol === 'https:') && !!u.hostname.includes('.');
+        } catch {
+          return false;
+        }
+      },
+      { message }
+    )
+    .nullable();
+const websiteUrl = httpLink('Website must be a full http:// or https:// address');
+// Reserve Now target (their OpenTable / Resy / Tock… page)
+const reservationUrl = httpLink('Reservation link must be a full http:// or https:// address');
 const optionalText = max => z.string().trim().max(max).optional().nullable();
 const cents = z.number().int().min(0).max(10_000_000);
 const uuid = z.string().uuid();
@@ -74,13 +78,23 @@ const businessIdParams = z.object({ businessId: uuid });
 
 // ─── Public ─────────────────────────────────────────────────────────────────
 export const listBusinessesSchema = z.object({
-  query: z.object({
-    q: z.string().trim().max(100).optional(),
-    category: z.enum(BUSINESS_CATEGORY_KEYS).optional(),
-    city: z.string().trim().max(120).optional(),
-    page: z.coerce.number().int().min(1).optional().default(1),
-    limit: z.coerce.number().int().min(1).max(50).optional().default(20),
-  }),
+  query: z
+    .object({
+      q: z.string().trim().max(100).optional(),
+      category: z.enum(BUSINESS_CATEGORY_KEYS).optional(),
+      city: z.string().trim().max(120).optional(),
+      // Searcher's point: businesses within `radius` miles of it, plus mobile
+      // businesses whose own service area covers it. Nearest first.
+      lat: z.coerce.number().min(-90).max(90).optional(),
+      lng: z.coerce.number().min(-180).max(180).optional(),
+      radius: z.coerce.number().int().min(1).max(250).optional().default(25),
+      page: z.coerce.number().int().min(1).optional().default(1),
+      limit: z.coerce.number().int().min(1).max(50).optional().default(20),
+    })
+    .refine(q => (q.lat === undefined) === (q.lng === undefined), {
+      message: 'Send both lat and lng',
+      path: ['lat'],
+    }),
 });
 
 export const getPublicBusinessSchema = z.object({
@@ -88,6 +102,14 @@ export const getPublicBusinessSchema = z.object({
 });
 
 // ─── Owner: business ────────────────────────────────────────────────────────
+// Mobile businesses: how far (miles) they travel from their home base
+const serviceRadiusMiles = z
+  .number()
+  .int('Use whole miles')
+  .min(1, 'Service radius must be at least 1 mile')
+  .max(250, 'Service radius can be up to 250 miles')
+  .nullable();
+
 export const createBusinessSchema = z.object({
   body: z.object({
     // 'standard' = profile page without booking (no staff / services)
@@ -99,11 +121,15 @@ export const createBusinessSchema = z.object({
     locationType: z.enum(LOCATION_TYPES).default('physical'),
     city: z.string().trim().min(1).max(120),
     address: optionalText(500),
+    latitude: z.number().min(-90).max(90).nullable().optional(),
+    longitude: z.number().min(-180).max(180).nullable().optional(),
+    serviceRadiusMiles: serviceRadiusMiles.optional(),
     // Label of the first location (defaults to the city)
     locationName: optionalText(120),
     phone: optionalText(40),
     email: z.string().trim().email().max(255).optional().nullable().or(z.literal('')),
     websiteUrl: websiteUrl.optional(),
+    reservationUrl: reservationUrl.optional(),
     timezone: timezone.optional(),
     logoUrl: url.optional().nullable(),
     heroUrl: url.optional().nullable(),
@@ -155,9 +181,11 @@ export const updateBusinessSchema = z.object({
       address: optionalText(500),
       latitude: z.number().min(-90).max(90).nullable(),
       longitude: z.number().min(-180).max(180).nullable(),
+      serviceRadiusMiles,
       phone: optionalText(40),
       email: z.string().trim().email().max(255).nullable().or(z.literal('')),
       websiteUrl,
+      reservationUrl,
       // Where "Send inquiry" goes; 'email' uses inquiryEmail (or the contact email)
       inquiryChannel: z.enum(INQUIRY_CHANNELS),
       inquiryEmail: z.string().trim().email().max(255).nullable().or(z.literal('')),
@@ -217,6 +245,7 @@ const locationFields = z.object({
   address: optionalText(500),
   latitude: z.number().min(-90).max(90).nullable(),
   longitude: z.number().min(-180).max(180).nullable(),
+  serviceRadiusMiles,
   phone: optionalText(40),
   timezone,
   hours: weeklyHoursSchema,
@@ -272,7 +301,8 @@ const serviceFields = z.object({
   categoryName: optionalText(100),
   durationMins: z.number().int().min(5).max(24 * 60),
   priceCents: cents,
-  // "Inquire for pricing": no public price; customers inquire and get a custom offer
+  // "Price depends on the job but starts from priceCents": shown as "From $X" with an
+  // Inquire button instead of Book; customers inquire and get a custom offer
   priceOnRequest: z.boolean(),
   // null = inherit business default
   paymentModel: z.enum(PAYMENT_MODELS).nullable(),
@@ -343,6 +373,36 @@ export const updateServiceSchema = z.object({
     .refine(...depositRefine)
     .refine(...oneDepositKind)
     .refine(b => Object.keys(b).length > 0, { message: 'Nothing to update' }),
+});
+
+// Start / schedule / end a sale on several services. salePercent null = end it.
+export const setServiceSaleSchema = z.object({
+  params: businessIdParams,
+  body: z
+    .object({
+      serviceIds: z.array(uuid).min(1, 'Choose at least one service').max(200),
+      salePercent: z
+        .number()
+        .int('Use a whole percentage')
+        .min(1, 'The sale needs to be at least 1% off')
+        .max(90, 'A sale can be up to 90% off')
+        .nullable(),
+      // null start = starts now; null end = runs until you end it
+      saleStartsAt: z.string().datetime({ offset: true }).nullable().optional(),
+      saleEndsAt: z.string().datetime({ offset: true }).nullable().optional(),
+    })
+    .refine(b => b.salePercent == null || !b.saleEndsAt || new Date(b.saleEndsAt).getTime() > Date.now(), {
+      message: 'The end time has already passed',
+      path: ['saleEndsAt'],
+    })
+    .refine(
+      b =>
+        b.salePercent == null ||
+        !b.saleStartsAt ||
+        !b.saleEndsAt ||
+        new Date(b.saleEndsAt).getTime() > new Date(b.saleStartsAt).getTime(),
+      { message: 'The sale has to end after it starts', path: ['saleEndsAt'] }
+    ),
 });
 
 export const saveAddOnsSchema = z.object({
@@ -831,6 +891,37 @@ export const customerRescheduleSchema = z.object({
   body: z.object(rescheduleBody),
 });
 
+// Reserve Now ($20/mo, Food & Dining): start checkout (optionally saving the link first) / confirm on return
+export const reserveNowCheckoutSchema = z.object({
+  params: businessIdParams,
+  body: z
+    .object({
+      platform: z.enum(['web', 'ios', 'android']).optional(),
+      reservationUrl: reservationUrl.optional(),
+    })
+    .optional()
+    .default({}),
+});
+
+// In-app card form: step 1 creates the unpaid subscription, step 2 verifies the first payment
+export const reserveNowNativeIntentSchema = z.object({
+  params: businessIdParams,
+  body: z.object({ reservationUrl: reservationUrl.optional() }).optional().default({}),
+});
+
+export const reserveNowNativeFinalizeSchema = z.object({
+  params: businessIdParams,
+  body: z.object({
+    subscriptionId: z.string().trim().regex(/^sub_[A-Za-z0-9]+$/, 'Invalid subscription'),
+    paymentIntentId: z.string().trim().regex(/^pi_[A-Za-z0-9]+$/, 'Invalid payment'),
+  }),
+});
+
+export const reserveNowConfirmSchema = z.object({
+  params: businessIdParams,
+  body: z.object({ sessionId: z.string().trim().regex(/^cs_[A-Za-z0-9_]+$/, 'Invalid checkout session') }),
+});
+
 export const payCommissionSchema = z.object({
   params: businessIdParams,
   body: z
@@ -1109,3 +1200,11 @@ export const businessCustomOfferSchema = z.object({
 });
 
 export const customOfferSchema = z.object({ params: z.object({ offerId: uuid }) });
+
+// Customer side: custom prices businesses sent me (My Calendar → Requests)
+export const myCustomOffersSchema = z.object({
+  query: z.object({
+    status: z.enum(['pending', 'all']).optional().default('pending'),
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+  }),
+});

@@ -15,6 +15,8 @@ export const BUSINESS_PERMISSIONS = {
   REPORTS_VIEW: 'reports.view',
   // Reply to customer reviews
   REVIEWS_MANAGE: 'reviews.manage',
+  // Read and answer the business inbox (customer conversations)
+  INBOX_MANAGE: 'inbox.manage',
   EARNINGS_VIEW: 'earnings.view',
   WALLET_MANAGE: 'wallet.manage',
   TAXES_MANAGE: 'taxes.manage',

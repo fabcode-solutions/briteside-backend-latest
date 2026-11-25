@@ -149,27 +149,31 @@ describe('customerCancellationRefund', () => {
   const now = new Date('2030-01-07T12:00:00Z');
   const booking = (startAt, status = 'confirmed') => ({ status, startAt: new Date(startAt), amountPaidCents: 10_000 });
 
-  it('pending request → full refund including fee', () => {
+  it('pending request → full service refund (booking fee is non-refundable)', () => {
     expect(customerCancellationRefund(booking('2030-01-07T13:00:00Z', 'pending'), business, now)).toMatchObject({
       serviceRefundCents: 10_000,
-      refundFee: true,
+      rule: 'not_yet_accepted',
     });
   });
 
-  it('inside the free window → full refund including fee', () => {
+  it('inside the free window → full service refund (booking fee is non-refundable)', () => {
     expect(customerCancellationRefund(booking('2030-01-08T13:00:00Z'), business, now)).toMatchObject({
       serviceRefundCents: 10_000,
-      refundFee: true,
       rule: 'free_window',
     });
   });
 
-  it('late → policy percent of the service payment, fee kept', () => {
+  it('late → policy percent of the service payment', () => {
     expect(customerCancellationRefund(booking('2030-01-07T20:00:00Z'), business, now)).toMatchObject({
       serviceRefundCents: 5_000,
-      refundFee: false,
       rule: 'late',
     });
+  });
+
+  it('never refunds the booking fee', () => {
+    for (const b of [booking('2030-01-07T13:00:00Z', 'pending'), booking('2030-01-08T13:00:00Z')]) {
+      expect(customerCancellationRefund(b, business, now)).not.toHaveProperty('refundFee');
+    }
   });
 });
 

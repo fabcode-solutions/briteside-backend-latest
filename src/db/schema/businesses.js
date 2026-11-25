@@ -2,9 +2,8 @@
  * Business accounts — service providers (salons, studios, mobile services…)
  * that list a service menu, bookable staff, and take customer bookings.
  *
- * A user may own one business (enforced in BusinessService.create). Owning one requires an active BriteSide
- * Plus subscription; when the owner's Plus lapses the business is hidden from
- * public listings and new bookings are refused (owner dashboard stays usable).
+ * A user may own one business (enforced in BusinessService.create). Business
+ * accounts do not require a BriteSide Plus subscription.
  *
  * Money is stored in integer cents throughout.
  */
@@ -78,10 +77,21 @@ export const businesses = pgTable(
     address: text('address'),
     latitude: decimal('latitude', { precision: 10, scale: 7 }),
     longitude: decimal('longitude', { precision: 10, scale: 7 }),
+    // Mobile businesses: how far (miles) from their home base (address / lat-lng) they travel
+    serviceRadiusMiles: integer('service_radius_miles'),
     phone: varchar('phone', { length: 40 }),
     email: varchar('email', { length: 255 }),
     // Public website (http/https only — validated on write)
     websiteUrl: text('website_url'),
+    // Reserve Now (Food & Dining add-on, $20/mo): the page's "Reserve Now" button
+    // opens reservationUrl (their OpenTable / Resy / Tock… page). The link is only
+    // public while reserveNowStatus is 'active' or 'past_due'.
+    reservationUrl: text('reservation_url'),
+    // null (never subscribed) | 'pending' (checkout started) | 'active' | 'past_due' | 'canceled'
+    reserveNowStatus: varchar('reserve_now_status', { length: 20 }),
+    reserveNowSubscriptionId: varchar('reserve_now_subscription_id', { length: 255 }),
+    reserveNowPeriodEnd: timestamp('reserve_now_period_end', { withTimezone: true }),
+    reserveNowCancelAtPeriodEnd: boolean('reserve_now_cancel_at_period_end').notNull().default(false),
     // Where "Send inquiry" goes: 'inbox' (owner's Inquiry inbox) | 'email'
     inquiryChannel: varchar('inquiry_channel', { length: 10 }).notNull().default('email'),
     // 'email' channel: the address inquiries go to (null = the contact email)
@@ -115,7 +125,7 @@ export const businesses = pgTable(
     allowCustomerRescheduling: boolean('allow_customer_rescheduling').notNull().default(false),
     reschedulingNoticeDays: integer('rescheduling_notice_days'),
     // Policies — structured, drive automatic refunds on customer cancellation:
-    //   cancelled >= freeCancellationHours before start → full refund (incl. booking fee)
+    //   cancelled >= freeCancellationHours before start → full service refund (booking fee is non-refundable)
     //   otherwise → lateCancellationRefundPercent of the amount paid for the service
     freeCancellationHours: integer('free_cancellation_hours').notNull().default(24),
     lateCancellationRefundPercent: integer('late_cancellation_refund_percent')
@@ -178,6 +188,9 @@ export const businessLocations = pgTable(
     address: text('address'),
     latitude: decimal('latitude', { precision: 10, scale: 7 }),
     longitude: decimal('longitude', { precision: 10, scale: 7 }),
+    // Mobile locations: address / lat-lng are the home base (owner-only; customers
+    // see the city and a rounded centre) and this is how far (miles) they travel
+    serviceRadiusMiles: integer('service_radius_miles'),
     // Optional per-branch phone; falls back to the business phone
     phone: varchar('phone', { length: 40 }),
     timezone: varchar('timezone', { length: 64 }).notNull().default('America/New_York'),
@@ -411,6 +424,11 @@ export const businessServices = pgTable(
     maxGuests: integer('max_guests'),
     minimumTotalCents: integer('minimum_total_cents'),
     bufferMins: integer('buffer_mins').notNull().default(10),
+    // Sale: salePercent off the price (incl. per-location prices) between the two times.
+    // NULL percent = no sale; NULL start = from now; NULL end = until the business ends it.
+    salePercent: integer('sale_percent'),
+    saleStartsAt: timestamp('sale_starts_at', { withTimezone: true }),
+    saleEndsAt: timestamp('sale_ends_at', { withTimezone: true }),
     // true = every active staff member can perform it; false = see business_service_staff
     allStaff: boolean('all_staff').notNull().default(true),
     sortOrder: integer('sort_order').notNull().default(0),
@@ -432,7 +450,11 @@ export const businessServices = pgTable(
       'chk_business_services_session_type',
       sql`${table.sessionType} IN ('individual', 'group', 'private_group')`
     ),
-    check('chk_business_services_capacity', sql`${table.capacity} IS NULL OR ${table.capacity} BETWEEN 1 AND 500`),
+    check(
+      'chk_business_services_sale_percent',
+      sql`${table.salePercent} IS NULL OR ${table.salePercent} BETWEEN 1 AND 90`
+    ),
+    check('chk_business_services_capacity',sql`${table.capacity} IS NULL OR ${table.capacity} BETWEEN 1 AND 500`),
     check(
       'chk_business_services_guests',
       sql`${table.minGuests} IS NULL OR ${table.maxGuests} IS NULL OR (${table.minGuests} >= 1 AND ${table.minGuests} <= ${table.maxGuests})`

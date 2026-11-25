@@ -23,10 +23,16 @@ import ApiError from '../utils/api-error.js';
 import logger from '../config/logger.js';
 import { sendMail } from './mail.service.js';
 import { BusinessCommissionService } from './businessCommission.service.js';
+import {
+  BusinessReserveNowService,
+  isReserveNowLive,
+  serializeReserveNow,
+} from './businessReserveNow.service.js';
 import { serviceDepositCents } from '../utils/businessDeposit.js';
 import {
   listLocations,
   serializeLocation,
+  placeFields,
   setServiceLocations,
   setServiceOverrides,
   setStaffLocations,
@@ -43,6 +49,7 @@ import {
   calculateBusinessBookingFeeCents,
   calculateBusinessCommissionCents,
 } from '../utils/orderProcessingFee.js';
+import { saleStatus, withSale } from '../utils/businessSale.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Bookings in these states occupy staff time / block deleting things
@@ -78,7 +85,8 @@ const serializeService = (service, business) => {
     categoryName: service.categoryName,
     durationMins: service.durationMins,
     priceCents: service.priceCents,
-    // "Inquire for pricing" — no public price / self-booking; booked through a custom offer
+    // "Starts from" pricing — priceCents is the public starting price; no self-booking,
+    // the customer inquires and books through a custom offer
     priceOnRequest: !!service.priceOnRequest,
     paymentModel: service.paymentModel, // null = inherits business default
     effectivePaymentModel: paymentModel,
@@ -97,6 +105,12 @@ const serializeService = (service, business) => {
     maxGuests: service.maxGuests ?? null,
     minimumTotalCents: service.minimumTotalCents ?? null,
     bufferMins: service.bufferMins,
+    // Sale: salePercent off between the two times (null start = already started,
+    // null end = until the business ends it). saleStatus: 'active' | 'scheduled' | 'ended' | null
+    salePercent: service.salePercent ?? null,
+    saleStartsAt: service.saleStartsAt ?? null,
+    saleEndsAt: service.saleEndsAt ?? null,
+    saleStatus: saleStatus(service),
     // [] = every staff member
     eligibleStaffIds: service.allStaff ? [] : (service.staffLinks ?? []).map(l => l.staffId),
     // [] = offered at every location
@@ -107,8 +121,8 @@ const serializeService = (service, business) => {
       priceCents: o.priceCents ?? null,
       durationMins: o.durationMins ?? null,
     })),
-    // What the customer is charged on top (shown in booking flow)
-    customerFeeCents: calculateBusinessBookingFeeCents(service.priceCents),
+    // What the customer is charged on top (shown in booking flow) — on the sale price while one runs
+    customerFeeCents: calculateBusinessBookingFeeCents(withSale(service).priceCents),
     sortOrder: service.sortOrder,
   };
 };
@@ -171,12 +185,14 @@ const serializeBusiness = (
   amenities: b.amenities,
   locationType: b.locationType,
   city: b.city,
-  address: b.address,
-  latitude: b.latitude != null ? Number(b.latitude) : null,
-  longitude: b.longitude != null ? Number(b.longitude) : null,
+  // Mobile: home base address / pin only for the owner; customers get city + service radius
+  ...placeFields(b, includePrivate),
   phone: b.phone,
   email: b.email,
   websiteUrl: b.websiteUrl ?? null,
+  // "Reserve Now" button target — public only while the $20/mo add-on is live;
+  // the owner always sees what they saved
+  reservationUrl: includePrivate || isReserveNowLive(b) ? (b.reservationUrl ?? null) : null,
   // 'inbox' → the owner's Inquiry inbox only; 'email' → also emailed to inquiryEmail
   // (dashboard only — customers never see the address)
   inquiryChannel: b.inquiryChannel ?? 'email',
@@ -200,11 +216,12 @@ const serializeBusiness = (
   rating: Number(b.rating ?? 0),
   reviewCount: b.reviewCount,
   // Branches, primary first (the flat location fields above mirror the primary)
-  locations: locations.map(serializeLocation),
+  locations: locations.map(l => serializeLocation(l, { includePrivate })),
   services: services.map(s =>
-    // "Inquire for pricing": the guide price is the owner's own note — never public
+    // "Starts from" pricing: the starting price is public, but nothing is booked or
+    // charged at it — deposit / fee / per-location terms come with each custom offer
     !includePrivate && s.priceOnRequest
-      ? { ...serializeService(s, b), priceCents: 0, depositCents: null, effectiveDepositCents: null, locationOverrides: [], customerFeeCents: 0 }
+      ? { ...serializeService(s, b), depositCents: null, effectiveDepositCents: null, locationOverrides: [], customerFeeCents: 0 }
       : serializeService(s, b)
   ),
   staff: staff.map(s => serializeStaff(s, { includePrivate })),
@@ -220,6 +237,7 @@ const serializeBusiness = (
         ownerId: b.ownerId,
         isPublished: b.isPublished,
         inquiryEmail: b.inquiryEmail ?? null,
+        reserveNow: serializeReserveNow(b),
         createdAt: b.createdAt,
         updatedAt: b.updatedAt,
       }
@@ -388,8 +406,8 @@ function assertOwnStaff(access, staffId) {
 }
 
 /** True when the business can be seen publicly / take new bookings. */
-export function isBusinessPublic(business, owner) {
-  return !business.deletedAt && business.isPublished && !!owner?.isBritesidePlus;
+export function isBusinessPublic(business) {
+  return !business.deletedAt && business.isPublished;
 }
 
 // ─── Service ────────────────────────────────────────────────────────────────
@@ -401,25 +419,58 @@ export class BusinessService {
     return Object.entries(BUSINESS_CATEGORIES).map(([key, meta]) => ({ key, ...meta }));
   }
 
-  /** Directory listing. Only published businesses whose owner has active Plus. */
-  static async listPublic({ q, category, city, page = 1, limit = 20 }) {
+  /**
+   * Directory listing. Only published businesses.
+   *
+   * With a point (`lat` / `lng`): physical locations within `radius` miles of
+   * it match, and so do mobile businesses whose own service area covers it —
+   * a mobile business 40 mi away that travels 15 mi doesn't. Results are then
+   * nearest first. Locations saved before pins existed still match by city.
+   */
+  static async listPublic({ q, category, city, lat, lng, radius = 25, page = 1, limit = 20 }) {
     const conditions = [
       isNull(businesses.deletedAt),
       eq(businesses.isPublished, true),
-      eq(users.isBritesidePlus, true),
     ];
     if (category) conditions.push(eq(businesses.category, category));
+    const hasPoint = lat != null && lng != null;
     // Any of the business's locations can match the city. Contains-match, so a
     // city from the user's current location ("Chicago") finds a business whose
     // city was typed with more detail ("357 Main St, Chicago, IL").
-    if (city?.trim()) {
+    const cityMatch = (() => {
+      if (!city?.trim()) return null;
       const pattern = `%${city.trim().replace(/[\\%_]/g, m => `\\${m}`)}%`;
-      conditions.push(
-        or(
-          ilike(businesses.city, pattern),
-          sql`exists (select 1 from ${businessLocations} l where l.business_id = ${businesses.id} and l.deleted_at is null and l.city ilike ${pattern})`
-        )
+      return or(
+        ilike(businesses.city, pattern),
+        sql`exists (select 1 from ${businessLocations} l where l.business_id = ${businesses.id} and l.deleted_at is null and l.city ilike ${pattern})`
       );
+    })();
+    // Miles from the point to location `l`. A mobile location is measured from
+    // its public (rounded) centre, so search results reveal no more about the
+    // owner's home base than the profile map already does.
+    const milesToL = hasPoint
+      ? (() => {
+          const lLat = sql.raw(
+            `(case when l.location_type = 'mobile' then round(l.latitude, 2) else l.latitude end)::float8`
+          );
+          const lLng = sql.raw(
+            `(case when l.location_type = 'mobile' then round(l.longitude, 2) else l.longitude end)::float8`
+          );
+          return sql`(3958.8 * acos(least(1, greatest(-1,
+            cos(radians(${lat}::float8)) * cos(radians(${lLat})) * cos(radians(${lLng}) - radians(${lng}::float8))
+            + sin(radians(${lat}::float8)) * sin(radians(${lLat}))
+          ))))`;
+        })()
+      : null;
+    const pinnedL = sql`l.business_id = ${businesses.id} and l.deleted_at is null and l.latitude is not null and l.longitude is not null`;
+    if (hasPoint) {
+      // Mobile: their own radius (the search radius if they never set one)
+      const near = sql`exists (select 1 from ${businessLocations} l where ${pinnedL} and ${milesToL} <= (
+        case when l.location_type = 'mobile' then coalesce(l.service_radius_miles, ${radius}) else ${radius} end
+      ))`;
+      conditions.push(cityMatch ? or(cityMatch, near) : near);
+    } else if (cityMatch) {
+      conditions.push(cityMatch);
     }
     if (q) {
       const tsQuery = q
@@ -442,10 +493,16 @@ export class BusinessService {
     const where = and(...conditions);
     const offset = (page - 1) * limit;
 
-    // "Inquire for pricing" services have no public price, so they don't set the "from $X"
-    const minPrice = sql`(select min(s.price_cents) from ${businessServices} s where s.business_id = ${businesses.id} and s.deleted_at is null and s.price_on_request = false)`;
+    // A "starts from" service's price is a floor too, so it counts toward the "from $X"
+    // A running sale lowers it (same rounding as utils/businessSale.js)
+    const minPrice = sql`(select min(case when s.sale_percent is not null and (s.sale_starts_at is null or s.sale_starts_at <= now()) and (s.sale_ends_at is null or s.sale_ends_at > now()) then round(s.price_cents * (100 - s.sale_percent) / 100.0) else s.price_cents end) from ${businessServices} s where s.business_id = ${businesses.id} and s.deleted_at is null and (s.price_on_request = false or s.price_cents > 0))`;
     const firstDuration = sql`(select s.duration_mins from ${businessServices} s where s.business_id = ${businesses.id} and s.deleted_at is null order by s.sort_order, s.created_at limit 1)`;
     const locationCount = sql`(select count(*) from ${businessLocations} l where l.business_id = ${businesses.id} and l.deleted_at is null)`;
+    // Nearest pinned location (null without a point, or when none is pinned)
+    const distance = hasPoint
+      ? sql`(select min(${milesToL}) from ${businessLocations} l where ${pinnedL})`
+      : sql`null::float8`;
+    const ranking = [desc(businesses.rating), desc(businesses.reviewCount), asc(businesses.name)];
 
     const [rows, [{ total }]] = await Promise.all([
       db
@@ -454,11 +511,12 @@ export class BusinessService {
           minPriceCents: minPrice.mapWith(v => (v == null ? null : Number(v))),
           firstServiceDurationMins: firstDuration.mapWith(v => (v == null ? null : Number(v))),
           locationCount: locationCount.mapWith(Number),
+          distanceMiles: distance.mapWith(v => (v == null ? null : Math.round(Number(v) * 10) / 10)),
         })
         .from(businesses)
         .innerJoin(users, eq(users.id, businesses.ownerId))
         .where(where)
-        .orderBy(desc(businesses.rating), desc(businesses.reviewCount), asc(businesses.name))
+        .orderBy(...(hasPoint ? [sql`${distance} asc nulls last`, ...ranking] : ranking))
         .limit(limit)
         .offset(offset),
       db
@@ -478,6 +536,9 @@ export class BusinessService {
         subcategory: r.business.subcategory,
         city: r.business.city,
         locationType: r.business.locationType,
+        serviceRadiusMiles: r.business.locationType === 'mobile' ? (r.business.serviceRadiusMiles ?? null) : null,
+        // Only when searching near a point
+        distanceMiles: r.distanceMiles,
         logoUrl: r.business.logoUrl,
         heroUrl: r.business.heroUrl,
         amenities: r.business.amenities,
@@ -490,6 +551,8 @@ export class BusinessService {
         minPriceCents: r.minPriceCents,
         firstServiceDurationMins: r.firstServiceDurationMins,
         locationCount: Math.max(1, r.locationCount ?? 1),
+        // Reserve Now add-on: the card's button goes straight to their reservation page
+        reservationUrl: isReserveNowLive(r.business) ? (r.business.reservationUrl ?? null) : null,
       })),
       pagination: {
         page,
@@ -501,7 +564,7 @@ export class BusinessService {
     };
   }
 
-  /** Public profile by id or slug. 404 when hidden (unpublished / owner lost Plus). */
+  /** Public profile by id or slug. 404 when hidden (unpublished / deleted). */
   static async getPublic(idOrSlug) {
     const business = await db.query.businesses.findFirst({
       where: and(
@@ -594,10 +657,16 @@ export class BusinessService {
           bio: emptyToNull(body.bio),
           locationType: body.locationType,
           city: body.city,
-          address: body.locationType === 'mobile' ? body.city : emptyToNull(body.address),
+          // Mobile: address / pin are the home base the service radius is measured from
+          address: emptyToNull(body.address),
+          latitude: body.latitude != null ? String(body.latitude) : null,
+          longitude: body.longitude != null ? String(body.longitude) : null,
+          serviceRadiusMiles: body.locationType === 'mobile' ? (body.serviceRadiusMiles ?? null) : null,
           phone: emptyToNull(body.phone),
           email: emptyToNull(body.email),
           websiteUrl: emptyToNull(body.websiteUrl),
+          // Saved now; the button shows once Reserve Now is paid for
+          reservationUrl: emptyToNull(body.reservationUrl),
           // users.timezone defaults to 'UTC' — treat that as "unknown"
           timezone:
             body.timezone ??
@@ -617,6 +686,9 @@ export class BusinessService {
         locationType: business.locationType,
         city: business.city,
         address: business.address,
+        latitude: business.latitude,
+        longitude: business.longitude,
+        serviceRadiusMiles: business.serviceRadiusMiles,
         timezone: business.timezone,
         hours: business.hours,
         isPrimary: true,
@@ -868,7 +940,7 @@ export class BusinessService {
       const kept = business.galleryLocations ?? {};
       values.galleryLocations = Object.fromEntries(Object.entries(kept).filter(([url]) => gallery.includes(url)));
     }
-    for (const k of ['subcategory', 'bio', 'address', 'phone', 'email', 'announcement', 'websiteUrl', 'inquiryEmail']) {
+    for (const k of ['subcategory', 'bio', 'address', 'phone', 'email', 'announcement', 'websiteUrl', 'reservationUrl', 'inquiryEmail']) {
       if (k in values) values[k] = emptyToNull(values[k]);
     }
     // Email inquiries need an address to go to (the inquiry email, else the contact email)
@@ -882,8 +954,11 @@ export class BusinessService {
     }
     if (values.latitude !== undefined && values.latitude !== null) values.latitude = String(values.latitude);
     if (values.longitude !== undefined && values.longitude !== null) values.longitude = String(values.longitude);
+    // Only mobile businesses have a service radius
     const locationType = values.locationType ?? business.locationType;
-    if (locationType === 'mobile') values.address = values.city ?? business.city;
+    if (locationType !== 'mobile' && ('locationType' in values || 'serviceRadiusMiles' in values)) {
+      values.serviceRadiusMiles = null;
+    }
 
     const updated = await db.transaction(async tx => {
       const [row] = await tx
@@ -935,6 +1010,8 @@ export class BusinessService {
       .update(businesses)
       .set({ deletedAt: new Date(), isPublished: false, updatedAt: new Date() })
       .where(eq(businesses.id, business.id));
+    // Stop the Reserve Now subscription — there's no page left to show the button on
+    await BusinessReserveNowService.cancelImmediately(business);
   }
 
   // ── Services ──────────────────────────────────────────────────────────────
@@ -1047,6 +1124,35 @@ export class BusinessService {
       }
     });
     return this.getService(business, serviceId);
+  }
+
+  /**
+   * Start, schedule, change or end a sale on several services at once.
+   * salePercent null = end the sale (clears the dates too). Bookings already
+   * made keep the price they were booked at.
+   */
+  static async setServiceSale(business, { serviceIds, salePercent, saleStartsAt, saleEndsAt }) {
+    const ids = [...new Set(serviceIds)];
+    const rows = await db.query.businessServices.findMany({
+      where: and(
+        eq(businessServices.businessId, business.id),
+        inArray(businessServices.id, ids),
+        isNull(businessServices.deletedAt)
+      ),
+      columns: { id: true },
+    });
+    if (rows.length !== ids.length) throw new ApiError(httpStatus.NOT_FOUND, 'Service not found');
+    const ending = salePercent == null;
+    await db
+      .update(businessServices)
+      .set({
+        salePercent: ending ? null : salePercent,
+        saleStartsAt: ending || !saleStartsAt ? null : new Date(saleStartsAt),
+        saleEndsAt: ending || !saleEndsAt ? null : new Date(saleEndsAt),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(businessServices.businessId, business.id), inArray(businessServices.id, ids)));
+    return Promise.all(ids.map(id => this.getService(business, id)));
   }
 
   /** Soft delete — existing bookings keep their reference and snapshot. */

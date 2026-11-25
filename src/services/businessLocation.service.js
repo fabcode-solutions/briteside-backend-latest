@@ -29,19 +29,45 @@ import ApiError from '../utils/api-error.js';
 const MAX_LOCATIONS = 50;
 const ACTIVE_BOOKING_STATUSES = ['awaiting_payment', 'pending', 'confirmed'];
 // Columns shared by a location and the business row it is mirrored onto
-const MIRRORED = ['locationType', 'city', 'address', 'latitude', 'longitude', 'timezone', 'hours'];
+const MIRRORED = [
+  'locationType',
+  'city',
+  'address',
+  'latitude',
+  'longitude',
+  'serviceRadiusMiles',
+  'timezone',
+  'hours',
+];
 
 const emptyToNull = v => (v === '' || v === undefined ? null : v);
 const coord = v => (v === undefined ? undefined : v === null ? null : String(v));
 
-export const serializeLocation = l => ({
+/**
+ * Where a place is, as customers may see it. A mobile business's address and
+ * pin are its home base, so customers get only the city and a centre rounded
+ * to 2 decimals (~1 km) — enough to draw the service-area circle.
+ * `includePrivate` (owner / team) returns the exact values.
+ */
+export function placeFields(p, includePrivate = false) {
+  const lat = p.latitude != null ? Number(p.latitude) : null;
+  const lng = p.longitude != null ? Number(p.longitude) : null;
+  const hide = p.locationType === 'mobile' && !includePrivate;
+  const round = v => (v == null ? null : Math.round(v * 100) / 100);
+  return {
+    address: hide ? p.city : p.address,
+    latitude: hide ? round(lat) : lat,
+    longitude: hide ? round(lng) : lng,
+    serviceRadiusMiles: p.locationType === 'mobile' ? (p.serviceRadiusMiles ?? null) : null,
+  };
+}
+
+export const serializeLocation = (l, { includePrivate = false } = {}) => ({
   id: l.id,
   name: l.name,
   locationType: l.locationType,
   city: l.city,
-  address: l.address,
-  latitude: l.latitude != null ? Number(l.latitude) : null,
-  longitude: l.longitude != null ? Number(l.longitude) : null,
+  ...placeFields(l, includePrivate),
   phone: l.phone ?? null,
   timezone: l.timezone,
   hours: l.hours,
@@ -50,6 +76,9 @@ export const serializeLocation = l => ({
   // Upcoming closed dates (attached by the loader)
   closures: l.closures ?? [],
 });
+
+// The location endpoints below are owner / team only
+const OWNER = { includePrivate: true };
 
 /** Active locations of a business, primary first, each with its upcoming closures. */
 export async function listLocations(businessId, tx = db) {
@@ -375,12 +404,12 @@ function locationValues(body, existing) {
   if (body.phone !== undefined) values.phone = emptyToNull(body.phone);
   if (body.latitude !== undefined) values.latitude = coord(body.latitude);
   if (body.longitude !== undefined) values.longitude = coord(body.longitude);
-  // A mobile business travels to customers: its "address" is its service area
+  if (body.serviceRadiusMiles !== undefined) values.serviceRadiusMiles = body.serviceRadiusMiles;
+  // A mobile business travels to customers: address / pin are its home base and
+  // the radius is how far it goes. Physical locations have no radius.
   const type = values.locationType ?? existing?.locationType;
-  if (type === 'mobile') {
-    values.address = values.city ?? existing?.city;
-    values.latitude = null;
-    values.longitude = null;
+  if (type !== 'mobile' && (values.locationType !== undefined || values.serviceRadiusMiles !== undefined)) {
+    values.serviceRadiusMiles = null;
   }
   return values;
 }
@@ -422,7 +451,7 @@ async function assertNothingUpcomingAt(locationId) {
 
 export class BusinessLocationService {
   static async list(business) {
-    return (await listLocations(business.id)).map(serializeLocation);
+    return (await listLocations(business.id)).map(l => serializeLocation(l, OWNER));
   }
 
   /**
@@ -487,7 +516,7 @@ export class BusinessLocationService {
       if (isPrimary) await mirrorToBusiness(inserted[0], tx);
       return inserted;
     });
-    return serializeLocation(row);
+    return serializeLocation(row, OWNER);
   }
 
   static async update(business, locationId, body) {
@@ -501,13 +530,13 @@ export class BusinessLocationService {
       if (updated[0].isPrimary) await mirrorToBusiness(updated[0], tx);
       return updated;
     });
-    return serializeLocation(row);
+    return serializeLocation(row, OWNER);
   }
 
   /** Make this the business's main location (shown first, mirrored on the business). */
   static async makePrimary(business, locationId) {
     const location = await resolveLocation(business, locationId);
-    if (location.isPrimary) return serializeLocation(location);
+    if (location.isPrimary) return serializeLocation(location, OWNER);
     await db.transaction(async tx => {
       await tx
         .update(businessLocations)
@@ -519,7 +548,7 @@ export class BusinessLocationService {
         .where(eq(businessLocations.id, location.id));
       await mirrorToBusiness(location, tx);
     });
-    return serializeLocation({ ...location, isPrimary: true });
+    return serializeLocation({ ...location, isPrimary: true }, OWNER);
   }
 
   /**

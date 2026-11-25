@@ -47,6 +47,8 @@ const serializeReview = r => ({
   authorImage: r.user?.image ?? null,
   serviceName: r.booking?.serviceName ?? null,
   staffName: r.booking?.staffName ?? null,
+  // When the reviewed visit took place
+  visitDate: r.booking?.startAt ?? null,
   ownerReply: r.ownerReply,
   ownerRepliedAt: r.ownerRepliedAt,
   createdAt: r.createdAt,
@@ -56,6 +58,8 @@ const serializeReview = r => ({
 /** Whether `booking` (with completedAt/status/customerId) can be reviewed by `userId` now. */
 export function canReviewBooking(booking, userId, now = new Date()) {
   if (!userId || booking.customerId !== userId || booking.status !== 'completed') return false;
+  // Closed early by the business — wait until the service's scheduled end
+  if (new Date(booking.endAt).getTime() > now.getTime()) return false;
   const closedAt = booking.completedAt ?? booking.endAt;
   return now.getTime() - new Date(closedAt).getTime() <= REVIEW_WINDOW_DAYS * 86_400_000;
 }
@@ -95,7 +99,7 @@ async function listFor(businessId, { page = 1, limit = 10, rating }, locationIds
       where,
       with: {
         user: { columns: { firstName: true, lastName: true, username: true, image: true } },
-        booking: { columns: { serviceName: true, staffName: true } },
+        booking: { columns: { serviceName: true, staffName: true, startAt: true } },
       },
       orderBy: [desc(businessReviews.createdAt)],
       limit,
@@ -186,7 +190,7 @@ export class BusinessReviewService {
       where: eq(businessReviews.id, reviewId),
       with: {
         user: { columns: { firstName: true, lastName: true, username: true, image: true } },
-        booking: { columns: { serviceName: true, staffName: true } },
+        booking: { columns: { serviceName: true, staffName: true, startAt: true } },
       },
     });
     if (!row) throw new ApiError(httpStatus.NOT_FOUND, 'Review not found');
@@ -200,7 +204,7 @@ export class BusinessReviewService {
     if (!canReviewBooking(booking, user.id)) {
       throw new ApiError(
         httpStatus.CONFLICT,
-        booking.status === 'completed'
+        booking.status === 'completed' && new Date(booking.endAt) <= new Date()
           ? `Reviews can be left up to ${REVIEW_WINDOW_DAYS} days after your visit`
           : 'You can review a booking once it has been completed'
       );
@@ -274,7 +278,7 @@ export class BusinessReviewService {
       where: inArray(businessReviews.bookingId, bookingIds),
       with: {
         user: { columns: { firstName: true, lastName: true, username: true, image: true } },
-        booking: { columns: { serviceName: true, staffName: true } },
+        booking: { columns: { serviceName: true, staffName: true, startAt: true } },
       },
     });
     return new Map(rows.map(r => [r.bookingId, serializeReview(r)]));
@@ -285,6 +289,8 @@ export class BusinessReviewService {
   /**
    * Ask signed-in customers to review a visit ~24h after it completed.
    * Guests (no account) can't post reviews, so they're skipped.
+   * A business can close a booking as soon as it starts, so the reminder also
+   * waits until 24h past the booking's scheduled end — never mid-service.
    */
   static async sendReviewReminders() {
     const now = Date.now();
@@ -305,6 +311,7 @@ export class BusinessReviewService {
           isNull(businessReviews.id),
           isNull(businesses.deletedAt),
           lte(businessBookings.completedAt, new Date(now - REMINDER_AFTER_HOURS * 3_600_000)),
+          lte(businessBookings.endAt, new Date(now - REMINDER_AFTER_HOURS * 3_600_000)),
           gte(businessBookings.completedAt, new Date(now - REMINDER_MAX_AGE_DAYS * 86_400_000))
         )
       )
