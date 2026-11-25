@@ -51,6 +51,7 @@ import { legacyQuestions, resolveAnswers } from '../utils/businessQuestionnaire.
 import { withSale } from '../utils/businessSale.js';
 import { BusinessAttachmentService } from './businessAttachment.service.js';
 import ApiError from '../utils/api-error.js';
+import { businessByIdOrSlug } from '../utils/handles.js';
 import config from '../config/config.js';
 import logger from '../config/logger.js';
 import { isBusinessPublic } from './business.service.js';
@@ -102,7 +103,6 @@ const SOURCE_TYPE = 'business_booking';
 
 const HOLDING_STATUSES = ['awaiting_payment', 'pending', 'confirmed'];
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const toMins = t => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 const fromMins = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 const money = c => `$${(c / 100).toFixed(2)}`;
@@ -384,10 +384,8 @@ const serializeBooking = (b, { forBusiness = false } = {}) => ({
 
 async function loadPublicBusiness(idOrSlug) {
   const business = await db.query.businesses.findFirst({
-    where: and(
-      UUID_RE.test(idOrSlug) ? eq(businesses.id, idOrSlug) : eq(businesses.slug, idOrSlug),
-      isNull(businesses.deletedAt)
-    ),
+    // id, slug or an old @username (renamed businesses' links keep working)
+    where: and(businessByIdOrSlug(idOrSlug), isNull(businesses.deletedAt)),
     with: { owner: { columns: { id: true, isBritesidePlus: true, email: true, firstName: true } } },
   });
   if (!business || !isBusinessPublic(business, business.owner)) {

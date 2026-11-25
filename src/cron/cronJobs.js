@@ -26,6 +26,7 @@ import { startPriorityMessageRefundCron } from './priorityMessageRefund.js';
 import { startIapCatalogSyncCron } from './iapCatalogSync.js';
 import { publishScheduledPosts } from './publishScheduledPosts.js';
 import { cleanupStaleImports } from './cleanupStaleImports.js';
+import { releaseExpiredHandleHolds } from './pendingHandleHolds.js';
 import { sweepMissingConnectAccounts } from './connectAccountSweep.js';
 import { reconcileStuckModeration } from './reconcileModeration.js';
 import { cleanupExpiredEventChats } from './eventChatCleanup.cron.js';
@@ -68,6 +69,10 @@ export const initializeCronJobs = () => {
 
   // Run daily at 3 AM to clean up deleted files (30-day grace period)
   cron.schedule('0 3 * * *', runCron('fileCleanup', cleanupDeletedFiles));
+
+  // Daily at 3:15 AM: free @usernames held for business sign-ups that never
+  // created their business within the hold period
+  cron.schedule('15 3 * * *', runCron('pendingHandleHolds', releaseExpiredHandleHolds));
 
   cron.schedule('45 * * * *', runCron('eventChatCleanup', cleanupExpiredEventChats));
 

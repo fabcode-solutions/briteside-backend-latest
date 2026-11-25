@@ -66,6 +66,21 @@ const inboxSendLimiter = createLimiter({
 // ─── Public ─────────────────────────────────────────────────────────────────
 router.get('/categories', c.getCategories);
 router.get('/fees/quote', c.quoteFees);
+// Sign-up / onboarding: is this @username free? (public — asked before the account exists)
+router.get(
+  '/handle-available',
+  createLimiter({
+    windowMs: 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: { code: 429, message: 'Too many checks. Wait a moment and try again.' } },
+  }),
+  // Public, but knows a signed-in user so their own held name shows as available
+  optionalAuthMiddleware,
+  validateMiddleware(v.handleAvailableSchema),
+  c.checkHandleAvailable
+);
 router.get('/', validateMiddleware(v.listBusinessesSchema), c.listBusinesses);
 
 // ─── Bookings: customer side (static paths, before /:idOrSlug) ─────────────
@@ -167,6 +182,17 @@ router.post(
 
 // ─── Authenticated, not business-scoped ────────────────────────────────────
 router.get('/mine', authMiddleware, c.listMyBusinesses);
+// Business sign-up not finished yet: the choices to resume onboarding with, on
+// any device. Reachable before age verification (see auth.middleware.js) so
+// sign-up can save it right away; it only stores the user's own choices.
+router.get('/pending-setup', authMiddleware, c.getPendingSetup);
+router.put(
+  '/pending-setup',
+  authMiddleware,
+  validateMiddleware(v.savePendingSetupSchema),
+  c.savePendingSetup
+);
+router.delete('/pending-setup', authMiddleware, c.clearPendingSetup);
 router.post(
   '/invitations/:token/accept',
   authMiddleware,
@@ -361,6 +387,12 @@ const scoped = (permission, schema) => [
 
 router.get('/:businessId/manage', ...scoped(P.VIEW, v.businessIdOnlySchema), c.getManagedBusiness);
 router.patch('/:businessId', ...scoped(P.PROFILE_EDIT, v.updateBusinessSchema), c.updateBusiness);
+// @username (= page URL); the controller also requires owner / admin
+router.patch(
+  '/:businessId/handle',
+  ...scoped(P.PROFILE_EDIT, v.updateHandleSchema),
+  c.updateBusinessHandle
+);
 router.patch(
   '/:businessId/policies',
   ...scoped(P.POLICIES_MANAGE, v.updatePoliciesSchema),

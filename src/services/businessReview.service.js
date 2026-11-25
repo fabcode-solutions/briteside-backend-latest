@@ -9,13 +9,13 @@ import { db } from '../db/index.js';
 import { businesses, businessBookings, businessReviews, users } from '../db/schema/index.js';
 import { bookingsAtLocations, viewLocationIds } from './businessLocation.service.js';
 import ApiError from '../utils/api-error.js';
+import { businessByIdOrSlug } from '../utils/handles.js';
 import logger from '../config/logger.js';
 import { isBusinessPublic } from './business.service.js';
 import { createNotification } from './notification.service.js';
 import { sendMail } from './mail.service.js';
 import { emailWrapper, ctaRow, ctaButton, appUrl } from '../templates/emailLayout.js';
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** How long after the visit a customer may still review it. */
 export const REVIEW_WINDOW_DAYS = 90;
@@ -141,10 +141,7 @@ export class BusinessReviewService {
 
   static async listPublic(idOrSlug, query) {
     const business = await db.query.businesses.findFirst({
-      where: and(
-        UUID_RE.test(idOrSlug) ? eq(businesses.id, idOrSlug) : eq(businesses.slug, idOrSlug),
-        isNull(businesses.deletedAt)
-      ),
+      where: and(businessByIdOrSlug(idOrSlug), isNull(businesses.deletedAt)),
       columns: { id: true, isPublished: true, deletedAt: true },
       with: { owner: { columns: { isBritesidePlus: true } } },
     });

@@ -1,5 +1,6 @@
 import httpStatus from 'http-status';
 import { catchAsync } from '../utils/catch-async.js';
+import ApiError from '../utils/api-error.js';
 import { BusinessService } from '../services/business.service.js';
 import { BusinessBookingService } from '../services/businessBooking.service.js';
 import { BusinessGroupSessionService } from '../services/businessGroupSession.service.js';
@@ -12,6 +13,7 @@ import { BusinessWallService } from '../services/businessWall.service.js';
 import { BusinessInquiryService } from '../services/businessInquiry.service.js';
 import { BusinessLocationService } from '../services/businessLocation.service.js';
 import { BusinessCustomOfferService } from '../services/businessCustomOffer.service.js';
+import { BUSINESS_HANDLE_RE } from '../validations/business.validation.js';
 
 // ─── Public ─────────────────────────────────────────────────────────────────
 export const getCategories = catchAsync(async (req, res) => {
@@ -28,6 +30,21 @@ export const getPublicBusiness = catchAsync(async (req, res) => {
   res.json({ success: true, data: { business } });
 });
 
+/** { handle, valid, available } — `handle` is normalized (no @, lowercase). */
+export const checkHandleAvailable = catchAsync(async (req, res) => {
+  const query = req.validatedQuery ?? req.query;
+  const handle = String(query.handle ?? '').trim().replace(/^@/, '').toLowerCase();
+  const valid = BUSINESS_HANDLE_RE.test(handle);
+  // Signed in (optional): a name held for their own business sign-up is available to them
+  const available =
+    valid &&
+    (await BusinessService.isHandleAvailable(handle, {
+      forBusinessId: query.businessId,
+      forUserId: req.user?.id,
+    }));
+  res.json({ success: true, data: { handle, valid, available } });
+});
+
 export const quoteFees = catchAsync(async (req, res) => {
   const priceCents = Math.max(0, parseInt(req.query.priceCents, 10) || 0);
   res.json({ success: true, data: BusinessService.quoteFees(priceCents) });
@@ -37,6 +54,22 @@ export const quoteFees = catchAsync(async (req, res) => {
 export const listMyBusinesses = catchAsync(async (req, res) => {
   const businesses = await BusinessService.listMine(req.user.id);
   res.json({ success: true, data: { businesses } });
+});
+
+// Sign-up's business choices, kept until the business is created (any device)
+export const getPendingSetup = catchAsync(async (req, res) => {
+  const setup = await BusinessService.getPendingSetup(req.user.id);
+  res.json({ success: true, data: { setup } });
+});
+
+export const savePendingSetup = catchAsync(async (req, res) => {
+  const setup = await BusinessService.savePendingSetup(req.user.id, req.body);
+  res.json({ success: true, data: { setup } });
+});
+
+export const clearPendingSetup = catchAsync(async (req, res) => {
+  await BusinessService.clearPendingSetup(req.user.id);
+  res.status(httpStatus.NO_CONTENT).send();
 });
 
 export const createBusiness = catchAsync(async (req, res) => {
@@ -51,6 +84,15 @@ export const getManagedBusiness = catchAsync(async (req, res) => {
 
 export const updateBusiness = catchAsync(async (req, res) => {
   const business = await BusinessService.update(req.business, req.body);
+  res.json({ success: true, data: { business } });
+});
+
+/** Owner / admin only: the @username is the business's identity and URL. */
+export const updateBusinessHandle = catchAsync(async (req, res) => {
+  if (!['owner', 'admin'].includes(req.businessAccess?.role)) {
+    throw new ApiError(httpStatus.FORBIDDEN, 'Only the owner or an admin can change the business @username');
+  }
+  const business = await BusinessService.changeHandle(req.business, req.body.handle);
   res.json({ success: true, data: { business } });
 });
 

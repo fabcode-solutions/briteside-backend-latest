@@ -18,13 +18,13 @@ import {
   users,
 } from '../db/schema/index.js';
 import ApiError from '../utils/api-error.js';
+import { businessByIdOrSlug } from '../utils/handles.js';
 import logger from '../config/logger.js';
 import { BUSINESS_PERMISSIONS } from '../config/business-permissions.js';
 import { resolveBusinessAccess } from '../middlewares/businessAccess.middleware.js';
 import { isBusinessPublic } from './business.service.js';
 import { createNotification } from './notification.service.js';
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Anti-spam: posts one person may leave on one wall per hour. */
 export const WALL_POSTS_PER_HOUR = 5;
@@ -230,10 +230,8 @@ const countLikes = async postId => {
 
 export async function loadPublicBusiness(idOrSlug) {
   const business = await db.query.businesses.findFirst({
-    where: and(
-      UUID_RE.test(idOrSlug) ? eq(businesses.id, idOrSlug) : eq(businesses.slug, idOrSlug),
-      isNull(businesses.deletedAt)
-    ),
+    // id, slug or an old @username (renamed businesses' links keep working)
+    where: and(businessByIdOrSlug(idOrSlug), isNull(businesses.deletedAt)),
     with: { owner: { columns: { id: true, isBritesidePlus: true } } },
   });
   if (!business || !isBusinessPublic(business, business.owner)) {

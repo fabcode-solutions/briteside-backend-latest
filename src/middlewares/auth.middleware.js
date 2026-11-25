@@ -12,11 +12,15 @@ import { eq } from 'drizzle-orm';
 // existing mobile users with no way to self-resolve. Paths a not-yet-verified
 // web user must still be able to hit: the session check (so the frontend can
 // learn it needs to show the gate), logout (escape hatch), and the Didit
-// session/status endpoints that perform the verification.
+// session/status endpoints that perform the verification. Also the business
+// sign-up's pending setup: saved right after sign-up (always before
+// verification) so onboarding can resume on any device. It only stores the
+// user's own choices — nothing is created or shown to anyone else.
 const AGE_VERIFICATION_EXEMPT_PATHS = [
   '/api/auth/session',
   '/api/auth/logout',
   '/api/age-verification',
+  '/api/businesses/pending-setup',
 ];
 
 function isAgeVerificationExempt(req, user) {

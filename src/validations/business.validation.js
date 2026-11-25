@@ -101,6 +101,32 @@ export const getPublicBusinessSchema = z.object({
   params: z.object({ idOrSlug: z.string().trim().min(1).max(120) }),
 });
 
+// The business's @username — also its public URL key (/business/:handle).
+// Lowercase letters, numbers, _ and -; starts and ends with a letter or number.
+export const BUSINESS_HANDLE_RE = /^[a-z0-9](?:[a-z0-9_-]{1,28}[a-z0-9])$/;
+const businessHandle = z
+  .string()
+  .trim()
+  .transform(s => s.replace(/^@/, '').toLowerCase())
+  .pipe(
+    z
+      .string()
+      .min(3, 'Username must be at least 3 characters')
+      .max(30, 'Username can be up to 30 characters')
+      .regex(
+        BUSINESS_HANDLE_RE,
+        'Username can use letters, numbers, _ and -, and must start and end with a letter or number'
+      )
+  );
+
+export const handleAvailableSchema = z.object({
+  query: z.object({
+    handle: z.string().trim().min(1).max(60),
+    // A renaming business: its own recently released names are available to it
+    businessId: uuid.optional(),
+  }),
+});
+
 // ─── Owner: business ────────────────────────────────────────────────────────
 // Mobile businesses: how far (miles) they travel from their home base
 const serviceRadiusMiles = z
@@ -115,6 +141,8 @@ export const createBusinessSchema = z.object({
     // 'standard' = profile page without booking (no staff / services)
     pageType: z.enum(PAGE_TYPES).default('appointments'),
     name: z.string().trim().min(1).max(150),
+    // @username; generated from the name when omitted (older clients)
+    handle: businessHandle.optional(),
     category: z.enum(BUSINESS_CATEGORY_KEYS),
     subcategory: optionalText(100),
     bio: optionalText(5000),
@@ -198,6 +226,21 @@ export const updateBusinessSchema = z.object({
     })
     .partial()
     .refine(b => Object.keys(b).length > 0, { message: 'Nothing to update' }),
+});
+
+// Sign-up: the business type and @username to resume onboarding with
+export const savePendingSetupSchema = z.object({
+  body: z.object({
+    category: z.enum(BUSINESS_CATEGORY_KEYS),
+    subcategory: optionalText(100),
+    handle: businessHandle,
+  }),
+});
+
+// Change the business's @username (and with it the page URL)
+export const updateHandleSchema = z.object({
+  params: businessIdParams,
+  body: z.object({ handle: businessHandle }),
 });
 
 export const updatePoliciesSchema = z.object({

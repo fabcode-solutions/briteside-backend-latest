@@ -16,7 +16,21 @@ import {
   businessQuestionnaires,
   businessGroupSessions,
   businessLocations,
+  usernameReservations,
+  handles,
+  businessPreviousHandles,
+  pendingBusinessSetups,
 } from '../db/schema/index.js';
+import { ilikeExact, isReservedUsername } from './usernameReservation.service.js';
+import {
+  businessByIdOrSlug,
+  isHandleClash,
+  isHandleOnHold,
+  isHeldForPendingSetup,
+  pendingHoldEndsAt,
+  pgError,
+  releaseExpiredPendingHolds,
+} from '../utils/handles.js';
 import { normalizeQuestion } from '../utils/businessQuestionnaire.js';
 import { sessionSettingsProblem } from '../utils/businessSession.js';
 import ApiError from '../utils/api-error.js';
@@ -51,7 +65,6 @@ import {
 } from '../utils/orderProcessingFee.js';
 import { saleStatus, withSale } from '../utils/businessSale.js';
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Bookings in these states occupy staff time / block deleting things
 const ACTIVE_BOOKING_STATUSES = ['awaiting_payment', 'pending', 'confirmed'];
 const DATE_OVERRIDE_DAYS_AHEAD = 90;
@@ -65,7 +78,10 @@ const RESERVED_SLUGS = new Set([
   'fees',
   'bookings',
   'new',
+  'handle-available',
+  'pending-setup',
 ]);
+const HANDLE_TAKEN = 'BUSINESS_HANDLE_TAKEN';
 
 const escapeHtml = s =>
   String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -251,17 +267,106 @@ async function generateUniqueSlug(name, tx = db) {
     slugify(name, { lower: true, strict: true, trim: true }).slice(0, 100) || 'business';
   // Collide with frontend pages (/business/dashboard…) or API paths (/businesses/mine…)
   if (RESERVED_SLUGS.has(base)) base = `${base}-business`;
-  const taken = await tx
-    .select({ slug: businesses.slug })
-    .from(businesses)
-    .where(or(eq(businesses.slug, base), ilike(businesses.slug, `${base}-%`)));
-  const set = new Set(taken.map(r => r.slug));
+  // Avoid other businesses' slugs and everyone's names in the shared namespace
+  const likeNext = `${ilikeExact(base)}-%`;
+  const [takenSlugs, takenHandles, redirects] = [
+    await tx
+      .select({ name: businesses.slug })
+      .from(businesses)
+      .where(or(eq(businesses.slug, base), ilike(businesses.slug, likeNext))),
+    await tx
+      .select({ name: handles.name })
+      .from(handles)
+      .where(or(eq(handles.name, base), ilike(handles.name, likeNext))),
+    // Don't end another business's redirect just to auto-name a new one
+    await tx
+      .select({ name: businessPreviousHandles.name })
+      .from(businessPreviousHandles)
+      .where(or(eq(businessPreviousHandles.name, base), ilike(businessPreviousHandles.name, likeNext))),
+  ];
+  const set = new Set([...takenSlugs, ...takenHandles, ...redirects].map(r => r.name.toLowerCase()));
   if (!set.has(base)) return base;
   for (let i = 2; i < 10_000; i++) {
     if (!set.has(`${base}-${i}`)) return `${base}-${i}`;
   }
   return `${base}-${crypto.randomBytes(3).toString('hex')}`;
 }
+
+/**
+ * Business @usernames share one namespace with personal usernames, so a handle
+ * is free only if it isn't reserved, isn't any business's slug (deleted ones
+ * keep theirs), isn't a person's username, isn't held by a pending or
+ * approved username reservation, and isn't held for someone's unfinished
+ * business sign-up. `exceptBusinessId` / `exceptUserId`: the business / person
+ * asking — their own holds count as free for them.
+ */
+async function isHandleFree(handle, tx = db, { exceptBusinessId, exceptUserId } = {}) {
+  if (RESERVED_SLUGS.has(handle) || isReservedUsername(handle)) return false;
+  // A business's old name is held for it for a while, so its redirect keeps working
+  if (await isHandleOnHold(handle, { exceptBusinessId, tx })) return false;
+  // Held for a business sign-up until its business is created
+  if (await isHeldForPendingSetup(handle, { exceptUserId, tx })) return false;
+  const pattern = ilikeExact(handle);
+  // One after another: `tx` may be a single transaction connection
+  const [business] = await tx
+    .select({ id: businesses.id })
+    .from(businesses)
+    .where(ilike(businesses.slug, pattern))
+    .limit(1);
+  if (business) return false;
+  const [user] = await tx
+    .select({ id: users.id })
+    .from(users)
+    .where(ilike(users.username, pattern))
+    .limit(1);
+  if (user) return false;
+  const [reservation] = await tx
+    .select({ id: usernameReservations.id })
+    .from(usernameReservations)
+    .where(
+      and(
+        ilike(usernameReservations.username, pattern),
+        inArray(usernameReservations.status, ['pending', 'approved'])
+      )
+    )
+    .limit(1);
+  return !reservation;
+}
+
+/** Owns a (not deleted) business — one per user. */
+async function ownsBusiness(userId) {
+  const [owned] = await db
+    .select({ id: businesses.id })
+    .from(businesses)
+    .where(and(eq(businesses.ownerId, userId), isNull(businesses.deletedAt)))
+    .limit(1);
+  return !!owned;
+}
+
+/**
+ * `heldUntil`: when the @username stops being reserved for them, or null when
+ * it isn't reserved (someone had it first, or the hold expired).
+ */
+async function serializePendingSetup(row) {
+  await releaseExpiredPendingHolds({ name: row.handle });
+  const [hold] = await db
+    .select({ createdAt: handles.createdAt })
+    .from(handles)
+    .where(eq(handles.pendingUserId, row.userId))
+    .limit(1);
+  return {
+    category: row.category,
+    subcategory: row.subcategory ?? '',
+    handle: row.handle,
+    heldUntil: hold ? pendingHoldEndsAt(hold.createdAt) : null,
+    createdAt: row.createdAt,
+  };
+}
+
+const handleTakenError = () =>
+  new ApiError(httpStatus.CONFLICT, 'That @username is already taken. Try another one.', true, '', {
+    code: HANDLE_TAKEN,
+  });
 
 async function loadServicesAndStaff(businessId) {
   const [services, staff, addOns, questionnaires, locations] = await Promise.all([
@@ -564,13 +669,13 @@ export class BusinessService {
     };
   }
 
-  /** Public profile by id or slug. 404 when hidden (unpublished / deleted). */
+  /**
+   * Public profile by id, slug or an old @username (the response's slug is the
+   * current one, so the page can redirect). 404 when hidden (unpublished / deleted).
+   */
   static async getPublic(idOrSlug) {
     const business = await db.query.businesses.findFirst({
-      where: and(
-        UUID_RE.test(idOrSlug) ? eq(businesses.id, idOrSlug) : eq(businesses.slug, idOrSlug),
-        isNull(businesses.deletedAt)
-      ),
+      where: and(businessByIdOrSlug(idOrSlug), isNull(businesses.deletedAt)),
       with: { owner: { columns: { id: true, isBritesidePlus: true } } },
     });
     if (!business || !isBusinessPublic(business, business.owner)) {
@@ -644,7 +749,19 @@ export class BusinessService {
         );
       }
 
-      const slug = await generateUniqueSlug(body.name, tx);
+      // A chosen @username becomes the slug; without one it's generated from the name
+      let slug;
+      if (body.handle) {
+        // Their own sign-up hold doesn't count against them
+        if (!(await isHandleFree(body.handle, tx, { exceptUserId: user.id }))) throw handleTakenError();
+        slug = body.handle;
+      } else {
+        slug = await generateUniqueSlug(body.name, tx);
+      }
+      // Sign-up's pending setup is done. Deleted before the business is inserted:
+      // its hold on the @username goes with it (cascade), so the business can
+      // claim that same name. Rolled back too if anything below fails.
+      await tx.delete(pendingBusinessSetups).where(eq(pendingBusinessSetups.userId, user.id));
       const [business] = await tx
         .insert(businesses)
         .values({
@@ -713,9 +830,88 @@ export class BusinessService {
         });
       }
       return business;
+    }).catch(err => {
+      // Someone (person or business) claimed the @username at the same moment:
+      // the shared handles table decides
+      if (isHandleClash(err) || pgError(err)?.constraint === 'uq_businesses_slug') {
+        throw handleTakenError();
+      }
+      throw err;
     });
 
     return this.getForManage(result);
+  }
+
+  /**
+   * Change the business's @username, which is also its URL. The old name is
+   * released (old /business/<old> links stop working) and can be claimed by
+   * anyone. The shared handles table settles races with other sign-ups.
+   */
+  static async changeHandle(business, handle) {
+    if (handle === business.slug.toLowerCase()) return this.getForManage(business);
+    // Switching back to one of its own old names is fine
+    if (!(await isHandleFree(handle, db, { exceptBusinessId: business.id }))) throw handleTakenError();
+    let updated;
+    try {
+      [updated] = await db
+        .update(businesses)
+        .set({ slug: handle, updatedAt: new Date() })
+        .where(eq(businesses.id, business.id))
+        .returning();
+    } catch (err) {
+      if (isHandleClash(err) || pgError(err)?.constraint === 'uq_businesses_slug') {
+        throw handleTakenError();
+      }
+      throw err;
+    }
+    logger.info({ method: 'changeHandle', businessId: business.id, from: business.slug, to: handle });
+    return this.getForManage(updated);
+  }
+
+  // ── Pending business setup (sign-up → onboarding, across devices) ─────────
+
+  /**
+   * The user's unfinished business sign-up, or null. Someone who already owns
+   * a business has nothing left to set up (any stale row is removed).
+   */
+  static async getPendingSetup(userId) {
+    const row = await db.query.pendingBusinessSetups.findFirst({
+      where: eq(pendingBusinessSetups.userId, userId),
+    });
+    if (!row) return null;
+    if (await ownsBusiness(userId)) {
+      await this.clearPendingSetup(userId);
+      return null;
+    }
+    return serializePendingSetup(row);
+  }
+
+  /** Save (or replace) the sign-up's business choices. No-op for existing owners. */
+  static async savePendingSetup(userId, { category, subcategory, handle }) {
+    if (await ownsBusiness(userId)) return null;
+    const values = { category, subcategory: emptyToNull(subcategory), handle };
+    const [row] = await db
+      .insert(pendingBusinessSetups)
+      .values({ userId, ...values })
+      .onConflictDoUpdate({
+        target: pendingBusinessSetups.userId,
+        set: { ...values, updatedAt: new Date() },
+      })
+      .returning();
+    return serializePendingSetup(row);
+  }
+
+  static async clearPendingSetup(userId) {
+    await db.delete(pendingBusinessSetups).where(eq(pendingBusinessSetups.userId, userId));
+  }
+
+  /**
+   * Sign-up / onboarding / rename: can this @username still be claimed?
+   * (Format is checked by the caller.) `forBusinessId`: the business asking —
+   * its own recently released names count as available to it.
+   */
+  static async isHandleAvailable(handle, { forBusinessId, forUserId } = {}) {
+    return isHandleFree(handle, db, { exceptBusinessId: forBusinessId, exceptUserId: forUserId });
   }
 
   static async getForManage(business) {

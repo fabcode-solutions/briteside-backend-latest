@@ -1205,6 +1205,34 @@
       "when": 1795428000000,
       "tag": "0179_business_inbox",
       "breakpoints": true
+    },
+    {
+      "idx": 180,
+      "version": "7",
+      "when": 1795429000000,
+      "tag": "0180_shared_handles",
+      "breakpoints": true
+    },
+    {
+      "idx": 181,
+      "version": "7",
+      "when": 1795430000000,
+      "tag": "0181_business_previous_handles",
+      "breakpoints": true
+    },
+    {
+      "idx": 182,
+      "version": "7",
+      "when": 1795431000000,
+      "tag": "0182_pending_business_setups",
+      "breakpoints": true
+    },
+    {
+      "idx": 183,
+      "version": "7",
+      "when": 1795432000000,
+      "tag": "0183_hold_pending_business_handles",
+      "breakpoints": true
     }
   ]
 }

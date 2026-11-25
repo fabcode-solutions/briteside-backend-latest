@@ -123,13 +123,16 @@ static async getOrCreateSocialProfile(userId) {
     columns: { id: true },
   });
 
-  const [newProfile] = await db
+  // Two requests can both find no profile (e.g. a new account's first page
+  // load fetches it twice at once). The loser of that race skips its insert
+  // instead of failing on the unique user_id, then both read the same row.
+  await db
     .insert(socialProfiles)
     .values({ userId, organizerId: existingOrganizer?.id ?? null })
-    .returning();
+    .onConflictDoNothing({ target: socialProfiles.userId });
 
   profile = await db.query.socialProfiles.findFirst({
-    where: eq(socialProfiles.id, newProfile.id),
+    where: eq(socialProfiles.userId, userId),
     with: {
       user: { columns: safeUserColumns },
       organizer: true,

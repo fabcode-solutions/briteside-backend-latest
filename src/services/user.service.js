@@ -4,8 +4,14 @@ import { eq, or } from 'drizzle-orm';
 import httpStatus from 'http-status';
 import ApiError from '../utils/api-error.js';
 import authLogger from '../config/authLogger.js';
+import { isHandleClash, pgError } from '../utils/handles.js';
 
 const wrapDbError = (err, context) => {
+  // Lost a race for a username: another account (person or business — see the
+  // shared "handles" table) claimed it between our check and this write
+  if (isHandleClash(err) || pgError(err)?.constraint === 'users_username_unique') {
+    return new ApiError(httpStatus.CONFLICT, 'This username is already taken');
+  }
   authLogger.error({
     context,
     message: err.message,
