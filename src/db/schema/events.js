@@ -17,6 +17,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { organizers } from './organizers.js';
+import { businesses } from './businesses.js';
 import { categories } from './categories.js';
 import { venues } from './venues.js';
 import { groups } from './groups.js';
@@ -42,6 +43,9 @@ export const events = pgTable(
     organizerId: uuid('organizer_id')
       .notNull()
       .references(() => organizers.id, { onDelete: 'cascade' }),
+    // Hosted as this business (a separate account) — shown as the host; the
+    // organizer above still runs it (tickets, payouts)
+    businessId: uuid('business_id').references(() => businesses.id, { onDelete: 'set null' }),
     categoryIds: jsonb('category_ids').default(sql`'[]'::jsonb`),
     venueId: uuid('venue_id').references(() => venues.id, {
       onDelete: 'set null',

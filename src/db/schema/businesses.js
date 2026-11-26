@@ -92,6 +92,16 @@ export const businesses = pgTable(
     reserveNowSubscriptionId: varchar('reserve_now_subscription_id', { length: 255 }),
     reserveNowPeriodEnd: timestamp('reserve_now_period_end', { withTimezone: true }),
     reserveNowCancelAtPeriodEnd: boolean('reserve_now_cancel_at_period_end').notNull().default(false),
+    // Video cover ($5/month, bought in the app through Apple / Google — see
+    // business_store_subscriptions). heroVideoUrl (≤ 30s) replaces the cover
+    // photo while videoCoverUntil is in the future; heroUrl stays as its
+    // poster and comes back by itself when the subscription lapses.
+    heroVideoUrl: text('hero_video_url'),
+    // When the paid time (incl. any store grace period) ends — set from the stores
+    videoCoverUntil: timestamp('video_cover_until', { withTimezone: true }),
+    videoCoverAutoRenew: boolean('video_cover_auto_renew').notNull().default(false),
+    // 'apple' | 'google' — where it's billed (managed / cancelled there)
+    videoCoverStore: varchar('video_cover_store', { length: 10 }),
     // Where "Send inquiry" goes: 'inbox' (owner's Inquiry inbox) | 'email'
     inquiryChannel: varchar('inquiry_channel', { length: 10 }).notNull().default('email'),
     // 'email' channel: the address inquiries go to (null = the contact email)
@@ -890,9 +900,15 @@ export const businessReviews = pgTable(
     staffId: uuid('staff_id').references(() => businessStaff.id, { onDelete: 'set null' }),
     rating: integer('rating').notNull(),
     comment: text('comment'),
-    // Public response from the business
+    // Photos the customer attached: ["https://…", …]
+    images: jsonb('images')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    // Public response from the business — one per review, editable
     ownerReply: text('owner_reply'),
+    // First posted (kept when the reply is edited)
     ownerRepliedAt: timestamp('owner_replied_at', { withTimezone: true }),
+    ownerReplyEditedAt: timestamp('owner_reply_edited_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1153,6 +1169,64 @@ export const businessGalleryLikes = pgTable(
   table => [
     primaryKey({ columns: [table.businessId, table.postKey, table.userId] }),
     index('idx_business_gallery_likes_user').on(table.userId),
+  ]
+);
+
+// ─── FOLLOWERS ──────────────────────────────────────────────────────────────
+/** Members following a business page (the "Follow" button on /business/:slug). */
+export const businessFollowers = pgTable(
+  'business_followers',
+  {
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    primaryKey({ columns: [table.businessId, table.userId] }),
+    index('idx_business_followers_user').on(table.userId),
+  ]
+);
+
+// ─── CLIENTS (imported / invited) ───────────────────────────────────────────
+/**
+ * Clients a business added itself (CSV import or one by one) and may have
+ * invited to book. Customers who booked come from business_bookings; the
+ * dashboard's Customers tab merges the two.
+ * email is stored lowercase; phone in E.164 (+15551234567).
+ */
+export const businessClients = pgTable(
+  'business_clients',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 150 }),
+    email: varchar('email', { length: 255 }),
+    phone: varchar('phone', { length: 20 }),
+    // 'import' (CSV) | 'manual' (typed in)
+    source: varchar('source', { length: 10 }).notNull().default('manual'),
+    addedBy: uuid('added_by').references(() => users.id, { onDelete: 'set null' }),
+    // Last invite per channel — at most one per contact per 30 days
+    emailInvitedAt: timestamp('email_invited_at', { withTimezone: true }),
+    smsInvitedAt: timestamp('sms_invited_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    uniqueIndex('uq_business_clients_email')
+      .on(table.businessId, table.email)
+      .where(sql`${table.email} IS NOT NULL`),
+    uniqueIndex('uq_business_clients_phone')
+      .on(table.businessId, table.phone)
+      .where(sql`${table.phone} IS NOT NULL`),
+    index('idx_business_clients_business_created').on(table.businessId, table.createdAt),
+    check('chk_business_clients_contact', sql`${table.email} IS NOT NULL OR ${table.phone} IS NOT NULL`),
+    check('chk_business_clients_source', sql`${table.source} IN ('import', 'manual')`),
   ]
 );
 

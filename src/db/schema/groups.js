@@ -17,6 +17,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { users } from './users.js';
+import { businesses } from './businesses.js';
 import { interestCategories } from './social.js';
 
 export const groupRoleEnum = pgEnum('group_role', ['admin', 'moderator', 'member']);
@@ -71,6 +72,8 @@ export const groups = pgTable(
     createdBy: uuid('created_by')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    // Run as this business (a separate account) — shown instead of the creator
+    businessId: uuid('business_id').references(() => businesses.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),

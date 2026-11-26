@@ -17,6 +17,7 @@ import { sql } from 'drizzle-orm';
 import { users } from './users.js';
 import { organizers } from './organizers.js';
 import { events } from './events.js';
+import { businesses } from './businesses.js';
 import { timeStamps } from '../schema-helper.js';
 
 export const genderEnum = pgEnum('gender', ['male', 'female', 'other', 'prefer_not_to_say']);
@@ -138,6 +139,8 @@ export const posts = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    // Published as this business (a separate account). userId = who made it.
+    businessId: uuid('business_id').references(() => businesses.id, { onDelete: 'cascade' }),
     caption: text('caption'),
     mediaUrls: json('media_urls').notNull().default([]),
     mediaTypes: json('media_types').notNull().default([]),
@@ -370,6 +373,8 @@ export const stories = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    // Published as this business (a separate account). userId = who made it.
+    businessId: uuid('business_id').references(() => businesses.id, { onDelete: 'cascade' }),
     mediaUrl: varchar('media_url', { length: 500 }).notNull(),
     mediaType: varchar('media_type', { length: 10 }).notNull(), // 'image' or 'video'
     caption: text('caption'),

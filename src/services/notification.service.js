@@ -1,15 +1,19 @@
 import { db } from '../config/database.js';
 import {
+  businesses,
   events,
+  livestreams,
   groups,
   groupMembers,
   notifications,
   organizers,
+  posts,
+  stories,
   talentProfiles,
   talentSessions,
   userNotificationSettings,
 } from '../db/schema/index.js';
-import { eq, desc, and, gte, sql } from 'drizzle-orm';
+import { eq, desc, and, gte, inArray, sql } from 'drizzle-orm';
 
 const NOTIFICATION_RETENTION_DAYS = 30;
 import { getIO } from '../utils/io.js';
@@ -181,14 +185,100 @@ export const getNotificationsByUserId = async userId => {
   return enrichNotifications(result);
 };
 
-export const markAsRead = async userId => {
+/**
+ * `ids` limits it to those notifications — a user's personal account and their
+ * business account each have their own bell, and "mark all read" in one must
+ * not clear the other. Without ids, every notification of the user is marked.
+ */
+export const markAsRead = async (userId, ids) => {
+  const where = Array.isArray(ids)
+    ? and(eq(notifications.userId, userId), inArray(notifications.id, ids))
+    : eq(notifications.userId, userId);
+  if (Array.isArray(ids) && ids.length === 0) return undefined;
   const [updatedNotification] = await db
     .update(notifications)
     .set({ isRead: true })
-    .where(eq(notifications.userId, userId))
+    .where(where)
     .returning();
 
   return updatedNotification;
+};
+
+/**
+ * A business is a separate account with its own bell, but its notifications are
+ * stored on the owner's / team member's user row. `metadata.audience` says which
+ * bell a `business_*` notification belongs in:
+ *  - 'business': about running the business (new booking, review, follower,
+ *    a like on its post, a customer message, commission…)
+ *  - 'personal': the recipient as a customer (their booking, a reply to their
+ *    review or comment…)
+ * Callers can set it themselves; otherwise the owner of the business gets the
+ * business copy and everyone else the personal one.
+ */
+const tagAudience = async data => {
+  const type = String(data.type ?? '');
+  const metadata = data.metadata ?? {};
+  if (metadata.audience) return data;
+
+  // Activity on something published / hosted as a business (likes on its post,
+  // a ticket sold for its event, someone joining its group…) goes to the
+  // business's bell when the recipient runs that business — not the person's
+  if (!type.startsWith('business_')) {
+    const source = [
+      ['postId', posts],
+      ['storyId', stories],
+      ['eventId', events],
+      ['groupId', groups],
+      ['livestreamId', livestreams],
+    ].find(([key]) => typeof metadata[key] === 'string');
+    if (!source) return data;
+    const [key, table] = source;
+    const row = await db
+      .select({ businessId: table.businessId })
+      .from(table)
+      .where(eq(table.id, metadata[key]))
+      .then(rows => rows[0])
+      .catch(() => null); // never block a notification on this
+    if (!row?.businessId) return data;
+    const business = await db.query.businesses.findFirst({
+      where: eq(businesses.id, row.businessId),
+      columns: { ownerId: true, logoUrl: true },
+    });
+    // To anyone else (followers, members, ticket holders): shown as from the
+    // business — its logo, never the person behind it (see resolveActorUserId)
+    const fromBusiness =
+      table === events || table === groups || table === livestreams
+        ? { organizerLogoUrl: business?.logoUrl ?? null }
+        : {};
+    // Posts / stories: the creator (may be a team member) or the owner
+    const creator =
+      table === posts || table === stories
+        ? await db
+            .select({ userId: table.userId })
+            .from(table)
+            .where(eq(table.id, metadata[key]))
+            .then(rows => rows[0]?.userId)
+        : null;
+    if (business?.ownerId !== data.userId && creator !== data.userId) {
+      return {
+        ...data,
+        metadata: { ...fromBusiness, ...metadata, businessId: row.businessId, audience: 'personal' },
+      };
+    }
+    return { ...data, metadata: { ...metadata, businessId: row.businessId, audience: 'business' } };
+  }
+
+  let audience;
+  if (type === 'business_message' || type === 'business_commission') audience = 'business';
+  else if (String(data.redirectTo ?? '').startsWith('/bookings')) audience = 'personal';
+  else if (metadata.businessId) {
+    const business = await db.query.businesses.findFirst({
+      where: eq(businesses.id, metadata.businessId),
+      columns: { ownerId: true },
+    });
+    audience = business?.ownerId === data.userId ? 'business' : 'personal';
+  }
+  return audience ? { ...data, metadata: { ...metadata, audience } } : data;
 };
 
 export const createNotification = async data => {
@@ -205,7 +295,7 @@ export const createNotification = async data => {
     return null; // Notification disabled by user
   }
 
-  const notificationData = await addResolvedActorMetadata(data);
+  const notificationData = await addResolvedActorMetadata(await tagAudience(data));
   const [newNotification] = await db.insert(notifications).values(notificationData).returning();
   const [enrichedNotification] = await enrichNotifications([newNotification]);
 

@@ -15,6 +15,8 @@ import { relations } from 'drizzle-orm';
 import { users } from './users.js';
 import { talentProfiles } from './talentProfiles.js';
 import { socialConversations, socialMessages } from './socialChat.js';
+import { businesses } from './businesses.js';
+import { businessConversations, businessMessages } from './businessInbox.js';
 
 // ─── Payments: billing only, no message content ───────────────────────────
 //
@@ -50,6 +52,16 @@ export const priorityMessagePayments = pgTable(
     conversationId: uuid('conversation_id').references(() => socialConversations.id, {
       onDelete: 'set null',
     }),
+
+    // Sent as a business (a separate account): delivered into the business's
+    // paid thread (business_conversations, kind 'paid') instead of a personal
+    // DM, and the talent's reply there releases it. senderId stays the team
+    // member who paid; the talent only ever sees the business.
+    businessId: uuid('business_id').references(() => businesses.id, { onDelete: 'set null' }),
+    businessConversationId: uuid('business_conversation_id').references(
+      () => businessConversations.id,
+      { onDelete: 'set null' }
+    ),
 
     messageCount: integer('message_count').notNull().default(1),
 
@@ -131,6 +143,8 @@ export const priorityMessagePayments = pgTable(
     // composite index makes that lookup cheap.
     index('idx_pmp_talent_status').on(table.talentUserId, table.status),
     index('idx_pmp_conversation_status').on(table.conversationId, table.status),
+    index('idx_pmp_business_talent_status').on(table.businessId, table.talentProfileId, table.status),
+    index('idx_pmp_business_conversation_status').on(table.businessConversationId, table.status),
   ]
 );
 
@@ -161,6 +175,15 @@ export const priorityMessageItems = pgTable(
 
     messageId: uuid('message_id').references(() => socialMessages.id, { onDelete: 'set null' }),
 
+    // Business-sent payments: the business_messages row it became, and the
+    // talent's latest reply there (instead of messageId / replyMessageId)
+    businessMessageId: uuid('business_message_id').references(() => businessMessages.id, {
+      onDelete: 'set null',
+    }),
+    businessReplyMessageId: uuid('business_reply_message_id').references(() => businessMessages.id, {
+      onDelete: 'set null',
+    }),
+
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
 
     // Item-level status: pending | replied | expired
@@ -175,6 +198,7 @@ export const priorityMessageItems = pgTable(
   table => [
     index('idx_pmi_payment').on(table.paymentId),
     index('idx_pmi_message').on(table.messageId),
+    index('idx_pmi_business_message').on(table.businessMessageId),
     index('idx_pmi_payment_position').on(table.paymentId, table.position),
     index('idx_pmi_replied_at').on(table.repliedAt),
     index('idx_pmi_reply_message').on(table.replyMessageId),

@@ -145,7 +145,7 @@ export const createBusinessSchema = z.object({
     handle: businessHandle.optional(),
     category: z.enum(BUSINESS_CATEGORY_KEYS),
     subcategory: optionalText(100),
-    bio: optionalText(5000),
+    bio: optionalText(BUSINESS_BIO_MAX),
     locationType: z.enum(LOCATION_TYPES).default('physical'),
     city: z.string().trim().min(1).max(120),
     address: optionalText(500),
@@ -965,6 +965,21 @@ export const reserveNowConfirmSchema = z.object({
   body: z.object({ sessionId: z.string().trim().regex(/^cs_[A-Za-z0-9_]+$/, 'Invalid checkout session') }),
 });
 
+// Video cover ($5/mo, Apple / Google in-app subscription): the app reports a purchase
+export const videoCoverFinalizeSchema = z.object({
+  params: businessIdParams,
+  body: z.discriminatedUnion('store', [
+    z.object({ store: z.literal('apple'), transactionId: z.string().trim().regex(/^\d{1,40}$/, 'Invalid transaction') }),
+    z.object({ store: z.literal('google'), purchaseToken: z.string().trim().min(10).max(512) }),
+  ]),
+});
+
+// Set (a video uploaded to Briteside) or remove (null) the cover video
+export const videoCoverVideoSchema = z.object({
+  params: businessIdParams,
+  body: z.object({ videoUrl: url.nullable() }),
+});
+
 export const payCommissionSchema = z.object({
   params: businessIdParams,
   body: z
@@ -1023,17 +1038,24 @@ export const listBusinessReviewsSchema = z.object({
 });
 
 const rating = z.number().int().min(1).max(5);
+/** Photos a customer attaches to a review (uploaded first; https only — shown publicly). */
+export const REVIEW_IMAGES_MAX = 4;
+const reviewImages = z
+  .array(url.refine(u => u.startsWith('https://'), { message: 'Images must be https links' }))
+  .max(REVIEW_IMAGES_MAX, { message: `Up to ${REVIEW_IMAGES_MAX} photos per review` });
 
 export const createReviewSchema = z.object({
   params: z.object({ bookingId: uuid }),
-  body: z.object({ rating, comment: optionalText(2000) }),
+  body: z.object({ rating, comment: optionalText(2000), images: reviewImages.optional() }),
 });
 
 export const updateReviewSchema = z.object({
   params: z.object({ bookingId: uuid }),
   body: z
-    .object({ rating: rating.optional(), comment: optionalText(2000) })
-    .refine(b => b.rating !== undefined || b.comment !== undefined, { message: 'Nothing to update' }),
+    .object({ rating: rating.optional(), comment: optionalText(2000), images: reviewImages.optional() })
+    .refine(b => b.rating !== undefined || b.comment !== undefined || b.images !== undefined, {
+      message: 'Nothing to update',
+    }),
 });
 
 // ─── Wall (standard business pages) ────────────────────────────────────────
@@ -1095,6 +1117,59 @@ export const galleryEngagementSchema = z.object({
 });
 
 export const galleryPostSchema = z.object({ params: galleryPostParams });
+
+// ─── Taxes ──────────────────────────────────────────────────────────────────
+export const taxSummarySchema = z.object({
+  params: businessIdParams,
+  query: z.object({
+    year: z.coerce
+      .number()
+      .int()
+      .min(2020)
+      .max(2100)
+      .optional()
+      .default(() => new Date().getFullYear()),
+  }),
+});
+
+// ─── Clients (Import & Invite) ──────────────────────────────────────────────
+const E164 = /^\+[1-9]\d{6,14}$/;
+const clientInput = z
+  .object({
+    name: z.string().trim().max(150).nullish(),
+    email: z
+      .union([z.literal(''), z.string().trim().toLowerCase().email().max(255)])
+      .nullish()
+      .transform(v => v || null),
+    // E.164, normalized by the dashboard (libphonenumber)
+    phone: z
+      .union([z.literal(''), z.string().trim().regex(E164, 'Enter a valid phone number')])
+      .nullish()
+      .transform(v => v || null),
+  })
+  .refine(c => !!c.email || !!c.phone, { message: 'Each client needs an email or a phone number' });
+
+export const listClientsSchema = z.object({ params: businessIdParams });
+
+export const addClientsSchema = z.object({
+  params: businessIdParams,
+  body: z.object({
+    clients: z.array(clientInput).min(1).max(500),
+    source: z.enum(['import', 'manual']).default('manual'),
+    invite: z.boolean().default(true),
+    // The business confirms these people agreed to be contacted
+    consent: z.literal(true, { message: 'Confirm your clients agreed to hear from you' }),
+  }),
+});
+
+export const removeClientSchema = z.object({
+  params: z.object({ businessId: uuid, clientId: uuid }),
+});
+
+// ─── Followers ──────────────────────────────────────────────────────────────
+export const businessFollowSchema = z.object({
+  params: z.object({ idOrSlug: z.string().trim().min(1).max(120) }),
+});
 
 export const listGalleryCommentsSchema = z.object({
   params: galleryPostParams,

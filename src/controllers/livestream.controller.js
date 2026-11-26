@@ -3,6 +3,7 @@ import { catchAsync } from '../utils/catch-async.js';
 import ApiError from '../utils/api-error.js';
 import { StreamCallService } from '../services/stream.service.js';
 import { emitLivestreamUpdate } from '../socket/emitter.js';
+import { assertCanPublishAs } from '../services/social/businessAuthor.js';
 
 // ─── POST /livestream/start ───────────────────────────────────────────────
 export const startLivestream = catchAsync(async (req, res) => {
@@ -11,11 +12,16 @@ export const startLivestream = catchAsync(async (req, res) => {
 
   if (!title?.trim()) throw new ApiError(400, 'Title is required.');
 
+  // Going live as a business (acting as it in the app): it must be one they can post for
+  const businessId = typeof req.body.businessId === 'string' && req.body.businessId ? req.body.businessId : null;
+  const business = businessId ? await assertCanPublishAs(req.user, businessId) : null;
+
   const result = await LivestreamService.startLivestream({
     userId,
     title: title.trim(),
     description,
     allowComments,
+    business,
   });
 
   if (!result.alreadyLive) {

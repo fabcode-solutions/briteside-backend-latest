@@ -1,6 +1,7 @@
 import { GroupAnalyticsService } from '../services/groupAnalytics.service.js';
 import ApiError from '../utils/api-error.js';
 import { catchAsync } from '../utils/catch-async.js';
+import { assertCanPublishAs } from '../services/social/businessAuthor.js';
 
 /**
  * @desc Get comprehensive group analytics overview
@@ -224,9 +225,18 @@ export const getUserInteractionSummary = catchAsync(async (req, res) => {
 export const getOrganizerAnalyticsOverview = catchAsync(async (req, res) => {
   const userId = req.user.id;
 
+  // Scoped to the account being acted as: 'none' = the person's own groups,
+  // a business id = the groups run as that business (must be one they can run)
+  const rawBusinessId = typeof req.query.businessId === 'string' ? req.query.businessId : undefined;
+  let businessId = rawBusinessId === 'none' ? 'none' : undefined;
+  if (rawBusinessId && rawBusinessId !== 'none') {
+    businessId = (await assertCanPublishAs(req.user, rawBusinessId)).id;
+  }
+
   const filters = {
     dateFrom: req.query.dateFrom,
     dateTo: req.query.dateTo,
+    businessId,
   };
 
   const analytics = await GroupAnalyticsService.getOrganizerOverview(userId, filters);

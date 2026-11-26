@@ -20,17 +20,21 @@ import {
   businessCustomOffers,
   businessMessages,
   businesses,
+  businessServices,
   businessTeamMembers,
   users,
 } from '../db/schema/index.js';
+import { priorityMessageItems } from '../db/schema/priorityMessagePayments.js';
 import ApiError from '../utils/api-error.js';
 import {
+  KINDS,
   applyMediaVerdict,
   normalizeMessage,
   otherSide,
   replyPreview,
   teamPreview,
 } from '../utils/businessInbox.js';
+import { emitSocialChat } from '../socket/emitter.js';
 import { notifications } from '../db/schema/notifications.js';
 import { createNotification } from './notification.service.js';
 
@@ -63,6 +67,9 @@ const BUSINESS_COLUMNS = {
   deletedAt: true,
 };
 
+// Same window as PriorityMessageService's REPLY_WINDOW_MS (talent's 72h to reply)
+const PRIORITY_REPLY_WINDOW_MS = 72 * 60 * 60 * 1000;
+
 const MAX_PAGE = 100;
 const clampLimit = (limit, fallback) => Math.min(Math.max(Number(limit) || fallback, 1), MAX_PAGE);
 
@@ -88,8 +95,15 @@ const publicBusiness = b => ({ id: b.id, name: b.name, slug: b.slug, logoUrl: b.
 export class BusinessInboxService {
   // ─── Opening a thread ──────────────────────────────────────────────────────
 
-  /** Customer: "Message" / "Send inquiry" on a business page → their thread with it. */
-  static async openForCustomer(user, idOrSlug) {
+  /**
+   * Customer: their thread with a business — "Send inquiry" / "Inquire" →
+   * the Inquiries inbox, "Message" → General. (Paid threads are only ever
+   * started by the business paying for a priority message.)
+   */
+  static async openForCustomer(user, idOrSlug, kind = 'inquiry') {
+    if (kind !== 'inquiry' && kind !== 'general') {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'Unknown inbox');
+    }
     const business = await loadPublicBusiness(idOrSlug);
     const access = await resolveBusinessAccess(business, user);
     if (access && access.role !== 'platform_admin') {
@@ -98,16 +112,21 @@ export class BusinessInboxService {
     if (await BlockService.isBlocked(user.id, business.ownerId)) {
       throw new ApiError(httpStatus.FORBIDDEN, 'You cannot message this business');
     }
-    const conversation = await this.#getOrCreate(business.id, user.id);
+    const conversation = await this.#getOrCreate(business.id, user.id, kind);
     return { conversation: { ...this.#summary(conversation), business: publicBusiness(business) } };
   }
 
   /**
-   * Business: start (or reopen) a thread with one of its customers — someone
-   * who has booked it or been sent a custom offer. Businesses can't cold-message
-   * arbitrary users.
+   * Business: start (or reopen) a thread with someone.
+   *   inquiry — only one of its customers (someone who has booked it or been
+   *             sent a custom offer)
+   *   general — anyone, like a personal profile can (not its own team, and
+   *             never across a block)
+   * Paid threads open by paying for a priority message (deliverPriority).
    */
-  static async openForBusiness(business, customerId) {
+  static async openForBusiness(business, customerId, kind = 'inquiry') {
+    if (kind === 'general') return this.#openGeneralForBusiness(business, customerId);
+    if (kind !== 'inquiry') throw new ApiError(httpStatus.BAD_REQUEST, 'Send a paid message to start this conversation');
     const [booking] = await db
       .select({ id: businessBookings.id })
       .from(businessBookings)
@@ -128,7 +147,7 @@ export class BusinessInboxService {
     if (await BlockService.isBlocked(customerId, business.ownerId)) {
       throw new ApiError(httpStatus.FORBIDDEN, 'You cannot message this customer');
     }
-    const conversation = await this.#getOrCreate(business.id, customerId);
+    const conversation = await this.#getOrCreate(business.id, customerId, 'inquiry');
     const customer = await db.query.users.findFirst({
       where: eq(users.id, customerId),
       columns: CUSTOMER_COLUMNS,
@@ -136,15 +155,54 @@ export class BusinessInboxService {
     return { conversation: { ...this.#summary(conversation), customer: customer ?? null } };
   }
 
-  static async #getOrCreate(businessId, customerId) {
+  static async #openGeneralForBusiness(business, userId) {
+    const person = await this.assertCanReach(business, userId);
+    const conversation = await this.#getOrCreate(business.id, userId, 'general');
+    return {
+      conversation: {
+        ...this.#summary(conversation),
+        customer: {
+          id: person.id,
+          firstName: person.firstName,
+          lastName: person.lastName,
+          username: person.username,
+          image: person.image,
+        },
+      },
+    };
+  }
+
+  /**
+   * Can `business` message this person outside of an inquiry (General inbox,
+   * paid messages)? Not someone on its own team, not a deleted account, never
+   * across a block. Returns the person.
+   */
+  static async assertCanReach(business, userId) {
+    const person = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+      columns: { ...CUSTOMER_COLUMNS, deletedAt: true },
+    });
+    if (!person || person.deletedAt) throw new ApiError(httpStatus.NOT_FOUND, 'User not found');
+    const access = await resolveBusinessAccess(business, { id: person.id });
+    if (access) throw new ApiError(httpStatus.BAD_REQUEST, `${business.name ?? 'This business'} can't message its own team here`);
+    if (await BlockService.isBlocked(userId, business.ownerId)) {
+      throw new ApiError(httpStatus.FORBIDDEN, 'You cannot message this person');
+    }
+    return person;
+  }
+
+  static async #getOrCreate(businessId, customerId, kind) {
     await db
       .insert(businessConversations)
-      .values({ businessId, customerId })
-      .onConflictDoNothing({ target: [businessConversations.businessId, businessConversations.customerId] });
+      .values({ businessId, customerId, kind })
+      .onConflictDoNothing({
+        target: [businessConversations.businessId, businessConversations.customerId, businessConversations.kind],
+      });
     return db.query.businessConversations.findFirst({
       where: and(
         eq(businessConversations.businessId, businessId),
-        eq(businessConversations.customerId, customerId)
+        eq(businessConversations.customerId, customerId),
+        eq(businessConversations.kind, kind)
       ),
     });
   }
@@ -217,8 +275,9 @@ export class BusinessInboxService {
     };
   }
 
-  /** Business inbox: its threads, newest first (optionally unread only). */
-  static async listForBusiness(business, viewer, { page = 1, limit = 20, unread = false } = {}) {
+  /** Business inbox: one inbox's threads, newest first (optionally unread only). */
+  static async listForBusiness(business, viewer, { page = 1, limit = 20, unread = false, kind = 'inquiry' } = {}) {
+    if (!KINDS.includes(kind)) throw new ApiError(httpStatus.BAD_REQUEST, 'Unknown inbox');
     limit = clampLimit(limit, 20);
     const offset = (Math.max(Number(page) || 1, 1) - 1) * limit;
     const unreadSql = this.#unreadSql('business');
@@ -232,13 +291,16 @@ export class BusinessInboxService {
           username: users.username,
           image: users.image,
         },
+        service: { id: businessServices.id, name: businessServices.name },
         unreadCount: unreadSql,
       })
       .from(businessConversations)
       .innerJoin(users, eq(users.id, businessConversations.customerId))
+      .leftJoin(businessServices, eq(businessServices.id, businessConversations.serviceId))
       .where(
         and(
           eq(businessConversations.businessId, business.id),
+          eq(businessConversations.kind, kind),
           isNotNull(businessConversations.lastMessageAt),
           unread ? sql`${unreadSql} > 0` : undefined
         )
@@ -254,10 +316,12 @@ export class BusinessInboxService {
     const conversations = page_.map(r => ({
       ...this.#summary(r.conversation),
       customer: r.customer,
+      service: r.service?.id ? r.service : null,
       unreadCount: r.unreadCount,
       lastMessage: latest.has(r.conversation.id) ? businessView(latest.get(r.conversation.id)) : null,
     }));
     await this.#stampMedia(conversations.map(c => c.lastMessage).filter(Boolean), 'business');
+    await this.#stampPriority(conversations.map(c => c.lastMessage).filter(Boolean));
     return {
       conversations,
       page: Number(page) || 1,
@@ -296,6 +360,7 @@ export class BusinessInboxService {
     const senderUsers = side === 'business' ? await this.#senderUsers(messages) : null;
     const views = messages.map(m => (side === 'business' ? businessView(m, senderUsers) : customerView(m)));
     await this.#stampMedia(views, side);
+    await this.#stampPriority(views);
     return {
       messages: views,
       hasMore,
@@ -313,6 +378,16 @@ export class BusinessInboxService {
       msg = normalizeMessage(body, side);
     } catch (e) {
       throw new ApiError(httpStatus.BAD_REQUEST, e.message);
+    }
+    const kind = conversation.kind ?? 'inquiry';
+    // Paid inbox is send-only for the business: it continues with another paid message
+    if (kind === 'paid' && side === 'business') {
+      throw new ApiError(httpStatus.FORBIDDEN, 'Send a paid message to continue this conversation');
+    }
+    if (msg.messageType === 'inquiry' && kind !== 'inquiry') {
+      msg.messageType = 'text';
+      delete msg.metadata.inquirySubject;
+      delete msg.metadata.serviceId;
     }
     const business =
       conversation.business ??
@@ -356,6 +431,28 @@ export class BusinessInboxService {
         columns: { id: true },
       });
       if (!offer) throw new ApiError(httpStatus.BAD_REQUEST, 'That offer is not for this customer');
+    }
+    // Inquiry about a menu service: tag it with the service (this business's
+    // own, still on the menu); the name is stored so the tag survives renames
+    let inquiryServiceId;
+    if (msg.messageType === 'inquiry') {
+      inquiryServiceId = null;
+      if (msg.metadata.serviceId) {
+        const service = await db.query.businessServices.findFirst({
+          where: and(
+            eq(businessServices.id, msg.metadata.serviceId),
+            eq(businessServices.businessId, business.id),
+            isNull(businessServices.deletedAt)
+          ),
+          columns: { id: true, name: true },
+        });
+        if (service) {
+          inquiryServiceId = service.id;
+          msg.metadata.serviceName = service.name;
+        } else {
+          delete msg.metadata.serviceId;
+        }
+      }
     }
 
     // Moderation + contact hiding for anything with text (both directions)
@@ -401,6 +498,8 @@ export class BusinessInboxService {
           lastMessageAt: now,
           updatedAt: now,
           ...(side === 'customer' ? { customerLastReadAt: now } : { businessLastReadAt: now }),
+          // The list's tag follows the latest inquiry
+          ...(inquiryServiceId !== undefined ? { serviceId: inquiryServiceId } : {}),
         })
         .where(eq(businessConversations.id, conversation.id));
       return row;
@@ -503,9 +602,13 @@ export class BusinessInboxService {
     const customerName =
       [customer?.firstName, customer?.lastName].filter(Boolean).join(' ') || customer?.username || 'A customer';
     const isInquiry = businessMessage.messageType === 'inquiry';
+    const serviceTag = isInquiry && businessMessage.metadata?.serviceName ? ` · ${businessMessage.metadata.serviceName}` : '';
+    const kind = conversation.kind ?? 'inquiry';
     const preview = isInquiry && businessMessage.metadata?.inquirySubject
-      ? `New inquiry: ${businessMessage.metadata.inquirySubject}`
-      : teamPreview(businessMessage);
+      ? `New inquiry${serviceTag}: ${businessMessage.metadata.inquirySubject}`
+      : kind === 'paid'
+        ? `Replied to your paid message: ${teamPreview(businessMessage)}`
+        : teamPreview(businessMessage);
 
     const recipients = (await this.inboxUserIds(business)).filter(id => !viewingUserIds.has(id));
     await Promise.all(
@@ -517,11 +620,12 @@ export class BusinessInboxService {
           type: TEAM_NOTIFICATION_TYPE,
           relatedId: conversation.id,
           // businessId lets the app switch into this business before opening the thread
-          redirectTo: `/business/inbox?businessId=${business.id}&conversationId=${conversation.id}`,
+          redirectTo: `/business/inbox?businessId=${business.id}&box=${kind}&conversationId=${conversation.id}`,
           metadata: {
             businessInbox: true,
             businessId: business.id,
             conversationId: conversation.id,
+            inbox: kind,
             messageId: businessMessage.id,
             actorUserId: conversation.customerId,
           },
@@ -558,10 +662,14 @@ export class BusinessInboxService {
 
   // ─── Badges ────────────────────────────────────────────────────────────────
 
-  /** Business inbox badge: threads with unread customer messages, and the message total. */
+  /**
+   * Business inbox badge: threads with unread customer messages, and the
+   * message total — overall and per inbox (`byKind`, unread threads).
+   */
   static async unreadForBusiness(businessId) {
-    const [row] = await db
+    const rows = await db
       .select({
+        kind: businessConversations.kind,
         conversations: sql`count(DISTINCT ${businessMessages.conversationId})::int`,
         messages: count(),
       })
@@ -576,8 +684,17 @@ export class BusinessInboxService {
             gt(businessMessages.createdAt, businessConversations.businessLastReadAt)
           )
         )
-      );
-    return { unreadConversations: row?.conversations ?? 0, unreadMessages: Number(row?.messages ?? 0) };
+      )
+      .groupBy(businessConversations.kind);
+    const byKind = Object.fromEntries(KINDS.map(k => [k, 0]));
+    let unreadConversations = 0;
+    let unreadMessages = 0;
+    for (const r of rows) {
+      byKind[r.kind] = r.conversations ?? 0;
+      unreadConversations += r.conversations ?? 0;
+      unreadMessages += Number(r.messages ?? 0);
+    }
+    return { unreadConversations, unreadMessages, byKind };
   }
 
   /** Customer badge: unread replies from businesses across all their threads. */
@@ -627,13 +744,134 @@ export class BusinessInboxService {
     return [...ids];
   }
 
+  // ─── Paid messages (priority messages sent as the business) ───────────────
+
+  /**
+   * Delivers an already-paid priority payment sent as `business` into its
+   * paid thread with the talent (PriorityMessageService._deliverPaidPayment):
+   * one business message per item, oldest first, carrying metadata.priority.
+   * Content was moderated at checkout; contact details are hidden here like
+   * in every business thread. Returns the rows in both views.
+   */
+  static async deliverPriority({ business, talentUserId, senderId, payment, items, attachments = [] }) {
+    const conversation = await this.#getOrCreate(business.id, talentUserId, 'paid');
+    const unlocked = await InquiryContactService.isUnlockedForBusiness(business.id, talentUserId);
+    const start = Date.now();
+
+    const rows = await db.transaction(async tx => {
+      const inserted = [];
+      for (const [i, item] of items.entries()) {
+        let content = `${item.messageContent ?? ''}${item.contentExtended ?? ''}`.trim();
+        let subject = item.subject ?? null;
+        let contactInfoHidden = false;
+        if (!unlocked) {
+          const hidden = InquiryContactService.hide({
+            content,
+            metadata: subject ? { inquirySubject: subject } : {},
+          });
+          content = hidden.content ?? '';
+          subject = hidden.metadata?.inquirySubject ?? subject;
+          contactInfoHidden = hidden.hidden;
+        }
+        const [row] = await tx
+          .insert(businessMessages)
+          .values({
+            conversationId: conversation.id,
+            senderSide: 'business',
+            senderUserId: senderId,
+            messageType: 'text',
+            content: content || null,
+            metadata: {
+              priority: {
+                paymentId: payment.id,
+                itemId: item.id,
+                subject,
+                // What the talent earns by replying (whole payment)
+                amountCents: payment.baseCents ?? 0,
+                ...(i === 0 && attachments.length ? { attachments } : {}),
+              },
+              ...(contactInfoHidden ? { contactInfoHidden: true } : {}),
+            },
+            // Keeps the items in order within the same millisecond
+            createdAt: new Date(start + i),
+          })
+          .returning();
+        inserted.push(row);
+      }
+      const last = inserted[inserted.length - 1];
+      await tx
+        .update(businessConversations)
+        .set({ lastMessageAt: last.createdAt, businessLastReadAt: last.createdAt, updatedAt: new Date() })
+        .where(eq(businessConversations.id, conversation.id));
+      return inserted;
+    });
+
+    const sender = await db.query.users.findFirst({
+      where: eq(users.id, senderId),
+      columns: { id: true, firstName: true, lastName: true, image: true },
+    });
+    const senderUsers = new Map(sender ? [[sender.id, sender]] : []);
+    const customerMessages = rows.map(customerView);
+    const businessMessages_ = rows.map(r => businessView(r, senderUsers));
+    await this.#stampPriority(customerMessages);
+    await this.#stampPriority(businessMessages_);
+    return { conversation, rows, customerMessages, businessMessages: businessMessages_ };
+  }
+
+  /**
+   * Live delivery of a new message: the customer gets the customer view on
+   * `user:<customerId>`, every inbox team member the business view.
+   */
+  static async broadcastMessage(io, conversation, business, side, { customerMessage, businessMessage }) {
+    if (!io) return;
+    const base = { businessId: business.id, conversationId: conversation.id, kind: conversation.kind ?? 'inquiry', side };
+    emitSocialChat(io, `user:${conversation.customerId}`, 'business-inbox:message:new', {
+      ...base,
+      message: customerMessage,
+    });
+    for (const userId of await this.inboxUserIds(business)) {
+      emitSocialChat(io, `user:${userId}`, 'business-inbox:message:new', { ...base, message: businessMessage });
+    }
+  }
+
   // ─── Helpers ───────────────────────────────────────────────────────────────
+
+  /**
+   * Paid messages: stamps each view carrying metadata.priority with its
+   * item's status — 'pending' (awaiting the talent's reply), 'replied', or
+   * 'expired' (not answered in time; refunded) — and when the reply window
+   * closes. Mutates the given views.
+   */
+  static async #stampPriority(views) {
+    const withPriority = views.filter(v => v?.metadata?.priority?.itemId);
+    if (!withPriority.length) return;
+    const ids = [...new Set(withPriority.map(v => v.metadata.priority.itemId))];
+    const rows = await db
+      .select({
+        id: priorityMessageItems.id,
+        status: priorityMessageItems.status,
+        deliveredAt: priorityMessageItems.deliveredAt,
+      })
+      .from(priorityMessageItems)
+      .where(inArray(priorityMessageItems.id, ids));
+    const byId = new Map(rows.map(r => [r.id, r]));
+    for (const v of withPriority) {
+      const item = byId.get(v.metadata.priority.itemId);
+      v.priorityStatus = item?.status ?? 'pending';
+      const deliveredAt = item?.deliveredAt ?? v.createdAt;
+      v.priorityReplyBy = deliveredAt
+        ? new Date(new Date(deliveredAt).getTime() + PRIORITY_REPLY_WINDOW_MS).toISOString()
+        : null;
+    }
+  }
 
   static #summary(c) {
     return {
       id: c.id,
       businessId: c.businessId,
       customerId: c.customerId,
+      kind: c.kind ?? 'inquiry',
+      serviceId: c.serviceId ?? null,
       lastMessageAt: c.lastMessageAt,
       customerLastReadAt: c.customerLastReadAt,
       businessLastReadAt: c.businessLastReadAt,

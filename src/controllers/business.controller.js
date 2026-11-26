@@ -5,11 +5,21 @@ import { BusinessService } from '../services/business.service.js';
 import { BusinessBookingService } from '../services/businessBooking.service.js';
 import { BusinessGroupSessionService } from '../services/businessGroupSession.service.js';
 import { BusinessGalleryService } from '../services/businessGallery.service.js';
+import { BusinessFollowService } from '../services/businessFollow.service.js';
+import { BusinessClientService } from '../services/businessClient.service.js';
+import { BusinessTaxService } from '../services/businessTax.service.js';
 import { BusinessCommissionService } from '../services/businessCommission.service.js';
 import { BusinessReserveNowService } from '../services/businessReserveNow.service.js';
+import { BusinessVideoCoverService, serializeVideoCover } from '../services/businessVideoCover.service.js';
 import { BusinessReviewService } from '../services/businessReview.service.js';
 import { BusinessEarningsService } from '../services/businessEarnings.service.js';
-import { BusinessWallService } from '../services/businessWall.service.js';
+import { BusinessWallService, loadPublicBusiness } from '../services/businessWall.service.js';
+import { PostService } from '../services/social/post.service.js';
+import { EventService } from '../services/event.service.js';
+import { GroupService } from '../services/group.service.js';
+import { and, eq } from 'drizzle-orm';
+import { db } from '../db/index.js';
+import { livestreams } from '../db/schema/index.js';
 import { BusinessInquiryService } from '../services/businessInquiry.service.js';
 import { BusinessLocationService } from '../services/businessLocation.service.js';
 import { BusinessCustomOfferService } from '../services/businessCustomOffer.service.js';
@@ -322,6 +332,50 @@ export const getBookingQuote = catchAsync(async (req, res) => {
   res.json({ success: true, data: { pricing } });
 });
 
+// Taxes
+export const getTaxSummary = catchAsync(async (req, res) => {
+  const query = req.validatedQuery ?? req.query;
+  const data = await BusinessTaxService.summary(req.business, { year: Number(query.year) });
+  res.json({ success: true, data });
+});
+
+export const getTaxAccountSession = catchAsync(async (req, res) => {
+  const data = await BusinessTaxService.accountSession(req.business, req.businessAccess);
+  res.json({ success: true, data });
+});
+
+// Clients (Import & Invite)
+export const listClients = catchAsync(async (req, res) => {
+  const clients = await BusinessClientService.list(req.business);
+  res.json({ success: true, data: { clients } });
+});
+
+export const addClients = catchAsync(async (req, res) => {
+  const data = await BusinessClientService.add(req.business, req.user, req.body);
+  res.status(httpStatus.CREATED).json({ success: true, data });
+});
+
+export const removeClient = catchAsync(async (req, res) => {
+  const data = await BusinessClientService.remove(req.business, req.params.clientId);
+  res.json({ success: true, data });
+});
+
+// Followers
+export const getFollowStatus = catchAsync(async (req, res) => {
+  const data = await BusinessFollowService.status(req.params.idOrSlug, req.user ?? null);
+  res.json({ success: true, data });
+});
+
+export const followBusiness = catchAsync(async (req, res) => {
+  const data = await BusinessFollowService.follow(req.user, req.params.idOrSlug);
+  res.json({ success: true, data });
+});
+
+export const unfollowBusiness = catchAsync(async (req, res) => {
+  const data = await BusinessFollowService.unfollow(req.user, req.params.idOrSlug);
+  res.json({ success: true, data });
+});
+
 // Gallery posts: likes / comments
 export const getGalleryEngagement = catchAsync(async (req, res) => {
   const data = await BusinessGalleryService.engagement(req.params.idOrSlug, req.user ?? null);
@@ -517,6 +571,22 @@ export const reserveNowResume = catchAsync(async (req, res) => {
   res.json({ success: true, data });
 });
 
+// ─── Video cover ($5/mo via Apple / Google, bought in the app) ──────────────
+
+export const getVideoCover = catchAsync(async (req, res) => {
+  res.json({ success: true, data: serializeVideoCover(req.business) });
+});
+
+export const finalizeVideoCoverPurchase = catchAsync(async (req, res) => {
+  const data = await BusinessVideoCoverService.finalize(req.business, req.user, req.body);
+  res.json({ success: true, data });
+});
+
+export const setVideoCover = catchAsync(async (req, res) => {
+  const data = await BusinessVideoCoverService.setVideo(req.business, req.user, req.body.videoUrl);
+  res.json({ success: true, data });
+});
+
 export const getCommissionSummary = catchAsync(async (req, res) => {
   const data = await BusinessCommissionService.summaryForBusiness(req.business);
   res.json({ success: true, data });
@@ -693,6 +763,29 @@ export const updateReview = catchAsync(async (req, res) => {
 });
 
 // ─── Wall (standard business pages) ─────────────────────────────────────────
+// Social posts published as the business (Create → Post while acting as it)
+const NO_VIEWER = '00000000-0000-0000-0000-000000000000';
+export const listBusinessSocialPosts = catchAsync(async (req, res) => {
+  const business = await loadPublicBusiness(req.params.idOrSlug);
+  const { page, limit } = req.validatedQuery ?? req.query;
+  const data = await PostService.getBusinessPosts(business.id, req.user?.id ?? NO_VIEWER, { page, limit });
+  res.json({ success: true, data });
+});
+
+// Events / groups hosted as the business, and whether it's live right now
+export const listBusinessActivity = catchAsync(async (req, res) => {
+  const business = await loadPublicBusiness(req.params.idOrSlug);
+  const [events, groups, live] = await Promise.all([
+    EventService.getBusinessEvents(business.id),
+    GroupService.getBusinessGroups(business.id),
+    db.query.livestreams.findFirst({
+      where: and(eq(livestreams.businessId, business.id), eq(livestreams.status, 'live')),
+      columns: { id: true, title: true, viewerCount: true, startedAt: true },
+    }),
+  ]);
+  res.json({ success: true, data: { events, groups, live: live ?? null } });
+});
+
 export const listWallPosts = catchAsync(async (req, res) => {
   const data = await BusinessWallService.list(
     req.params.idOrSlug,

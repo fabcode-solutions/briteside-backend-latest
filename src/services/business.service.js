@@ -42,6 +42,11 @@ import {
   isReserveNowLive,
   serializeReserveNow,
 } from './businessReserveNow.service.js';
+import {
+  BusinessVideoCoverService,
+  isVideoCoverLive,
+  serializeVideoCover,
+} from './businessVideoCover.service.js';
 import { serviceDepositCents } from '../utils/businessDeposit.js';
 import {
   listLocations,
@@ -73,6 +78,7 @@ const RESERVED_SLUGS = new Set([
   'onboarding',
   'edit-profile',
   'invitations',
+  'taxes',
   'mine',
   'categories',
   'fees',
@@ -183,7 +189,16 @@ export const serializeQuestionnaire = (q, { includeInactive = true } = {}) => ({
 
 const serializeBusiness = (
   b,
-  { services = [], staff = [], addOns = [], questionnaires = [], locations = [], includePrivate = false } = {}
+  {
+    services = [],
+    staff = [],
+    addOns = [],
+    questionnaires = [],
+    locations = [],
+    includePrivate = false,
+    // Public reads pass the moderation-checked value (BusinessVideoCoverService.publicVideoUrl)
+    heroVideoUrl,
+  } = {}
 ) => ({
   id: b.id,
   slug: b.slug,
@@ -195,6 +210,8 @@ const serializeBusiness = (
   bio: b.bio,
   logoUrl: b.logoUrl,
   heroUrl: b.heroUrl,
+  // Video cover (≤30s) — shown instead of heroUrl (its poster) while the $5/mo add-on is live
+  heroVideoUrl: heroVideoUrl !== undefined ? heroVideoUrl : isVideoCoverLive(b) ? (b.heroVideoUrl ?? null) : null,
   gallery: b.gallery,
   // { url: [locationId] } — posts shown only at those locations (missing = everywhere)
   galleryLocations: b.galleryLocations ?? {},
@@ -254,6 +271,7 @@ const serializeBusiness = (
         isPublished: b.isPublished,
         inquiryEmail: b.inquiryEmail ?? null,
         reserveNow: serializeReserveNow(b),
+        videoCover: serializeVideoCover(b),
         createdAt: b.createdAt,
         updatedAt: b.updatedAt,
       }
@@ -681,9 +699,10 @@ export class BusinessService {
     if (!business || !isBusinessPublic(business, business.owner)) {
       throw new ApiError(httpStatus.NOT_FOUND, 'Business not found');
     }
-    const [{ services, staff, addOns, questionnaires, locations }, paused] = await Promise.all([
+    const [{ services, staff, addOns, questionnaires, locations }, paused, heroVideoUrl] = await Promise.all([
       loadServicesAndStaff(business.id),
       BusinessCommissionService.isBookingPaused(business.id),
+      BusinessVideoCoverService.publicVideoUrl(business),
     ]);
     // Overdue in-person commission pauses new bookings (shown as not accepting)
     return serializeBusiness(paused ? { ...business, acceptingBookings: false } : business, {
@@ -692,6 +711,7 @@ export class BusinessService {
       addOns,
       questionnaires,
       locations,
+      heroVideoUrl,
     });
   }
 

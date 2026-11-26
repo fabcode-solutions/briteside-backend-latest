@@ -7,6 +7,7 @@ import { PostService } from '../services/social/post.service.js';
 import { StoryPollService } from '../services/social/storyPoll.service.js';
 import { StoryService } from '../services/social/story.service.js';
 import { StoryCollectionService } from '../services/social/storyCollection.service.js';
+import { assertCanPublishAs } from '../services/social/businessAuthor.js';
 import { BioLinkService } from '../services/social/bioLink.service.js';
 import { ShopProductService } from '../services/shop/shopProduct.service.js';
 import { SuggestedUsersService } from '../services/social/suggestedUsers.service.js';
@@ -738,7 +739,12 @@ export const createPost = catchAsync(async (req, res) => {
     throw new ApiError(400, 'Aspect ratios must match media URLs length when provided');
   }
 
+  // Posting as a business (acting as it in the app): it must be one they can post for
+  const businessId = typeof req.body.businessId === 'string' && req.body.businessId ? req.body.businessId : null;
+  if (businessId) await assertCanPublishAs(req.user, businessId);
+
   const post = await SocialService.createPost(userId, {
+    businessId,
     caption,
     mediaUrls: mediaUrlsArr,
     mediaTypes: mediaTypesArr,
@@ -755,7 +761,8 @@ export const createPost = catchAsync(async (req, res) => {
     isPlus: req.user.isBritesidePlus,
   });
 
-  if (collectionId) {
+  // Collections are the personal profile's
+  if (collectionId && !businessId) {
     await StoryCollectionService.addItemSilent(collectionId, userId, {
       itemType: 'post',
       postId: post.id,
@@ -1273,7 +1280,12 @@ export const createStory = catchAsync(async (req, res) => {
     throw new ApiError(400, "Media type must be 'image' or 'video'");
   }
 
+  // Posting as a business (acting as it in the app): it must be one they can post for
+  const businessId = typeof req.body.businessId === 'string' && req.body.businessId ? req.body.businessId : null;
+  if (businessId) await assertCanPublishAs(req.user, businessId);
+
   const story = await StoryService.createStory(userId, {
+    businessId,
     mediaUrl,
     mediaType,
     caption,
@@ -1285,7 +1297,8 @@ export const createStory = catchAsync(async (req, res) => {
     tags: Array.isArray(tags) ? tags : [],
   });
 
-  if (collectionId) {
+  // Collections are the personal profile's
+  if (collectionId && !businessId) {
     await StoryCollectionService.addItemSilent(collectionId, userId, {
       itemType: 'story',
       storyId: story.id,

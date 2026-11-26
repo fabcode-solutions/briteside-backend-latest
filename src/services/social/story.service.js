@@ -14,9 +14,12 @@ import {
   storyTags,
   interestCategories,
   mentions,
+  businesses,
+  businessFollowers,
 } from '../../db/schema/index.js';
 import { storyCollections, storyCollectionItems } from '../../db/schema/storyCollections.js';
-import { eq, and, asc, desc, sql, inArray, gte, isNull, ne } from 'drizzle-orm';
+import { eq, and, asc, desc, sql, inArray, gte, isNull, ne, or } from 'drizzle-orm';
+import { asBusinessUser, businessAuthorsById } from './businessAuthor.js';
 import ApiError from '../../utils/api-error.js';
 import { TextModerationService, TEXT_ENTITY } from '../moderation/textModeration.service.js';
 import {
@@ -126,10 +129,20 @@ export class StoryService {
       hideViewCount,
       mentionedUserIds,
       tags,
+      // Already access-checked by the caller (assertCanPublishAs)
+      businessId = null,
     }
   ) {
     const VALID_VISIBILITY = ['public', 'followers'];
-    const resolvedVisibility = VALID_VISIBILITY.includes(visibility) ? visibility : 'followers';
+    // A business's stories are public, like its page
+    const resolvedVisibility = businessId
+      ? 'public'
+      : VALID_VISIBILITY.includes(visibility)
+        ? visibility
+        : 'followers';
+    const businessName = businessId
+      ? (await businessAuthorsById([businessId])).get(businessId)?.name
+      : null;
 
     const expiresAt = new Date();
     expiresAt.setHours(expiresAt.getHours() + 24);
@@ -152,6 +165,7 @@ export class StoryService {
       .insert(stories)
       .values({
         userId,
+        businessId,
         mediaUrl,
         mediaType,
         caption,
@@ -210,11 +224,14 @@ export class StoryService {
             await createNotification({
               userId: mentionedUserId,
               title: 'You were mentioned',
-              message: `${mentionUser?.username || 'Someone'} mentioned you in a your stroy`,
+              message: `${businessName || mentionUser?.username || 'Someone'} mentioned you in their story`,
               type: 'social_update',
               relatedId: story.id,
               redirectTo: `/feed?openStory=${story.id}`,
-              metadata: { storyId: story.id, mentionedByUserId: userId },
+              // A business's story never reveals the person behind it
+              metadata: businessId
+                ? { storyId: story.id, businessId, audience: 'personal' }
+                : { storyId: story.id, mentionedByUserId: userId },
             });
           }
         }
@@ -255,6 +272,22 @@ export class StoryService {
 
     const setAIds = [...followingIds, viewerId];
 
+    // Businesses as separate accounts: their stories ring under the business,
+    // for its followers and for the people who run it — never under the person.
+    const [followedBusinessRows, managedBusinessRows] = await Promise.all([
+      db
+        .select({ businessId: businessFollowers.businessId })
+        .from(businessFollowers)
+        .where(eq(businessFollowers.userId, viewerId)),
+      db
+        .select({ businessId: businesses.id })
+        .from(businesses)
+        .where(and(eq(businesses.ownerId, viewerId), isNull(businesses.deletedAt))),
+    ]);
+    const setABusinessIds = [
+      ...new Set([...followedBusinessRows, ...managedBusinessRows].map(r => r.businessId)),
+    ];
+
     // Fetch story IDs the viewer has saved to any collection (one query, O(1) lookup later)
     const collectionItems = await db
       .select({ storyId: storyCollectionItems.storyId })
@@ -279,7 +312,10 @@ export class StoryService {
       setAIds.length > 0
         ? await db.query.stories.findMany({
             where: and(
-              inArray(stories.userId, setAIds),
+              or(
+                and(isNull(stories.businessId), inArray(stories.userId, setAIds)),
+                setABusinessIds.length ? inArray(stories.businessId, setABusinessIds) : sql`false`
+              ),
               gte(stories.expiresAt, now),
               storiesModerationGate(viewerId)
             ),
@@ -294,6 +330,7 @@ export class StoryService {
         : [];
 
     const setAUserIds = new Set(setAIds);
+    const setABusinessSet = new Set(setABusinessIds);
 
     const setBStories = await db.query.stories.findMany({
       where: and(
@@ -328,19 +365,39 @@ export class StoryService {
       { entityType: TEXT_ENTITY.STORY, fields: ['question'], filterEnabled: storiesFilterEnabled }
     );
 
+    const businessAuthors = await businessAuthorsById(
+      [...setAStories, ...setBStories].map(s => s.businessId)
+    );
+
     const groupByUser = (storyList, isFollowerSet, savedIds) => {
       const grouped = {};
       for (const story of storyList) {
         if (blockedIds.has(story.userId)) continue;
-        if (!isFollowerSet && setAUserIds.has(story.userId)) continue;
-        // Set B is everyone the viewer doesn't follow: a private account's
-        // stories are for its followers only, even when the story itself is
-        // marked 'public'.
-        if (!isFollowerSet && story.user?.socialProfile?.isPublic === false) continue;
+        const business = story.businessId ? businessAuthors.get(story.businessId) : null;
+        if (story.businessId && !business) continue;
+        if (business) {
+          // Already in the viewer's own set (followed / run by them)
+          if (!isFollowerSet && setABusinessSet.has(story.businessId)) continue;
+        } else {
+          if (!isFollowerSet && setAUserIds.has(story.userId)) continue;
+          // Set B is everyone the viewer doesn't follow: a private account's
+          // stories are for its followers only, even when the story itself is
+          // marked 'public'.
+          if (!isFollowerSet && story.user?.socialProfile?.isPublic === false) continue;
+        }
 
-        if (!grouped[story.userId]) {
-          grouped[story.userId] = {
+        // One ring per account: the person, or the business
+        const key = business ? `business:${business.id}` : story.userId;
+        // story.userId stays the creator, for owner checks (delete, viewers)
+        if (business) {
+          story.user = asBusinessUser(story.user, business, { idIsBusiness: true });
+          story.business = business;
+        }
+
+        if (!grouped[key]) {
+          grouped[key] = {
             user: story.user,
+            business: business ?? null,
             stories: [],
             hasUnviewed: false,
             isFollowing: isFollowerSet,
@@ -353,7 +410,7 @@ export class StoryService {
 
         const decorated = decorateStoryWithPolls(story, viewerId);
 
-        grouped[story.userId].stories.push({
+        grouped[key].stories.push({
           ...decorated,
           isViewed,
           isLiked,
@@ -362,9 +419,9 @@ export class StoryService {
           likes: undefined,
         });
 
-        if (!isViewed) grouped[story.userId].hasUnviewed = true;
-        if (story.createdAt > grouped[story.userId].latestCreatedAt) {
-          grouped[story.userId].latestCreatedAt = story.createdAt;
+        if (!isViewed) grouped[key].hasUnviewed = true;
+        if (story.createdAt > grouped[key].latestCreatedAt) {
+          grouped[key].latestCreatedAt = story.createdAt;
         }
       }
 
@@ -386,6 +443,7 @@ export class StoryService {
       // they must not light the story ring (clicking would open an empty viewer).
       where: and(
         eq(stories.userId, userId),
+        isNull(stories.businessId), // the person's own ring, not a business they run
         gte(stories.expiresAt, now),
         storiesModerationGateStrict()
       ),
@@ -396,7 +454,8 @@ export class StoryService {
 
  static async getMyStories(userId) {
   const rows = await db.query.stories.findMany({
-    where: eq(stories.userId, userId),
+    // Personal stories only — a business's are in the tray under the business
+    where: and(eq(stories.userId, userId), isNull(stories.businessId)),
     with: {
       views: { with: { user: true } },
       polls: { with: { responses: true } },

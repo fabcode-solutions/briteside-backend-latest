@@ -9,8 +9,10 @@ import {
   userBlocks,
   userInterests,
   postCollaborators,
+  businessFollowers,
 } from '../../db/schema/index.js';
 import { eq, and, or, desc, sql, inArray, not, isNull, gt, ne } from 'drizzle-orm';
+import { attachBusinessAuthorsToPosts } from './businessAuthor.js';
 import { FollowService } from './follow.service.js';
 import { StoryService } from './story.service.js';
 import { ProfileService } from './profile.service.js';
@@ -36,7 +38,20 @@ export class FeedService {
 
     const followingIds = followingUsers.map(f => f.followingId);
 
-    if (followingIds.length === 0) {
+    // Businesses I follow — their posts are in this feed too
+    const followedBusinesses = await db.query.businessFollowers.findMany({
+      where: eq(businessFollowers.userId, userId),
+      columns: { businessId: true },
+    });
+    const followedBusinessIds = followedBusinesses.map(f => f.businessId);
+    const followedBusinessCondition = followedBusinessIds.length
+      ? sql`${posts.businessId} IN (${sql.join(
+          followedBusinessIds.map(id => sql`${id}`),
+          sql`, `
+        )})`
+      : sql`false`;
+
+    if (followingIds.length === 0 && followedBusinessIds.length === 0) {
       return {
         posts: [],
         pagination: { page, limit, hasMore: false, nextCursor: null, total: 0 },
@@ -52,21 +67,25 @@ export class FeedService {
 
     const validFollowingIds = followingIds.filter(id => !blockedIds.includes(id));
 
-    if (validFollowingIds.length === 0) {
+    if (validFollowingIds.length === 0 && followedBusinessIds.length === 0) {
       return {
         posts: [],
         pagination: { page, limit, hasMore: false, nextCursor: null, total: 0 },
       };
     }
 
-    const followingIdsArray = sql`ARRAY[${sql.join(
-      validFollowingIds.map(id => sql`${id}`),
-      sql`, `
-    )}]::uuid[]`;
+    const followingIdsArray = validFollowingIds.length
+      ? sql`ARRAY[${sql.join(
+          validFollowingIds.map(id => sql`${id}`),
+          sql`, `
+        )}]::uuid[]`
+      : sql`ARRAY[]::uuid[]`;
 
     let whereConditions = [
       sql`(
-    ${posts.userId} = ANY(${followingIdsArray})
+    -- Following a person shows their own posts, not the business they run
+    (${posts.businessId} IS NULL AND ${posts.userId} = ANY(${followingIdsArray}))
+    OR ${followedBusinessCondition}
     OR EXISTS (
       SELECT 1 FROM post_collaborators pc
       WHERE pc.post_id = ${posts.id}
@@ -288,8 +307,11 @@ export class FeedService {
 
     // NOW safe to use collaboratorsByPost
     const followingSet = new Set(validFollowingIds);
+    const followedBusinessSet = new Set(followedBusinessIds);
     for (const post of postsData) {
-      if (followingSet.has(post.userId)) {
+      if (post.businessId) {
+        post.isFollowing = followedBusinessSet.has(post.businessId);
+      } else if (followingSet.has(post.userId)) {
         post.isFollowing = true;
       } else {
         const postCollabs = collaboratorsByPost.get(post.id) || [];
@@ -359,6 +381,7 @@ export class FeedService {
       copyrightStatus: post.copyrightStatus ?? null,
     }));
 
+    await attachBusinessAuthorsToPosts(formattedPosts);
     const filterEnabled = await TextModerationService.getFilterEnabled(userId);
     await TextModerationService.maskFlaggedText(formattedPosts, {
       entityType: TEXT_ENTITY.POST,
@@ -641,6 +664,7 @@ export class FeedService {
       copyrightStatus: post.copyrightStatus ?? null,
     }));
 
+    await attachBusinessAuthorsToPosts(shapedPosts);
     const exploreFilterEnabled = await TextModerationService.getFilterEnabled(userId);
     await TextModerationService.maskFlaggedText(shapedPosts, {
       entityType: TEXT_ENTITY.POST,
@@ -1054,6 +1078,7 @@ export class FeedService {
       copyrightStatus: post.copyrightStatus ?? null,
     }));
 
+    await attachBusinessAuthorsToPosts(shapedPosts);
     const personalizedFilterEnabled = await TextModerationService.getFilterEnabled(userId);
     await TextModerationService.maskFlaggedText(shapedPosts, {
       entityType: TEXT_ENTITY.POST,

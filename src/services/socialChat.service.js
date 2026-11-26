@@ -861,7 +861,9 @@ export class SocialChatService {
   // ─── Sharing ─────────────────────────────────────────────────────────────────
 
   static async sharePostToUsers(currentUserId, postId, recipientUserIds, message = '') {
-    const { posts, stories, groups, events, venues } = await import('../db/schema/index.js');
+    const { posts, stories, groups, events, venues, businesses } = await import(
+      '../db/schema/index.js'
+    );
 
     let post = await db.query.posts.findFirst({
       where: eq(posts.id, postId),
@@ -893,6 +895,7 @@ export class SocialChatService {
     let isGroup = false;
     let isProfile = false;
     let isEvent = false;
+    let isBusiness = false;
 
     if (!post) {
       const story = await db.query.stories.findFirst({
@@ -983,6 +986,37 @@ export class SocialChatService {
         }
 
         if (!post) {
+          // Fall back to a published business page
+          const [business] = await db
+            .select({
+              id: businesses.id,
+              name: businesses.name,
+              slug: businesses.slug,
+              category: businesses.category,
+              city: businesses.city,
+              logoUrl: businesses.logoUrl,
+              heroUrl: businesses.heroUrl,
+              gallery: businesses.gallery,
+              rating: businesses.rating,
+              reviewCount: businesses.reviewCount,
+            })
+            .from(businesses)
+            .where(
+              and(
+                eq(businesses.id, postId),
+                eq(businesses.isPublished, true),
+                sql`${businesses.deletedAt} IS NULL`
+              )
+            )
+            .limit(1);
+
+          if (business) {
+            isBusiness = true;
+            post = { id: business.id, _business: business };
+          }
+        }
+
+        if (!post) {
           // NEW: fall back to sharing a user's profile
           const sharedUser = await db.query.users.findFirst({
             where: eq(users.id, postId),
@@ -991,7 +1025,8 @@ export class SocialChatService {
             },
           });
 
-          if (!sharedUser) throw new ApiError(404, 'Post, story, group, event, or user not found');
+          if (!sharedUser)
+            throw new ApiError(404, 'Post, story, group, event, business, or user not found');
 
           isProfile = true;
           post = {
@@ -1034,20 +1069,46 @@ export class SocialChatService {
             ? 'story'
             : isEvent
               ? 'event'
-              : isProfile
-                ? 'profile'
-                : 'post';
+              : isBusiness
+                ? 'business'
+                : isProfile
+                  ? 'profile'
+                  : 'post';
         const defaultContent = isGroup
           ? 'Shared a group with you'
           : isStory
             ? 'Shared a story with you'
             : isEvent
               ? 'Shared an event with you'
-              : isProfile
-                ? 'Shared a profile with you'
-                : 'Shared a post with you';
+              : isBusiness
+                ? 'Shared a business with you'
+                : isProfile
+                  ? 'Shared a profile with you'
+                  : 'Shared a post with you';
 
-        const metadata = isEvent
+        // Not `businessId` — that key marks a business inquiry message.
+        const businessCover = isBusiness
+          ? post._business.heroUrl ||
+            (Array.isArray(post._business.gallery) ? post._business.gallery[0] : null) ||
+            post._business.logoUrl ||
+            null
+          : null;
+        const metadata = isBusiness
+          ? {
+            sharedBusinessId: post.id,
+            sharedBusiness: {
+              id: post._business.id,
+              name: post._business.name,
+              slug: post._business.slug,
+              category: post._business.category,
+              city: post._business.city,
+              logoUrl: post._business.logoUrl ?? null,
+              coverImageUrl: businessCover,
+              rating: Number(post._business.rating ?? 0),
+              reviewCount: post._business.reviewCount ?? 0,
+            },
+          }
+          : isEvent
           ? {
             eventId: post.id,
             sharedEvent: {
@@ -1139,7 +1200,7 @@ export class SocialChatService {
         .update(stories)
         .set({ sharesCount: sql`${stories.sharesCount} + ${uniqueRecipients.length}` })
         .where(eq(stories.id, postId));
-    } else if (!isGroup && !isProfile && !isEvent) {
+    } else if (!isGroup && !isProfile && !isEvent && !isBusiness) {
       await db
         .update(posts)
         .set({ sharesCount: sql`${posts.sharesCount} + ${uniqueRecipients.length}` })
@@ -1154,9 +1215,11 @@ export class SocialChatService {
           ? 'story'
           : isEvent
             ? 'event'
-            : isProfile
-              ? 'profile'
-              : 'post',
+            : isBusiness
+              ? 'business'
+              : isProfile
+                ? 'profile'
+                : 'post',
       totalRecipients: uniqueRecipients.length,
       successCount: results.filter(r => r.success).length,
       results,

@@ -15,21 +15,12 @@ import httpStatus from 'http-status';
 import { catchAsync } from '../utils/catch-async.js';
 import { emitSocialChat } from '../socket/emitter.js';
 import { BusinessInboxService } from '../services/businessInbox.service.js';
+import { PriorityMessageService } from '../services/priorityMessage.service.js';
 
 const query = req => req.validatedQuery ?? req.query;
 
-async function deliverMessage(req, conversation, side, sent) {
-  const io = req.app.get('io');
-  if (!io) return;
-  const base = { businessId: sent.business.id, conversationId: conversation.id, side };
-  emitSocialChat(io, `user:${conversation.customerId}`, 'business-inbox:message:new', {
-    ...base,
-    message: sent.customerMessage,
-  });
-  for (const userId of await BusinessInboxService.inboxUserIds(sent.business)) {
-    emitSocialChat(io, `user:${userId}`, 'business-inbox:message:new', { ...base, message: sent.businessMessage });
-  }
-}
+const deliverMessage = (req, conversation, side, sent) =>
+  BusinessInboxService.broadcastMessage(req.app.get('io'), conversation, sent.business, side, sent);
 
 async function deliverRead(req, conversation, business, read) {
   const io = req.app.get('io');
@@ -67,7 +58,7 @@ const deliverSafely = (label, fn) =>
 // ─── Customer side ──────────────────────────────────────────────────────────
 
 export const openForCustomer = catchAsync(async (req, res) => {
-  const data = await BusinessInboxService.openForCustomer(req.user, req.params.idOrSlug);
+  const data = await BusinessInboxService.openForCustomer(req.user, req.params.idOrSlug, req.body?.kind);
   res.json({ success: true, data });
 });
 
@@ -91,6 +82,7 @@ export const getMyConversation = catchAsync(async (req, res) => {
       conversation: {
         id: conversation.id,
         businessId: conversation.businessId,
+        kind: conversation.kind,
         lastMessageAt: conversation.lastMessageAt,
         businessLastReadAt: conversation.businessLastReadAt,
         business: { id: business.id, name: business.name, slug: business.slug, logoUrl: business.logoUrl ?? null },
@@ -103,6 +95,13 @@ export const getMyConversation = catchAsync(async (req, res) => {
 export const sendMine = catchAsync(async (req, res) => {
   const conversation = await BusinessInboxService.getForCustomer(req.user, req.params.conversationId);
   const sent = await BusinessInboxService.send(conversation, 'customer', req.user, req.body);
+  // Paid thread: the talent's reply releases the business's priority payment.
+  // Awaited first so the reply's response already reflects it (as in personal chat).
+  if (conversation.kind === 'paid') {
+    await PriorityMessageService.releaseOnBusinessReply(conversation.id, req.user.id, sent.customerMessage.id).catch(
+      err => console.warn('[businessInbox] releaseOnBusinessReply failed (non-fatal):', err.message)
+    );
+  }
   res.status(httpStatus.CREATED).json({ success: true, data: { message: sent.customerMessage } });
   deliverSafely('send', () => deliverMessage(req, conversation, 'customer', sent));
   (async () => {
@@ -133,7 +132,7 @@ export const unreadInbox = catchAsync(async (req, res) => {
 });
 
 export const openForBusiness = catchAsync(async (req, res) => {
-  const data = await BusinessInboxService.openForBusiness(req.business, req.body.customerId);
+  const data = await BusinessInboxService.openForBusiness(req.business, req.body.customerId, req.body.kind);
   res.json({ success: true, data });
 });
 
@@ -146,6 +145,7 @@ export const getInboxConversation = catchAsync(async (req, res) => {
       conversation: {
         id: conversation.id,
         businessId: conversation.businessId,
+        kind: conversation.kind,
         lastMessageAt: conversation.lastMessageAt,
         customerLastReadAt: conversation.customerLastReadAt,
         customer: conversation.customer ?? null,

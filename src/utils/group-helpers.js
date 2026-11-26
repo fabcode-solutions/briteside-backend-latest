@@ -125,8 +125,39 @@ export async function checkPendingJoinRequest(groupId, userId) {
  * @returns {Promise<Object>} The membership record
  * @throws {ApiError} If user is not an admin or moderator
  */
+/**
+ * A group run as a business is administered by the business's team (anyone who
+ * can post as it), not only by the person who created it. Returns an admin
+ * membership-shaped record for them, or null.
+ */
+export async function businessGroupAdmin(groupId, userId) {
+  const group = await db.query.groups.findFirst({
+    where: and(eq(groups.id, groupId), isNull(groups.deletedAt)),
+    columns: { businessId: true },
+  });
+  if (!group?.businessId) return null;
+  const { assertCanPublishAs } = await import('../services/social/businessAuthor.js');
+  try {
+    await assertCanPublishAs({ id: userId }, group.businessId);
+    return { groupId, userId, role: 'admin', status: 'joined', viaBusiness: true };
+  } catch {
+    return null;
+  }
+}
+
+/** Membership check that also lets a business's team run its groups. */
+async function verifyAdminOrBusiness(groupId, userId, options) {
+  try {
+    return await verifyGroupMembership(groupId, userId, options);
+  } catch (err) {
+    const viaBusiness = await businessGroupAdmin(groupId, userId);
+    if (viaBusiness) return viaBusiness;
+    throw err;
+  }
+}
+
 export async function requireGroupAdminOrModerator(groupId, userId, errorMessage = null) {
-  return await verifyGroupMembership(groupId, userId, {
+  return await verifyAdminOrBusiness(groupId, userId, {
     role: ['admin', 'moderator', 'owner'],
     errorMessage: errorMessage || 'You are not authorized to perform this action',
     errorCode: 403,
@@ -142,7 +173,7 @@ export async function requireGroupAdminOrModerator(groupId, userId, errorMessage
  * @throws {ApiError} If user is not an admin
  */
 export async function requireGroupAdmin(groupId, userId, errorMessage = null) {
-  return await verifyGroupMembership(groupId, userId, {
+  return await verifyAdminOrBusiness(groupId, userId, {
     role: ['admin', 'owner'],
     errorMessage: errorMessage || 'You must be a group admin to perform this action',
     errorCode: 403,
@@ -160,7 +191,8 @@ export async function requireGroupCreator(groupId, userId, errorMessage = null) 
   });
 
   if (!group) throw new ApiError(404, 'Group not found');
-  if (group.createdBy !== userId) {
+  // A business's group: its team counts as the creator
+  if (group.createdBy !== userId && !(await businessGroupAdmin(groupId, userId))) {
     throw new ApiError(403, errorMessage || 'Only the group creator can perform this action');
   }
 

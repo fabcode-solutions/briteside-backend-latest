@@ -8,7 +8,7 @@ import {
   purchasedTickets,
   userInformation,
 } from '../db/schema/index.js';
-import { eq, and, desc, count, avg, gte, lte, sql } from 'drizzle-orm';
+import { eq, and, desc, count, avg, gte, lte, sql, isNull } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import ApiError from '../utils/api-error.js';
 import { generateMemberCode } from '../utils/codeGenerator.js';
@@ -104,13 +104,13 @@ export class OrganizerProfileService {
       const totalEventsQuery = await db
         .select({ count: count() })
         .from(events)
-        .where(eq(events.organizerId, organizerId));
+        .where(and(eq(events.organizerId, organizerId), isNull(events.businessId)));
 
       // Published events
       const publishedEventsQuery = await db
         .select({ count: count() })
         .from(events)
-        .where(and(eq(events.organizerId, organizerId), eq(events.eventStatus, 'published')));
+        .where(and(eq(events.organizerId, organizerId), isNull(events.businessId), eq(events.eventStatus, 'published')));
 
       // Upcoming events
       const upcomingEventsQuery = await db
@@ -119,6 +119,7 @@ export class OrganizerProfileService {
         .where(
           and(
             eq(events.organizerId, organizerId),
+            isNull(events.businessId),
             eq(events.eventStatus, 'published'),
             gte(events.startDate, new Date())
           )
@@ -132,7 +133,7 @@ export class OrganizerProfileService {
         })
         .from(events)
         .leftJoin(eventReviews, eq(events.id, eventReviews.eventId))
-        .where(eq(events.organizerId, organizerId));
+        .where(and(eq(events.organizerId, organizerId), isNull(events.businessId)));
 
       // Total tickets sold
       const ticketsSoldQuery = await db
@@ -162,7 +163,8 @@ export class OrganizerProfileService {
       const { page = 1, limit = 12, status, timeFilter = 'all', search } = filters;
 
       const offset = (page - 1) * limit;
-      let conditions = [eq(events.organizerId, organizerId)];
+      // Events hosted as a business are on the business page, not here
+      let conditions = [eq(events.organizerId, organizerId), isNull(events.businessId)];
 
       if (status) {
         conditions.push(eq(events.eventStatus, status));
@@ -219,7 +221,8 @@ export class OrganizerProfileService {
       const { page = 1, limit = 10, rating } = filters;
       const offset = (page - 1) * limit;
 
-      let conditions = [eq(events.organizerId, organizerId)];
+      // Events hosted as a business are on the business page, not here
+      let conditions = [eq(events.organizerId, organizerId), isNull(events.businessId)];
 
       if (rating) {
         conditions.push(eq(eventReviews.overallRating, rating));

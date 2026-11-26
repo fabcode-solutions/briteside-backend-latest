@@ -6,8 +6,10 @@ import {
   livestreamViewers,
   userFollows,
   users,
+  businessFollowers,
 } from '../db/schema/index.js';
-import { eq, and, desc, sql, count, ne } from 'drizzle-orm';
+import { eq, and, desc, sql, count, ne, or, isNull, inArray } from 'drizzle-orm';
+import { attachBusinessHostsToLivestreams } from './social/businessAuthor.js';
 import { StreamClient } from '@stream-io/node-sdk';
 import { createNotification } from './notification.service.js';
 import ApiError from '../utils/api-error.js';
@@ -26,7 +28,8 @@ export class LivestreamService {
   // 2. Insert a DB record
   // 3. Notify all followers (non-blocking)
   // ─────────────────────────────────────────────────────────────────────────
-  static async startLivestream({ userId, title, description, allowComments }) {
+  // `business` (already access-checked by the caller): broadcast as that business
+  static async startLivestream({ userId, title, description, allowComments, business = null }) {
     // Prevent a user from having two concurrent streams
     const existing = await db.query.livestreams.findFirst({
       where: and(eq(livestreams.userId, userId), eq(livestreams.status, 'live')),
@@ -37,6 +40,7 @@ export class LivestreamService {
       },
     });
     if (existing) {
+      await attachBusinessHostsToLivestreams(existing);
       // Return current active livestream instead of failing
       return {
         stream: existing,
@@ -77,6 +81,7 @@ export class LivestreamService {
       .insert(livestreams)
       .values({
         userId,
+        businessId: business?.id ?? null,
         title,
         description: description || null,
         streamCallId: callId,
@@ -95,10 +100,11 @@ export class LivestreamService {
       texts: [title, description],
     });
 
-    // Notify followers (fire-and-forget)
-    LivestreamService._notifyFollowers(userId, inserted.id, title).catch(err =>
-      console.warn('[livestream] follower notification failed:', err)
-    );
+    // Notify followers (fire-and-forget) — the business's when live as it
+    (business
+      ? LivestreamService._notifyBusinessFollowers(business, inserted.id, title)
+      : LivestreamService._notifyFollowers(userId, inserted.id, title)
+    ).catch(err => console.warn('[livestream] follower notification failed:', err));
 
     // Re-fetch with the user relation so the 'livestream:started' socket payload
     // matches the /livestream/active shape — the sidebar needs stream.user.
@@ -183,6 +189,7 @@ export class LivestreamService {
       },
     });
     if (!stream) throw new ApiError(404, 'Livestream not found.');
+    await attachBusinessHostsToLivestreams(stream);
 
     const filterEnabled = await TextModerationService.getFilterEnabled(viewerId);
     return TextModerationService.maskFlaggedTextSingle(stream, {
@@ -268,6 +275,7 @@ export class LivestreamService {
       limit,
       offset,
     });
+    await attachBusinessHostsToLivestreams(rows);
 
     const filterEnabled = await TextModerationService.getFilterEnabled(viewerId);
     return TextModerationService.maskFlaggedText(rows, {
@@ -287,12 +295,24 @@ export class LivestreamService {
       columns: { followingId: true },
     });
     const followingIds = following.map(f => f.followingId);
-    if (followingIds.length === 0) return [];
+    // Businesses the viewer follows — their streams count as "following" too
+    const followedBusinesses = await db
+      .select({ businessId: businessFollowers.businessId })
+      .from(businessFollowers)
+      .where(eq(businessFollowers.userId, viewerId));
+    const followedBusinessIds = followedBusinesses.map(f => f.businessId);
+    if (followingIds.length === 0 && followedBusinessIds.length === 0) return [];
 
     const rows = await db.query.livestreams.findMany({
       where: and(
         eq(livestreams.status, 'live'),
-        sql`${livestreams.userId} = ANY(${sql.raw(`ARRAY[${followingIds.map(id => `'${id}'`).join(',')}]::uuid[]`)})`
+        or(
+          // A person's own streams — not the business they run
+          followingIds.length
+            ? and(isNull(livestreams.businessId), inArray(livestreams.userId, followingIds))
+            : sql`false`,
+          followedBusinessIds.length ? inArray(livestreams.businessId, followedBusinessIds) : sql`false`
+        )
       ),
       with: {
         user: {
@@ -301,6 +321,7 @@ export class LivestreamService {
       },
       orderBy: [desc(livestreams.startedAt)],
     });
+    await attachBusinessHostsToLivestreams(rows);
 
     const filterEnabled = await TextModerationService.getFilterEnabled(viewerId);
     return TextModerationService.maskFlaggedText(rows, {
@@ -536,6 +557,38 @@ export class LivestreamService {
   //     validity_in_seconds: validity,
   //   });
   // }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PRIVATE: Notify a business's followers that it went live (never names the
+  // person behind it)
+  // ─────────────────────────────────────────────────────────────────────────
+  static async _notifyBusinessFollowers(business, livestreamId, title) {
+    const followers = await db
+      .select({ userId: businessFollowers.userId })
+      .from(businessFollowers)
+      .where(eq(businessFollowers.businessId, business.id));
+    const BATCH = 50;
+    for (let i = 0; i < followers.length; i += BATCH) {
+      await Promise.allSettled(
+        followers.slice(i, i + BATCH).map(f =>
+          createNotification({
+            userId: f.userId,
+            title: `${business.name} is Live 🔴`,
+            message: `${business.name} just started a live stream: "${title}"`,
+            type: 'social_update',
+            relatedId: livestreamId,
+            redirectTo: `/live/${livestreamId}`,
+            metadata: {
+              livestreamId,
+              businessId: business.id,
+              organizerLogoUrl: business.logoUrl ?? null,
+              audience: 'personal',
+            },
+          })
+        )
+      );
+    }
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // PRIVATE: Notify all followers that this user went live
