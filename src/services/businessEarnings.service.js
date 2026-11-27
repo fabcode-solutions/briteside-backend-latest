@@ -74,6 +74,9 @@ export class BusinessEarningsService {
           refundsCents: sql`coalesce(sum(${businessBookings.refundedCents}), 0)`.mapWith(Number),
           platformFeesCents: sql`coalesce(sum(${businessBookings.platformCommissionCents}), 0)`.mapWith(Number),
           customerTaxCents: sql`coalesce(sum(${businessBookings.taxAmountCents}) filter (where ${businessBookings.taxLiability} = 'account'), 0)`.mapWith(Number),
+          // Bookings made from a custom price the business sent ("Inquire for pricing") — part of gross
+          customOfferBookings: sql`count(*) filter (where ${businessBookings.customOfferId} is not null)`.mapWith(Number),
+          customOfferGrossCents: sql`coalesce(sum(${businessBookings.amountPaidCents}) filter (where ${businessBookings.customOfferId} is not null), 0)`.mapWith(Number),
         })
         .from(businessBookings)
         .where(and(...bookingConds)),
@@ -133,6 +136,8 @@ export class BusinessEarningsService {
       bookings: totals.bookings,
       // Service money taken online for this business (customers' booking fees go to Briteside)
       grossCents: totals.grossCents,
+      // The part of gross from custom offers (already included in grossCents)
+      customOffers: { bookings: totals.customOfferBookings, grossCents: totals.customOfferGrossCents },
       refundsCents: totals.refundsCents,
       platformFeesCents: totals.platformFeesCents,
       // Stripe processing fees are paid by Briteside, never deducted from the business

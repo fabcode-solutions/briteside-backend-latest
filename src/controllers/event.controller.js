@@ -1,8 +1,10 @@
 import { EventService } from '../services/event.service.js';
 import { OrganizerService } from '../services/organizer.service.js';
 import { OnboardingService } from '../services/onboarding.service.js';
+import { rankingCategoryIds } from '../services/businessAccount.service.js';
 import ApiError from '../utils/api-error.js';
 import { catchAsync } from '../utils/catch-async.js';
+import { assertCanPublishAs } from '../services/social/businessAuthor.js';
 
 export const createEvent = catchAsync(async (req, res) => {
   const organizerId = req.user.organizerId;
@@ -14,7 +16,11 @@ export const createEvent = catchAsync(async (req, res) => {
   // Counted inside EventService.createEvent itself — it only runs on the one
   // path that actually inserts a new event, not on an idempotent replay of a
   // request that already created one (see createEvent's clientRequestId check).
-  const event = await EventService.createEvent(organizerId, req.body);
+  // Hosting as a business (acting as it in the app): it must be one they can post for
+  const businessId = typeof req.body.businessId === 'string' && req.body.businessId ? req.body.businessId : null;
+  const business = businessId ? await assertCanPublishAs(req.user, businessId) : null;
+
+  const event = await EventService.createEvent(organizerId, req.body, { business });
 
   res.status(201).json({
     success: true,
@@ -47,8 +53,14 @@ export const getDiscoverEvents = catchAsync(async (req, res) => {
   const userId = req.user?.id ?? null;
   // "For you": rank events in the user's setup-flow categories first. Skipped
   // when the user filters by a category explicitly or opts out (?forYou=false).
+  // While acting as a business (?asBusinessId=), its own interests rank instead.
   if (userId && !filters.categoryId && req.query.forYou !== 'false') {
-    filters.preferredCategoryIds = await OnboardingService.getEventCategoryIds(userId);
+    filters.preferredCategoryIds = await rankingCategoryIds(
+      'event',
+      req.user,
+      req.query.asBusinessId,
+      OnboardingService.getEventCategoryIds
+    );
   }
   const result = await EventService.getDiscoverEvents(filters, userId);
 
@@ -64,6 +76,8 @@ export const getMyEvents = catchAsync(async (req, res) => {
     limit: parseInt(req.query.limit) || 12,
     timeFilter: req.query.timeFilter || 'all',
     organizerId: req.query.organizerId,
+    // 'none' = the person's own events, a business id = that business's
+    businessId: req.query.businessId,
     status: req.query.eventStatus,
     location: req.query.location,
     dateRange: req.query.dateRange,

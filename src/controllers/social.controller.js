@@ -7,6 +7,7 @@ import { PostService } from '../services/social/post.service.js';
 import { StoryPollService } from '../services/social/storyPoll.service.js';
 import { StoryService } from '../services/social/story.service.js';
 import { StoryCollectionService } from '../services/social/storyCollection.service.js';
+import { assertCanPublishAs } from '../services/social/businessAuthor.js';
 import { BioLinkService } from '../services/social/bioLink.service.js';
 import { ShopProductService } from '../services/shop/shopProduct.service.js';
 import { SuggestedUsersService } from '../services/social/suggestedUsers.service.js';
@@ -20,6 +21,7 @@ import { db } from '../db/index.js';
 import { eq, and } from 'drizzle-orm';
 import { userFollowRequests } from '../db/schema/index.js';
 import { isUserOnline } from '../socket/index.js';
+import { findPinnableBusiness } from '../services/pinnedBusiness.helper.js';
 
 // Same rule enforced at registration (auth.route.js) — kept identical for consistency
 const USERNAME_REGEX = /^[a-zA-Z0-9_]+$/;
@@ -641,6 +643,23 @@ export const togglePinProfile = catchAsync(async (req, res) => {
   });
 });
 
+/** Pin / unpin a business page (shows in the same Pinned Profiles list). */
+export const togglePinBusiness = catchAsync(async (req, res) => {
+  const business = await findPinnableBusiness(req.params.idOrSlug);
+  const result = await SocialService.togglePinBusiness(req.user.id, business.id);
+  res.json({
+    success: true,
+    message: result.pinned ? 'Business pinned' : 'Business unpinned',
+    data: result,
+  });
+});
+
+export const getBusinessPinStatus = catchAsync(async (req, res) => {
+  const business = await findPinnableBusiness(req.params.idOrSlug);
+  const pinned = await SocialService.isBusinessPinned(req.user.id, business.id);
+  res.json({ success: true, data: { pinned } });
+});
+
 export const getPinnedProfiles = catchAsync(async (req, res) => {
   const currentUserId = req.user.id;
   const { page = 1, limit = 20, search = '' } = req.query;
@@ -738,7 +757,12 @@ export const createPost = catchAsync(async (req, res) => {
     throw new ApiError(400, 'Aspect ratios must match media URLs length when provided');
   }
 
+  // Posting as a business (acting as it in the app): it must be one they can post for
+  const businessId = typeof req.body.businessId === 'string' && req.body.businessId ? req.body.businessId : null;
+  if (businessId) await assertCanPublishAs(req.user, businessId);
+
   const post = await SocialService.createPost(userId, {
+    businessId,
     caption,
     mediaUrls: mediaUrlsArr,
     mediaTypes: mediaTypesArr,
@@ -755,7 +779,8 @@ export const createPost = catchAsync(async (req, res) => {
     isPlus: req.user.isBritesidePlus,
   });
 
-  if (collectionId) {
+  // Collections are the personal profile's
+  if (collectionId && !businessId) {
     await StoryCollectionService.addItemSilent(collectionId, userId, {
       itemType: 'post',
       postId: post.id,
@@ -1273,7 +1298,12 @@ export const createStory = catchAsync(async (req, res) => {
     throw new ApiError(400, "Media type must be 'image' or 'video'");
   }
 
+  // Posting as a business (acting as it in the app): it must be one they can post for
+  const businessId = typeof req.body.businessId === 'string' && req.body.businessId ? req.body.businessId : null;
+  if (businessId) await assertCanPublishAs(req.user, businessId);
+
   const story = await StoryService.createStory(userId, {
+    businessId,
     mediaUrl,
     mediaType,
     caption,
@@ -1285,7 +1315,8 @@ export const createStory = catchAsync(async (req, res) => {
     tags: Array.isArray(tags) ? tags : [],
   });
 
-  if (collectionId) {
+  // Collections are the personal profile's
+  if (collectionId && !businessId) {
     await StoryCollectionService.addItemSilent(collectionId, userId, {
       itemType: 'story',
       storyId: story.id,

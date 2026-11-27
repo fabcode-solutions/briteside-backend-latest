@@ -92,6 +92,16 @@ export const businesses = pgTable(
     reserveNowSubscriptionId: varchar('reserve_now_subscription_id', { length: 255 }),
     reserveNowPeriodEnd: timestamp('reserve_now_period_end', { withTimezone: true }),
     reserveNowCancelAtPeriodEnd: boolean('reserve_now_cancel_at_period_end').notNull().default(false),
+    // Video cover ($5/month, bought in the app through Apple / Google or on the web through Stripe — see
+    // business_store_subscriptions). heroVideoUrl (≤ 30s) replaces the cover
+    // photo while videoCoverUntil is in the future; heroUrl stays as its
+    // poster and comes back by itself when the subscription lapses.
+    heroVideoUrl: text('hero_video_url'),
+    // When the paid time (incl. any store grace period) ends — set from the stores
+    videoCoverUntil: timestamp('video_cover_until', { withTimezone: true }),
+    videoCoverAutoRenew: boolean('video_cover_auto_renew').notNull().default(false),
+    // 'apple' | 'google' | 'stripe' — where it's billed (managed / cancelled there; stripe = dashboard)
+    videoCoverStore: varchar('video_cover_store', { length: 10 }),
     // Where "Send inquiry" goes: 'inbox' (owner's Inquiry inbox) | 'email'
     inquiryChannel: varchar('inquiry_channel', { length: 10 }).notNull().default('email'),
     // 'email' channel: the address inquiries go to (null = the contact email)
@@ -139,6 +149,27 @@ export const businesses = pgTable(
     // Owner can unpublish without deleting
     isPublished: boolean('is_published').notNull().default(true),
 
+    // ── Business account settings (the business is its own account) ──
+    // Which business notifications are on: { [key]: boolean }, missing = on.
+    // Keys: BUSINESS_NOTIFICATION_KEYS in config/business-account.js
+    notificationPrefs: jsonb('notification_prefs').notNull().default(sql`'{}'::jsonb`),
+    // Privacy
+    // Who can start a conversation: everyone | followers | customers | nobody
+    messagesFrom: varchar('messages_from', { length: 20 }).notNull().default('everyone'),
+    // Visitor wall posts: everyone (published right away) | approval | off
+    wallPosts: varchar('wall_posts', { length: 20 }).notNull().default('approval'),
+    showReviews: boolean('show_reviews').notNull().default(true),
+    showFollowerCount: boolean('show_follower_count').notNull().default(true),
+    showStaff: boolean('show_staff').notNull().default(true),
+    // Public page shows the city only; the address is shared once booked
+    hideAddressUntilBooked: boolean('hide_address_until_booked').notNull().default(false),
+    // Listed in search / directory (the page stays reachable by link)
+    discoverable: boolean('discoverable').notNull().default(true),
+    // Mask profanity in visitor wall posts and comments
+    profanityFilter: boolean('profanity_filter').notNull().default(false),
+    // The business's own Stripe customer (saved cards for Reserve Now, commission…)
+    stripeCustomerId: varchar('stripe_customer_id', { length: 255 }),
+
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
@@ -160,6 +191,11 @@ export const businesses = pgTable(
     ),
     check('chk_businesses_free_cancel_hours', sql`${table.freeCancellationHours} >= 0`),
     check('chk_businesses_page_type', sql`${table.pageType} IN ('appointments', 'standard')`),
+    check(
+      'chk_businesses_messages_from',
+      sql`${table.messagesFrom} IN ('everyone', 'followers', 'customers', 'nobody')`
+    ),
+    check('chk_businesses_wall_posts', sql`${table.wallPosts} IN ('everyone', 'approval', 'off')`),
   ]
 );
 
@@ -641,10 +677,14 @@ export const businessTeamMembers = pgTable(
  * Fees (see utils/orderProcessingFee.js):
  *   customerFeeCents        — tiered booking fee on the FULL service price, charged online once,
  *                             at the initial booking (pay-in-person included), never again
- *   platformCommissionCents — 5% of every service amount paid ONLINE (full price, deposit, and any
- *                             balance paid online later), withheld from the payment itself.
- *                             The 5% on what is paid IN PERSON is owed separately — see
- *                             business_commission_charges (created when the booking completes).
+ *   commissionUpfront       — true on bookings made under the full-cut model (all new bookings):
+ *   platformCommissionCents     the 5% of the FULL service price withheld from the online payment
+ *                               at booking (capped at what was paid online). Non-refundable: a
+ *                               refund only lowers it to what Briteside still holds, and the
+ *                               difference is owed by the business (business_commission_charges).
+ *                             false (older bookings, split model): 5% of every service amount paid
+ *                               ONLINE, withheld from it; the 5% on what's paid IN PERSON is owed
+ *                               separately once the booking completes.
  *   amountDueNowCents       — service portion charged at booking (full | deposit | 0 for in_person)
  *   customer pays at booking = amountDueNowCents + customerFeeCents (+ tax)
  */
@@ -680,6 +720,9 @@ export const businessBookings = pgTable(
     startAt: timestamp('start_at', { withTimezone: true }).notNull(),
     endAt: timestamp('end_at', { withTimezone: true }).notNull(),
     timezone: varchar('timezone', { length: 64 }).notNull(),
+    // The customer's own zone when they booked (browser), so emails can also show
+    // their local time; null for walk-ins and older bookings
+    customerTimezone: varchar('customer_timezone', { length: 64 }),
 
     status: varchar('status', { length: 20 }).notNull().default('awaiting_payment'),
 
@@ -689,11 +732,15 @@ export const businessBookings = pgTable(
     amountDueNowCents: integer('amount_due_now_cents').notNull(),
     customerFeeCents: integer('customer_fee_cents').notNull(),
     platformCommissionCents: integer('platform_commission_cents').notNull(),
+    commissionUpfront: boolean('commission_upfront').notNull().default(false),
     taxAmountCents: integer('tax_amount_cents').notNull().default(0),
     // 'account' (business collects/remits tax → tax flows into its payout) | 'self' | 'none'
     taxLiability: varchar('tax_liability', { length: 20 }).notNull().default('none'),
     amountPaidCents: integer('amount_paid_cents').notNull().default(0),
     refundedCents: integer('refunded_cents').notNull().default(0),
+    // What the business entered as received in hand at the visit (completed bookings).
+    // NULL = not entered → the balance due is assumed. Dashboard "Off Platform"; no effect on commission.
+    inHandCents: integer('in_hand_cents'),
     stripeFeeCents: integer('stripe_fee_cents'),
     reserveAmountCents: integer('reserve_amount_cents'),
 
@@ -890,9 +937,15 @@ export const businessReviews = pgTable(
     staffId: uuid('staff_id').references(() => businessStaff.id, { onDelete: 'set null' }),
     rating: integer('rating').notNull(),
     comment: text('comment'),
-    // Public response from the business
+    // Photos the customer attached: ["https://…", …]
+    images: jsonb('images')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    // Public response from the business — one per review, editable
     ownerReply: text('owner_reply'),
+    // First posted (kept when the reply is edited)
     ownerRepliedAt: timestamp('owner_replied_at', { withTimezone: true }),
+    ownerReplyEditedAt: timestamp('owner_reply_edited_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1153,6 +1206,64 @@ export const businessGalleryLikes = pgTable(
   table => [
     primaryKey({ columns: [table.businessId, table.postKey, table.userId] }),
     index('idx_business_gallery_likes_user').on(table.userId),
+  ]
+);
+
+// ─── FOLLOWERS ──────────────────────────────────────────────────────────────
+/** Members following a business page (the "Follow" button on /business/:slug). */
+export const businessFollowers = pgTable(
+  'business_followers',
+  {
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    primaryKey({ columns: [table.businessId, table.userId] }),
+    index('idx_business_followers_user').on(table.userId),
+  ]
+);
+
+// ─── CLIENTS (imported / invited) ───────────────────────────────────────────
+/**
+ * Clients a business added itself (CSV import or one by one) and may have
+ * invited to book. Customers who booked come from business_bookings; the
+ * dashboard's Customers tab merges the two.
+ * email is stored lowercase; phone in E.164 (+15551234567).
+ */
+export const businessClients = pgTable(
+  'business_clients',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    businessId: uuid('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 150 }),
+    email: varchar('email', { length: 255 }),
+    phone: varchar('phone', { length: 20 }),
+    // 'import' (CSV) | 'manual' (typed in)
+    source: varchar('source', { length: 10 }).notNull().default('manual'),
+    addedBy: uuid('added_by').references(() => users.id, { onDelete: 'set null' }),
+    // Last invite per channel — at most one per contact per 30 days
+    emailInvitedAt: timestamp('email_invited_at', { withTimezone: true }),
+    smsInvitedAt: timestamp('sms_invited_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    uniqueIndex('uq_business_clients_email')
+      .on(table.businessId, table.email)
+      .where(sql`${table.email} IS NOT NULL`),
+    uniqueIndex('uq_business_clients_phone')
+      .on(table.businessId, table.phone)
+      .where(sql`${table.phone} IS NOT NULL`),
+    index('idx_business_clients_business_created').on(table.businessId, table.createdAt),
+    check('chk_business_clients_contact', sql`${table.email} IS NOT NULL OR ${table.phone} IS NOT NULL`),
+    check('chk_business_clients_source', sql`${table.source} IN ('import', 'manual')`),
   ]
 );
 

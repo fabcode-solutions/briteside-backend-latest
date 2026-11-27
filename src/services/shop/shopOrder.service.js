@@ -59,10 +59,16 @@ export class ShopOrderService {
     };
   }
 
-  static async findPaidOrder(buyerId, productId) {
+  /**
+   * The account's paid order for a product. buyerBusinessId set = owned by that
+   * business (any team member's purchase); otherwise the buyer's personal one.
+   */
+  static async findPaidOrder(buyerId, productId, buyerBusinessId = null) {
     return db.query.shopOrders.findFirst({
       where: and(
-        eq(shopOrders.buyerId, buyerId),
+        buyerBusinessId
+          ? eq(shopOrders.buyerBusinessId, buyerBusinessId)
+          : and(eq(shopOrders.buyerId, buyerId), isNull(shopOrders.buyerBusinessId)),
         eq(shopOrders.productId, productId),
         eq(shopOrders.status, 'paid')
       ),
@@ -81,8 +87,10 @@ export class ShopOrderService {
    * Start a purchase.
    * Free products bypass Stripe entirely and are delivered immediately.
    */
-  static async createCheckout(buyerId, productId, platform, customerInfo = {}) {
-    const prep = await this._prepareOrder(buyerId, productId, platform, customerInfo);
+  static async createCheckout(buyerId, productId, platform, customerInfo = {}, { buyerBusinessId = null } = {}) {
+    const prep = await this._prepareOrder(buyerId, productId, platform, customerInfo, {
+      buyerBusinessId,
+    });
     if (prep.free || prep.redirect) return prep.redirect ?? prep;
 
     return this._createHostedOrderSession(prep, platform);
@@ -94,7 +102,8 @@ export class ShopOrderService {
     productId,
     platform,
     customerInfo = {},
-    { native = false } = {}
+    // buyerBusinessId: bought while acting as that business (access checked by the caller)
+    { native = false, buyerBusinessId = null } = {}
   ) {
     const product = await db.query.shopProducts.findFirst({
       where: eq(shopProducts.id, productId),
@@ -123,8 +132,10 @@ export class ShopOrderService {
       };
     }
 
-    const alreadyOwned = await this.findPaidOrder(buyerId, productId);
-    if (alreadyOwned) throw new ApiError(409, 'You already own this product');
+    const alreadyOwned = await this.findPaidOrder(buyerId, productId, buyerBusinessId);
+    if (alreadyOwned) {
+      throw new ApiError(409, buyerBusinessId ? 'Your business already owns this product' : 'You already own this product');
+    }
 
     const requiresCustomerInfo = this.REQUIRES_CUSTOMER_INFO.has(product.listingType);
     const customerName = customerInfo.customerName?.trim() || null;
@@ -149,6 +160,7 @@ export class ShopOrderService {
         .values({
           productId: product.id,
           buyerId,
+          buyerBusinessId,
           sellerId: product.userId,
           status: 'paid',
           productTitleSnapshot: product.title,
@@ -220,6 +232,7 @@ export class ShopOrderService {
       .values({
         productId: product.id,
         buyerId,
+        buyerBusinessId,
         sellerId: product.userId,
         status: 'pending',
         productTitleSnapshot: product.title,
@@ -370,9 +383,10 @@ export class ShopOrderService {
    *  redirects are returned as-is (same shape as createCheckout) since
    *  neither needs a PaymentIntent; only a real paid product returns a
    *  `paymentId` for the modal to drive. */
-  static async prepareNativeCheckout(buyerId, productId, platform, customerInfo = {}) {
+  static async prepareNativeCheckout(buyerId, productId, platform, customerInfo = {}, { buyerBusinessId = null } = {}) {
     const prep = await this._prepareOrder(buyerId, productId, platform, customerInfo, {
       native: true,
+      buyerBusinessId,
     });
     if (prep.free) return { free: true, orderId: prep.orderId };
     if (prep.redirect) return prep.redirect;
@@ -642,6 +656,8 @@ export class ShopOrderService {
 
     await UserSpendService.recordSpend({
       userId: updated.buyerId,
+      // Bought as a business → that business's spend log
+      businessId: updated.buyerBusinessId ?? null,
       spendType: 'shop',
       amountCents: updated.chargedCents,
       referenceId: updated.id,
@@ -777,10 +793,15 @@ export class ShopOrderService {
    * A fresh download link for an order the caller owns.
    * Every call re-verifies ownership, so nothing is authorised by URL alone.
    */
-  static async getDownload(buyerId, orderId) {
+  /**
+   * `businessId`: downloading from the business's purchases — any team member
+   * with access (checked by the route) may, whoever paid.
+   */
+  static async getDownload(buyerId, orderId, { businessId = null } = {}) {
     const order = await db.query.shopOrders.findFirst({ where: eq(shopOrders.id, orderId) });
     if (!order) throw new ApiError(404, 'Order not found');
-    if (order.buyerId !== buyerId) throw new ApiError(403, 'This is not your purchase');
+    const allowed = businessId ? order.buyerBusinessId === businessId : order.buyerId === buyerId;
+    if (!allowed) throw new ApiError(403, 'This is not your purchase');
     if (order.status !== 'paid') {
       throw new ApiError(403, `This order is ${order.status} and cannot be downloaded`);
     }
@@ -814,14 +835,25 @@ export class ShopOrderService {
     return { ...result, fileName: product.deliveryFileName, deliveryType: product.deliveryType };
   }
 
-  /** The buyer's own purchases, newest first. */
-  static async listPurchases(buyerId, page = 1, limit = 20) {
+  /**
+   * The buyer's own purchases, newest first.
+   * scope: 'personal' (default — not bought as a business), 'all' (everything
+   * this person paid for), or { businessId } (the business's purchases, any payer).
+   */
+  static async listPurchases(buyerId, page = 1, limit = 20, scope = 'personal') {
     const offset = (page - 1) * limit;
+
+    const owner =
+      scope && typeof scope === 'object' && scope.businessId
+        ? eq(shopOrders.buyerBusinessId, scope.businessId)
+        : scope === 'all'
+          ? eq(shopOrders.buyerId, buyerId)
+          : and(eq(shopOrders.buyerId, buyerId), isNull(shopOrders.buyerBusinessId));
 
     // Pending and expired orders are noise to the buyer — only completed
     // purchases and refunds belong in this list.
     const visibleOrders = and(
-      eq(shopOrders.buyerId, buyerId),
+      owner,
       sql`${shopOrders.status} IN ('paid', 'refunded')`
     );
 

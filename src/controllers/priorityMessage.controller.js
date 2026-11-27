@@ -53,11 +53,22 @@ const parseMessagePayload = body => {
  * Body: { talentProfileId, subject?, messageContent }
  * Returns: { checkoutUrl, paymentId }
  */
+/**
+ * Optional `businessId` (body or query): send as that business — the caller
+ * must be able to answer its inbox. Returns the business, or null.
+ */
+const businessFor = async (req, businessId) => {
+  if (!businessId) return null;
+  if (typeof businessId !== 'string') throw new ApiError(400, 'Invalid `businessId`');
+  return PriorityMessageService.assertCanSendAsBusiness(req.user, businessId);
+};
+
 export const createCheckout = catchAsync(async (req, res) => {
-  const result = await PriorityMessageService.createCheckout(
-    req.user.id,
-    parseMessagePayload(req.body)
-  );
+  const business = await businessFor(req, req.body?.businessId);
+  const result = await PriorityMessageService.createCheckout(req.user.id, {
+    ...parseMessagePayload(req.body),
+    business,
+  });
 
   res.status(201).json({ success: true, data: result });
 });
@@ -73,7 +84,8 @@ export const createCheckout = catchAsync(async (req, res) => {
  */
 export const prepareCheckout = catchAsync(async (req, res) => {
   const { platform, ...input } = parseMessagePayload(req.body);
-  const result = await PriorityMessageService.prepare(req.user.id, input);
+  const business = await businessFor(req, req.body?.businessId);
+  const result = await PriorityMessageService.prepare(req.user.id, { ...input, business });
   res.status(201).json({ success: true, data: result });
 });
 
@@ -133,6 +145,10 @@ export const prepareIapPurchase = catchAsync(async (req, res) => {
   const { talentProfileId, subject, messageContent, messages, contentExtended, attachmentIds } =
     req.body;
   if (!talentProfileId) throw new ApiError(400, '`talentProfileId` is required');
+  // Never silently send a business's message from the person's own account
+  if (req.body?.businessId) {
+    throw new ApiError(400, 'Paid messages from a business are paid by card, not in-app purchase');
+  }
   const hasArray = Array.isArray(messages) && messages.length > 0;
   if (!hasArray && !messageContent?.trim()) {
     throw new ApiError(400, '`messages` array or `messageContent` is required');
@@ -319,9 +335,12 @@ export async function getItemStatuses(req, res, next) {
 }
 
 export const getPendingStatus = catchAsync(async (req, res) => {
+  // ?businessId= → whether that business has one pending with this talent
+  const business = await businessFor(req, req.query.businessId);
   const pending = await PriorityMessageService.hasPendingMessage(
     req.user.id,
-    req.params.talentProfileId
+    req.params.talentProfileId,
+    { businessId: business?.id }
   );
   res.json({ data: { pending } });
 });

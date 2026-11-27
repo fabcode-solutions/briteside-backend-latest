@@ -10,6 +10,7 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { users } from './users.js';
+import { businesses } from './businesses.js';
 
 // ─── Livestreams ────────────────────────────────────────────────────────────
 export const livestreams = pgTable(
@@ -21,6 +22,8 @@ export const livestreams = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    // Broadcast as this business (a separate account) — shown as the host
+    businessId: uuid('business_id').references(() => businesses.id, { onDelete: 'cascade' }),
 
     // Stream metadata
     title: varchar('title', { length: 200 }).notNull(),

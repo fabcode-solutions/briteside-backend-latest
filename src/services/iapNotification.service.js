@@ -24,6 +24,7 @@ import config from '../config/config.js';
 import logger from '../config/logger.js';
 import ApiError from '../utils/api-error.js';
 import { ShopIapService } from './shop/shopIap.service.js';
+import { BusinessVideoCoverService } from './businessVideoCover.service.js';
 
 const APPLE_REFUND_TYPES = new Set([NotificationTypeV2.REFUND, NotificationTypeV2.REVOKE]);
 
@@ -72,6 +73,12 @@ export class IapNotificationService {
     // verified here — nothing in the payload is trusted before this.
     const { notification, environment } =
       await ShopIapService.verifyAppleNotification(signedPayload);
+
+    // Business video cover subscription: every notification type (renewal,
+    // failed renewal / grace, auto-renew off, expiry, refund) re-syncs it
+    if (await BusinessVideoCoverService.handleAppleNotification(notification, environment)) {
+      return { handled: true, notificationType: notification.notificationType, subscription: 'video_cover' };
+    }
 
     if (!APPLE_REFUND_TYPES.has(notification.notificationType)) {
       return { handled: false, notificationType: notification.notificationType };
@@ -124,7 +131,20 @@ export class IapNotificationService {
       throw new ApiError(400, 'Notification is for a different app');
     }
 
+    // Business video cover subscription: purchased, renewed, cancelled, on
+    // hold, expired… — re-read it from Play
+    if (notification.subscriptionNotification) {
+      const handled = await BusinessVideoCoverService.handleGoogleNotification(
+        notification.subscriptionNotification
+      );
+      return { handled, subscription: 'video_cover' };
+    }
+
     const voided = notification.voidedPurchaseNotification;
+    // productType 1 = subscription (refund / chargeback)
+    if (voided?.purchaseToken && voided.productType === 1) {
+      return { handled: await BusinessVideoCoverService.revokeGoogle(voided.purchaseToken) };
+    }
     if (!voided?.purchaseToken) {
       // testNotification / oneTimeProductNotification etc. — purchases are
       // already verified synchronously when the App finalizes them.

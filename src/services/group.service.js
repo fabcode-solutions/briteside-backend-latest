@@ -29,7 +29,12 @@ import {
   discussionReplies,
   discussionReplyLikes,
 } from '../db/schema/groups.js';
-import { eq, and, desc, asc, like, count, sql, gte, isNull, inArray, ilike } from 'drizzle-orm';
+import { eq, and, desc, asc, like, count, sql, gte, isNull, inArray, ilike, ne } from 'drizzle-orm';
+import {
+  attachBusinessHostsToGroups,
+  businessAuthorsById,
+  toBusinessAuthor,
+} from './social/businessAuthor.js';
 import ApiError from '../utils/api-error.js';
 import { sanitizeLinkButton } from '../utils/link-button.js';
 import { TextModerationService, TEXT_ENTITY } from './moderation/textModeration.service.js';
@@ -50,6 +55,7 @@ import {
   verifyGroupMembership,
   checkGroupMembership,
   requireGroupAdmin,
+  businessGroupAdmin,
   requireGroupAdminOrModerator,
   checkPendingJoinRequest,
 } from '../utils/group-helpers.js';
@@ -189,13 +195,18 @@ export class GroupService {
       .values(productIds.map((productId, position) => ({ groupId, productId, position })));
   }
 
-  static async createGroup(userId, groupData, isPlus = false) {
+  /**
+   * `business` (already access-checked by the caller): run the group as that
+   * business — it's shown instead of the creator. Never taken from the body.
+   */
+  static async createGroup(userId, groupData, isPlus = false, { business = null } = {}) {
     const {
       media = [],
-       aboutGallery = [],   
+       aboutGallery = [],
       featuredContent = [],
       inviteeIds = [],
       shopProductIds = [],
+      businessId: _ignoredBusinessId,
       ...groupFields
     } = groupData;
 
@@ -236,6 +247,7 @@ export class GroupService {
         isPublic: groupFields.isPublic ?? true,
         requiresApproval: groupFields.requiresApproval ?? false,
         createdBy: userId,
+        businessId: business?.id ?? null,
       })
       .returning();
 
@@ -265,7 +277,8 @@ export class GroupService {
       joinedAt: new Date(),
     });
 
-    await this.incrementGroupMemberCount(group.id);
+    // A business's group doesn't count the person behind it as a member
+    if (!business) await this.incrementGroupMemberCount(group.id);
 
     // Auto-subscribe the creator to group discussion notifications
     try {
@@ -293,6 +306,8 @@ export class GroupService {
         groupName: group.name,
         inviterId: userId,
         inviteeIds,
+        // Created as a business → invites come from the business
+        business: business ? toBusinessAuthor(business) : null,
       });
     }
 
@@ -535,6 +550,7 @@ export class GroupService {
 
     // Annotate listing cards so the frontend can blur flagged / placeholder removed covers
     await MediaModerationService.attachGroupModerationStatuses(groupsResult);
+    await attachBusinessHostsToGroups(groupsResult);
 
     const groupsFilterEnabled = await TextModerationService.getFilterEnabled(userId);
     await TextModerationService.maskFlaggedText(groupsResult, {
@@ -552,6 +568,26 @@ export class GroupService {
         pages: Math.ceil((totalCount[0]?.count || 0) / limit),
       },
     };
+  }
+
+  /** A business page's groups (run as the business). */
+  static async getBusinessGroups(businessId) {
+    const rows = await db
+      .select({
+        id: groups.id,
+        name: groups.name,
+        slug: groups.slug,
+        coverImageUrl: groups.coverImageUrl,
+        memberCount: groups.memberCount,
+        isPublic: groups.isPublic,
+        isPaid: groups.isPaid,
+        city: groups.city,
+      })
+      .from(groups)
+      .where(and(eq(groups.businessId, businessId), isNull(groups.deletedAt)))
+      .orderBy(desc(groups.createdAt));
+    await MediaModerationService.attachGroupModerationStatuses(rows);
+    return rows;
   }
 
   static async getGroupById(groupId, currentUserId = null) {
@@ -696,7 +732,7 @@ export class GroupService {
       filterEnabled: groupFilterEnabled,
     });
 
-    return {
+    const result = {
       ...group,
       currentUserMembership,
       isSubscribed,
@@ -708,12 +744,23 @@ export class GroupService {
         .filter(link => link.product && !link.product.deletedAt)
         .map(({ product: { deletedAt: _deletedAt, ...product } }) => product),
     };
+    // Run as a business → the business is shown instead of the creator
+    await attachBusinessHostsToGroups(result);
+    return result;
   }
 
   static async updateGroup(groupId, userId, groupData, isPlus = false) {
     await requireGroupAdmin(groupId, userId, 'Unauthorized to update this group.');
 
-    const { media,aboutGallery, featuredContent, shopProductIds, ...groupFields } = groupData;
+    // businessId is set once, at creation, by an access-checked caller — never from the body
+    const {
+      media,
+      aboutGallery,
+      featuredContent,
+      shopProductIds,
+      businessId: _ignoredBusinessId,
+      ...groupFields
+    } = groupData;
 
     const oldGroup = await db.query.groups.findFirst({
       where: eq(groups.id, groupId),
@@ -1124,6 +1171,7 @@ export class GroupService {
     }
 
     await MediaModerationService.attachGroupModerationStatuses(myGroupsWithMembership);
+    await attachBusinessHostsToGroups(myGroupsWithMembership);
 
     const myGroupsFilterEnabled = await TextModerationService.getFilterEnabled(userId);
     await TextModerationService.maskFlaggedText(myGroupsWithMembership, {
@@ -1641,6 +1689,14 @@ export class GroupMemberService {
 
     const offset = (page - 1) * limit;
 
+    // A group run as a business: the person who created it is behind the
+    // business, not a member — they're left out of its member list
+    const group = await db.query.groups.findFirst({
+      where: eq(groups.id, groupId),
+      columns: { businessId: true, createdBy: true },
+    });
+    const hideCreator = group?.businessId ? ne(groupMembers.userId, group.createdBy) : undefined;
+
     return db
       .select({
         id: groupMembers.id,
@@ -1658,7 +1714,7 @@ export class GroupMemberService {
       })
       .from(groupMembers)
       .leftJoin(users, eq(groupMembers.userId, users.id))
-      .where(eq(groupMembers.groupId, groupId))
+      .where(and(eq(groupMembers.groupId, groupId), hideCreator))
       .orderBy(desc(groupMembers.joinedAt))
       .limit(limit)
       .offset(offset);
@@ -2062,9 +2118,34 @@ async function notifyGroupEventPromotion(groupId, eventId) {
   }
 }
 
-async function sendGroupInvitations({ groupId, groupSlug, groupName, inviterId, inviteeIds }) {
-  const inviter = await getUserInformation(inviterId);
-  const inviterName = `${inviter.firstName} ${inviter.lastName}`;
+/**
+ * `business`: the group is run as this business and its team is inviting —
+ * the invite comes from the business (name + logo), never the person behind it.
+ */
+async function sendGroupInvitations({
+  groupId,
+  groupSlug,
+  groupName,
+  inviterId,
+  inviteeIds,
+  business = null,
+}) {
+  let inviterName;
+  if (business) {
+    inviterName = business.name;
+  } else {
+    const inviter = await getUserInformation(inviterId);
+    inviterName = `${inviter.firstName} ${inviter.lastName}`;
+  }
+  const inviteMetadata = business
+    ? {
+        groupId,
+        groupSlug,
+        businessId: business.id,
+        organizerLogoUrl: business.logoUrl ?? null,
+        audience: 'personal',
+      }
+    : { groupId, groupSlug, inviterId };
   const results = { sent: [], alreadyMember: [], errors: [] };
 
   for (const inviteeId of inviteeIds) {
@@ -2084,7 +2165,7 @@ async function sendGroupInvitations({ groupId, groupSlug, groupName, inviterId, 
         type: 'group_activity',
         relatedId: groupId,
         redirectTo: `/groups/${groupSlug}`,
-        metadata: { groupId, groupSlug, inviterId },
+        metadata: inviteMetadata,
       });
 
       results.sent.push(inviteeId);
@@ -2116,16 +2197,23 @@ async function sendGroupInvitations({ groupId, groupSlug, groupName, inviterId, 
 
 export class GroupInvitationService {
   static async inviteUsersToGroup({ groupId, inviterId, inviteeIds }) {
-    const inviterMembership = await checkGroupMembership(groupId, inviterId);
+    // A business's team invites on its behalf (they needn't be members)
+    const asBusinessTeam = await businessGroupAdmin(groupId, inviterId);
+    const inviterMembership = asBusinessTeam ?? (await checkGroupMembership(groupId, inviterId));
     if (!inviterMembership) {
       throw new ApiError(403, 'Only group members can invite others to join.');
     }
 
     const group = await db.query.groups.findFirst({
       where: eq(groups.id, groupId),
-      columns: { id: true, name: true, slug: true },
+      columns: { id: true, name: true, slug: true, businessId: true },
     });
     if (!group) throw new ApiError(404, 'Group not found');
+
+    const business =
+      asBusinessTeam && group.businessId
+        ? (await businessAuthorsById([group.businessId])).get(group.businessId) ?? null
+        : null;
 
     const results = await sendGroupInvitations({
       groupId: group.id,
@@ -2133,6 +2221,7 @@ export class GroupInvitationService {
       groupName: group.name,
       inviterId,
       inviteeIds,
+      business,
     });
 
     return {

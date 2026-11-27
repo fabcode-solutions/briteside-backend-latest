@@ -8,8 +8,13 @@ import {
   staffWindowsForDate,
   computeSlots,
   customerCancellationRefund,
+  balanceCommissionCents,
 } from '../src/services/businessBooking.service.js';
-import { inPersonCents, inPersonCommissionCents } from '../src/services/businessCommission.service.js';
+import {
+  inPersonCents,
+  inPersonCommissionCents,
+  commissionOwedCents,
+} from '../src/services/businessCommission.service.js';
 
 const WEEK = {
   0: null,
@@ -69,11 +74,12 @@ describe('priceBooking', () => {
     expect(priceBooking({ priceCents: 50_000, paymentModel: 'full' }, business).customerFeeCents).toBe(700);
   });
 
-  it('deposit: fee on the full price, commission 5% of the deposit only', () => {
+  it('deposit: fee and the full 5% both on the full price, 5% withheld from the deposit', () => {
     expect(priceBooking({ priceCents: 60_000, paymentModel: 'deposit', depositCents: null }, business)).toMatchObject({
       amountDueNowCents: 12_000,
       customerFeeCents: 1_000,
-      platformCommissionCents: 600,
+      platformCommissionCents: 3_000,
+      inPersonCommissionCents: 0,
       chargedNowCents: 13_000,
       balanceDueAtVisitCents: 48_000,
     });
@@ -177,7 +183,7 @@ describe('customerCancellationRefund', () => {
   });
 });
 
-describe('in-person commission (5% on what is paid at the visit)', () => {
+describe('full-cut commission (whole 5% withheld at booking)', () => {
   const svc = (priceCents, paymentModel, depositCents) => ({ priceCents, paymentModel, depositCents });
 
   it('pay in person: nothing withheld online, full 5% owed later', () => {
@@ -187,11 +193,23 @@ describe('in-person commission (5% on what is paid at the visit)', () => {
     expect(p.chargedNowCents).toBe(500); // only the booking fee online
   });
 
-  it('deposit: 5% of the deposit online + 5% of the remainder owed', () => {
-    const p = priceBooking(svc(20000, 'deposit', 4000), {});
-    expect(p.platformCommissionCents).toBe(200);
-    expect(p.inPersonCommissionCents).toBe(800);
-    expect(p.platformCommissionCents + p.inPersonCommissionCents).toBe(calculateBusinessCommissionCents(20000));
+  it('$50 with a $10 deposit: $2.50 taken from the deposit, business gets $7.50 now', () => {
+    const p = priceBooking(svc(5000, 'deposit', 1000), {});
+    expect(p).toMatchObject({ chargedNowCents: 1500, platformCommissionCents: 250, inPersonCommissionCents: 0 });
+    expect(p.amountDueNowCents - p.platformCommissionCents).toBe(750);
+  });
+
+  it('deposit smaller than the 5%: whole deposit withheld, the rest owed', () => {
+    const p = priceBooking(svc(20000, 'deposit', 500), {});
+    expect(p.platformCommissionCents).toBe(500);
+    expect(p.inPersonCommissionCents).toBe(500);
+  });
+
+  it('withheld + owed always add up to exactly 5% of the price (no rounding drift)', () => {
+    for (const [price, dep] of [[3333, 667], [1220, 110], [5000, 1000], [20000, 500]]) {
+      const p = priceBooking(svc(price, 'deposit', dep), {});
+      expect(p.platformCommissionCents + p.inPersonCommissionCents).toBe(calculateBusinessCommissionCents(price));
+    }
   });
 
   it('full online: nothing owed later', () => {
@@ -207,5 +225,73 @@ describe('in-person commission (5% on what is paid at the visit)', () => {
     expect(inPersonCommissionCents({ servicePriceCents: 10000, amountPaidCents: 0 })).toBe(500);
     // Never negative
     expect(inPersonCents({ servicePriceCents: 100, amountPaidCents: 500 })).toBe(0);
+  });
+});
+
+describe('commissionOwedCents', () => {
+  // $50 service, $10 deposit, $2.50 withheld at booking
+  const upfront = over => ({
+    commissionUpfront: true,
+    servicePriceCents: 5000,
+    amountPaidCents: 1000,
+    platformCommissionCents: 250,
+    extraChargesCents: 0,
+    status: 'completed',
+    ...over,
+  });
+
+  it('completed / no-show / late cancel: nothing more owed', () => {
+    for (const status of ['completed', 'no_show', 'cancelled']) {
+      expect(commissionOwedCents(upfront({ status }))).toBe(0);
+    }
+  });
+
+  it('cancelled with the deposit refunded: the 5% is non-refundable, so $2.50 is owed', () => {
+    // refundBooking lowers the withheld 5% to what's still held ($0)
+    expect(commissionOwedCents(upfront({ status: 'cancelled', platformCommissionCents: 0 }))).toBe(250);
+  });
+
+  it('declined / expired requests owe nothing', () => {
+    for (const status of ['declined', 'expired']) {
+      expect(commissionOwedCents(upfront({ status, platformCommissionCents: 0 }))).toBe(0);
+    }
+  });
+
+  it('extras added at the visit: 5% of them owed', () => {
+    expect(commissionOwedCents(upfront({ extraChargesCents: 1500 }))).toBe(75);
+  });
+
+  it('small deposit: the rest of the 5% is owed even on a no-show', () => {
+    const b = { servicePriceCents: 20000, amountPaidCents: 500, platformCommissionCents: 500 };
+    expect(commissionOwedCents(upfront({ ...b, status: 'no_show' }))).toBe(500);
+  });
+
+  it('pay in person: 5% owed once completed, nothing if it never happened', () => {
+    const b = { amountPaidCents: 0, platformCommissionCents: 0 };
+    expect(commissionOwedCents(upfront({ ...b, status: 'completed' }))).toBe(250);
+    expect(commissionOwedCents(upfront({ ...b, status: 'cancelled' }))).toBe(0);
+    expect(commissionOwedCents(upfront({ ...b, status: 'no_show' }))).toBe(0);
+  });
+
+  it('older split bookings keep the old rule: 5% of the in-person part once completed', () => {
+    const split = { commissionUpfront: false, servicePriceCents: 5000, amountPaidCents: 1000, platformCommissionCents: 50 };
+    expect(commissionOwedCents({ ...split, status: 'completed' })).toBe(200);
+    expect(commissionOwedCents({ ...split, status: 'cancelled' })).toBe(0);
+  });
+});
+
+describe('balanceCommissionCents', () => {
+  it('full cut: nothing more taken from a balance paid online', () => {
+    const b = { commissionUpfront: true, servicePriceCents: 5000, platformCommissionCents: 250 };
+    expect(balanceCommissionCents(b, 4000)).toBe(0);
+  });
+
+  it('full cut: takes what a small deposit / pay-in-person could not cover', () => {
+    expect(balanceCommissionCents({ commissionUpfront: true, servicePriceCents: 20000, platformCommissionCents: 500 }, 19500)).toBe(500);
+    expect(balanceCommissionCents({ commissionUpfront: true, servicePriceCents: 5000, platformCommissionCents: 0 }, 5000)).toBe(250);
+  });
+
+  it('split: 5% of the balance', () => {
+    expect(balanceCommissionCents({ commissionUpfront: false, servicePriceCents: 5000, platformCommissionCents: 50 }, 4000)).toBe(200);
   });
 });

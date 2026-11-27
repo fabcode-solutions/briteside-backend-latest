@@ -71,7 +71,10 @@ export const BUSINESS_CATEGORIES = {
 
 export const BUSINESS_CATEGORY_KEYS = Object.keys(BUSINESS_CATEGORIES);
 
+// 'in_person' stays readable on older bookings / offers, but can no longer be chosen
 export const PAYMENT_MODELS = ['full', 'deposit', 'in_person'];
+/** What a business can pick for its default, a service, or a custom offer. */
+export const SELECTABLE_PAYMENT_MODELS = ['full', 'deposit'];
 export const LOCATION_TYPES = ['physical', 'mobile'];
 // 'appointments' = bookable services; 'standard' = profile page without booking
 export const PAGE_TYPES = ['appointments', 'standard'];

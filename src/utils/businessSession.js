@@ -41,9 +41,8 @@ export function partySizeProblem(service, partySize = 1) {
     return null;
   }
   if (isPrivateGroup(service)) {
-    const min = service.minGuests ?? 1;
+    // No minimum guest count (any old min_guests value is ignored): minimumTotalCents sets the floor.
     const max = service.maxGuests ?? MAX_PARTY_SIZE;
-    if (partySize < min) return `This event is for at least ${min} guests`;
     if (partySize > max) return `This event is for up to ${max} guests`;
     return null;
   }
@@ -59,12 +58,11 @@ export function sessionSettingsProblem(s) {
     }
   }
   if (isPrivateGroup(s)) {
-    if (!Number.isInteger(s.minGuests) || !Number.isInteger(s.maxGuests) || s.minGuests < 1) {
-      return 'Set the smallest and largest group you take';
+    if (!Number.isInteger(s.maxGuests) || s.maxGuests < 1) {
+      return 'Set the largest group you take';
     }
-    if (s.minGuests > s.maxGuests) return 'The minimum group size can’t be more than the maximum';
     if (s.maxGuests > MAX_PARTY_SIZE) return `Groups can be up to ${MAX_PARTY_SIZE} people`;
-    if (s.minimumTotalCents != null && s.minimumTotalCents < 0) return 'The minimum total can’t be negative';
+    if (s.minimumTotalCents != null && s.minimumTotalCents < 0) return 'The minimum to book can’t be negative';
   }
   return null;
 }

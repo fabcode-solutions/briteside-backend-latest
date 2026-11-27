@@ -6,9 +6,13 @@
  *   servicePriceCents        full price of the service
  *   amountDueNowCents        service portion charged online: full | deposit | 0 (in_person)
  *   customerFeeCents         tiered booking fee on the FULL price ($5/$7/$10), always charged online
- *   platformCommissionCents  5% of what is paid ONLINE (deposit / full / balance), withheld from it
- *   in-person commission     5% of what is paid at the visit — owed by the business once the booking
- *                            completes (business_commission_charges, see businessCommission.service.js)
+ *   platformCommissionCents  full cut (commissionUpfront, all new bookings): 5% of the FULL price,
+ *                            withheld from the online payment at booking (capped at what was paid
+ *                            online). Non-refundable — see refundBooking.
+ *                            split (older bookings): 5% of what is paid online, withheld from it
+ *   owed commission          whatever the online payment didn't cover (pay-in-person, a deposit
+ *                            smaller than the 5%, extras, refunds) — owed by the business once the
+ *                            booking closes (business_commission_charges, see businessCommission.service.js)
  *   reserveAmountCents       business net held for payout = amountDueNow − commission (+ tax when
  *                            the business is the tax-liable party), released by cron/reserveRelease.js
  *                            14/21 days after the booking is completed / marked no-show.
@@ -59,12 +63,16 @@ import { PayoutLedgerService } from './payoutLedger.service.js';
 import {
   BusinessCommissionService,
   AUTO_COMPLETE_AFTER_HOURS,
+  commissionOwedCents,
   inPersonCommissionCents,
 } from './businessCommission.service.js';
 import { UserSpendService } from './userSpend.service.js';
 import { BusinessReviewService, canReviewBooking } from './businessReview.service.js';
 import { createNotification } from './notification.service.js';
+import { assertNotBlockedByBusiness } from './businessBlock.service.js';
+import QRCode from 'qrcode';
 import { sendMail } from './mail.service.js';
+import { UploadService } from './upload.service.js';
 import { PlusTaxLiabilityService } from './tax/plusTaxLiability.service.js';
 import {
   SERVICE_TAX_CODE,
@@ -126,10 +134,12 @@ export function priceBooking(service, business, addOns = [], { partySize = 1 } =
   if (paymentModel === 'full') amountDueNowCents = price;
   else if (paymentModel === 'deposit') amountDueNowCents = serviceDepositCents(depositBasis(service, price, partySize));
   const customerFeeCents = calculateBusinessBookingFeeCents(price);
-  // 5% of what is collected online now (withheld from it): full price, the deposit, or nothing.
-  const platformCommissionCents = calculateBusinessCommissionCents(amountDueNowCents);
-  // 5% of what the customer pays at the visit — owed by the business once the booking completes.
-  const inPersonCommissionCents = calculateBusinessCommissionCents(price - amountDueNowCents);
+  // Full cut: the whole 5% of the price is withheld from what's paid online now,
+  // capped at that amount (a small deposit, or nothing for pay-in-person).
+  const commissionCents = calculateBusinessCommissionCents(price);
+  const platformCommissionCents = Math.min(commissionCents, amountDueNowCents);
+  // Whatever the online payment couldn't cover — owed by the business later.
+  const inPersonCommissionCents = commissionCents - platformCommissionCents;
   return {
     paymentModel,
     servicePriceCents: price,
@@ -141,6 +151,17 @@ export function priceBooking(service, business, addOns = [], { partySize = 1 } =
     chargedNowCents: amountDueNowCents + customerFeeCents,
     balanceDueAtVisitCents: price - amountDueNowCents,
   };
+}
+
+/**
+ * Commission withheld from a balance paid online later.
+ * Full cut: the 5% was already taken at booking — only what that payment couldn't
+ * cover (pay-in-person, or a deposit smaller than the 5%). Split: 5% of the balance.
+ */
+export function balanceCommissionCents(booking, balanceCents) {
+  if (!booking.commissionUpfront) return calculateBusinessCommissionCents(balanceCents);
+  const stillOwed = calculateBusinessCommissionCents(booking.servicePriceCents) - booking.platformCommissionCents;
+  return Math.min(balanceCents, Math.max(0, stillOwed));
 }
 
 /**
@@ -334,6 +355,8 @@ const serializeBooking = (b, { forBusiness = false } = {}) => ({
   amountPaidCents: b.amountPaidCents,
   refundedCents: b.refundedCents,
   balanceDueAtVisitCents: Math.max(0, b.servicePriceCents + (b.extraChargesCents ?? 0) - b.amountPaidCents),
+  // Received in hand at the visit, as entered by the business (null = not entered, balance assumed)
+  inHandCents: b.inHandCents ?? null,
   source: b.source ?? 'online',
   // Picked when booking; already included in servicePriceCents / durationMins
   addOns: b.addOns ?? [],
@@ -365,10 +388,16 @@ const serializeBooking = (b, { forBusiness = false } = {}) => ({
         customerPhone: b.customerPhone,
         paymentArrangement: b.paymentArrangement ?? null,
         platformCommissionCents: b.platformCommissionCents,
-        // 5% of what the customer pays at the visit — owed once the booking completes
-        inPersonCommissionCents: ['cancelled', 'declined', 'expired', 'no_show'].includes(b.status)
-          ? 0
-          : inPersonCommissionCents(b),
+        // true = full cut: the whole 5% is taken at booking and is non-refundable
+        commissionUpfront: !!b.commissionUpfront,
+        // 5% owed by the business on top of what was withheld online (charged once the booking closes):
+        // full cut — usually 0 (pay-in-person, small deposits, extras, refunds);
+        // split — 5% of what the customer pays at the visit
+        inPersonCommissionCents: b.commissionUpfront
+          ? commissionOwedCents(b)
+          : ['cancelled', 'declined', 'expired', 'no_show'].includes(b.status)
+            ? 0
+            : inPersonCommissionCents(b),
         businessNetCents: b.amountPaidCents - b.refundedCents - b.platformCommissionCents,
         // What the business can still refund from the dashboard (0 once the payout is released)
         refundableCents: businessRefundableCents(b),
@@ -787,8 +816,16 @@ async function transition(bookingId, from, values) {
  * serviceRefundCents: part of the service payment going back.
  * Tax is refunded in proportion to the service refund. The booking fee is
  * non-refundable in every case (customer cancel, business decline/cancel, expiry).
+ *
+ * Briteside's 5%:
+ *   full cut  — non-refundable. Briteside keeps what it withheld unless the refund
+ *               takes back the money it was withheld from; the business then owes the
+ *               difference (business_commission_charges). Only a request the business
+ *               never accepted (declined / expired) gives the 5% back.
+ *   split     — reduced in proportion to the refund (older bookings).
+ * status: the booking's status after this refund (closeWithRefund passes the new one).
  */
-async function refundBooking(booking, business, { serviceRefundCents, reason }) {
+async function refundBooking(booking, business, { serviceRefundCents, reason, status = booking.status }) {
   const serviceRefund = Math.max(0, Math.min(serviceRefundCents, booking.amountPaidCents - booking.refundedCents));
   const fraction = booking.amountPaidCents > 0 ? serviceRefund / booking.amountPaidCents : 0;
   const taxRefund = Math.round((booking.taxAmountCents ?? 0) * fraction);
@@ -856,10 +893,13 @@ async function refundBooking(booking, business, { serviceRefundCents, reason }) 
   }
   const refundId = refundIds[0] ?? null;
 
-  // Business keeps the retained share of the service payment minus a matching share of commission.
   const retainedService = booking.amountPaidCents - booking.refundedCents - serviceRefund;
-  const commissionAfter =
-    booking.amountPaidCents > 0
+  const keepsCommission = booking.commissionUpfront && !['declined', 'expired'].includes(status);
+  const commissionAfter = keepsCommission
+    ? // Full cut: keep the 5%, up to what's still held; the rest becomes owed (synced below)
+      Math.min(booking.platformCommissionCents, retainedService)
+    : // Split / never accepted: business keeps the retained share minus a matching share of commission
+      booking.amountPaidCents > 0
       ? Math.round((booking.platformCommissionCents * retainedService) / booking.amountPaidCents)
       : 0;
   const netAfter = applyTaxLiabilityToReserve(
@@ -876,7 +916,7 @@ async function refundBooking(booking, business, { serviceRefundCents, reason }) 
     }).catch(err => logger.error(`[businessBooking] reverseHold failed ${booking.id}: ${err.message}`));
   }
 
-  await db
+  const [updated] = await db
     .update(businessBookings)
     .set({
       refundedCents: booking.refundedCents + serviceRefund,
@@ -884,7 +924,16 @@ async function refundBooking(booking, business, { serviceRefundCents, reason }) 
       reserveAmountCents: netAfter,
       updatedAt: new Date(),
     })
-    .where(eq(businessBookings.id, booking.id));
+    .where(eq(businessBookings.id, booking.id))
+    .returning();
+
+  // Full cut: what the refund took back from the withheld 5% is now owed by the business
+  // (the cron's backfill retries if this fails)
+  if (updated?.commissionUpfront) {
+    await BusinessCommissionService.syncForBooking(updated, business).catch(err =>
+      logger.error(`[businessBooking] commission sync after refund failed ${booking.id}: ${err.message}`)
+    );
+  }
 
   return { refundId, refundIds, refundedCents: total, serviceRefundCents: serviceRefund, feeRefundCents: feeRefund, taxRefundCents: taxRefund };
 }
@@ -897,7 +946,7 @@ async function closeWithRefund(booking, business, from, values, refundOpts) {
   await transition(booking.id, from, values);
   let refund;
   try {
-    refund = await refundBooking(booking, business, refundOpts);
+    refund = await refundBooking(booking, business, { ...refundOpts, status: values.status });
   } catch (err) {
     await db
       .update(businessBookings)
@@ -1043,11 +1092,54 @@ async function attachmentLink(booking, index) {
 
 // ─── Notifications (never throw) ────────────────────────────────────────────
 
-function fmtWhen(booking) {
-  return dayjs(booking.startAt).tz(booking.timezone).format('ddd, MMM D, YYYY [at] h:mm A');
+/** "EST" / "PDT" for the zone at that moment ('' if unknown). */
+function zoneAbbr(date, timeZone) {
+  try {
+    return (
+      new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'short' })
+        .formatToParts(new Date(date))
+        .find(p => p.type === 'timeZoneName')?.value ?? ''
+    );
+  } catch {
+    return '';
+  }
 }
 
-async function notifyOwner(business, title, message, booking, redirectTo = '/business/dashboard') {
+/**
+ * "Fri, Nov 27, 2026 at 2:00 PM EST" — in the business's timezone, named, so a
+ * customer elsewhere doesn't read it as their own local time.
+ */
+function fmtWhen(booking, timeZone = booking.timezone) {
+  const when = dayjs(booking.startAt).tz(timeZone).format('ddd, MMM D, YYYY [at] h:mm A');
+  return `${when} ${zoneAbbr(booking.startAt, timeZone)}`.trim();
+}
+
+/**
+ * The time in the customer's own zone (saved from their browser at booking),
+ * when that reads differently from the business's; else null.
+ */
+function fmtCustomerWhen(booking) {
+  const tz = booking.customerTimezone;
+  if (!tz || tz === booking.timezone) return null;
+  try {
+    const theirs = fmtWhen(booking, tz);
+    return theirs === fmtWhen(booking) ? null : theirs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * kind picks the business's notification switch: 'newBooking' | 'request' |
+ * 'change' (cancelled / rescheduled) | 'payment' (balance paid).
+ */
+async function notifyOwner(
+  business,
+  title,
+  message,
+  booking,
+  { kind = 'newBooking', redirectTo = '/business/dashboard' } = {}
+) {
   try {
     await createNotification({
       userId: business.ownerId,
@@ -1056,15 +1148,58 @@ async function notifyOwner(business, title, message, booking, redirectTo = '/bus
       type: 'business_booking',
       redirectTo,
       relatedId: booking.id,
-      metadata: { businessId: business.id, bookingId: booking.id },
+      // Always the business side (the request link opens the business calendar)
+      metadata: { businessId: business.id, bookingId: booking.id, kind, audience: 'business' },
     });
   } catch (err) {
     logger.error(`[businessBooking] owner notification failed: ${err.message}`);
   }
 }
 
-/** Email the customer and, when they have an account, an in-app notification too. */
-function emailCustomer(booking, business, subject, headline, extraRows = []) {
+// Must match the app's QR payload (frontend src/lib/business/checkInQr.ts)
+const CHECK_IN_QR_TYPE = 'service_check_in';
+const bookingRef = id => id.slice(0, 8).toUpperCase();
+
+/**
+ * Public PNG of the booking's check-in QR, for emails (SES can't attach inline
+ * images). Same file per booking, so re-sends reuse it. Null if it can't be made.
+ */
+async function checkInQrUrl(booking) {
+  try {
+    const png = await QRCode.toBuffer(JSON.stringify({ type: CHECK_IN_QR_TYPE, bookingId: booking.id }), {
+      type: 'png',
+      width: 300,
+      margin: 1,
+      errorCorrectionLevel: 'M',
+    });
+    const res = await UploadService.uploadFile(
+      { originalname: `checkin-${booking.id}.png`, buffer: png, mimetype: 'image/png', size: png.length },
+      'business-checkin',
+      booking.id
+    );
+    return res.url ?? null;
+  } catch (err) {
+    logger.error(`[businessBooking] check-in QR failed ${booking.id}: ${err.message}`);
+    return null;
+  }
+}
+
+/** Check-in block: QR (when it could be made) + the booking ref staff can type. */
+function checkInQrBlock(booking, qrUrl) {
+  return `
+    <div style="margin:20px 0;padding:16px;border:1px solid #e5e7eb;border-radius:8px;text-align:center">
+      <p style="margin:0 0 8px;font-weight:600">Check-in code</p>
+      ${qrUrl ? `<img src="${escapeHtml(qrUrl)}" width="180" height="180" alt="Check-in QR code" style="display:block;margin:0 auto 8px;width:180px;height:180px" />` : ''}
+      <p style="margin:0 0 8px;font-family:monospace;font-size:18px;letter-spacing:3px">${escapeHtml(bookingRef(booking.id))}</p>
+      <p style="margin:0;font-size:13px;color:#6b7280">Show this to staff when you arrive, or tell them the code above.</p>
+    </div>`;
+}
+
+/**
+ * Email the customer and, when they have an account, an in-app notification too.
+ * `checkInQr`: add the check-in QR + booking ref (confirmed bookings).
+ */
+function emailCustomer(booking, business, subject, headline, extraRows = [], { checkInQr = false } = {}) {
   if (booking.customerId) {
     createNotification({
       userId: booking.customerId,
@@ -1083,16 +1218,19 @@ function emailCustomer(booking, business, subject, headline, extraRows = []) {
     const location = booking.locationId
       ? await db.query.businessLocations.findFirst({ where: eq(businessLocations.id, booking.locationId) })
       : null;
+    const qrUrl = checkInQr ? await checkInQrUrl(booking) : null;
     const html = emailWrapper(`
       <h2 style="margin:0 0 12px">${escapeHtml(headline)}</h2>
       ${infoBox([
         ['Business', escapeHtml(business.name)],
         ['Service', escapeHtml(booking.serviceName)],
         ['With', escapeHtml(booking.staffName)],
-        ['When', escapeHtml(fmtWhen(booking))],
+        ['When', `${escapeHtml(fmtWhen(booking))}<br><span style="color:#6b7280;font-size:12px">Local time at the business</span>`],
+        ...(fmtCustomerWhen(booking) ? [['Your time', escapeHtml(fmtCustomerWhen(booking))]] : []),
         ...(location ? [['Where', escapeHtml(locationLine(location))]] : []),
         ...extraRows,
       ])}
+      ${checkInQr ? checkInQrBlock(booking, qrUrl) : ''}
       ${ctaRow(ctaButton('View business', appUrl(`/business/${business.slug}`)))}
     `);
     await sendMail(booking.customerEmail, subject, html);
@@ -1299,6 +1437,10 @@ export class BusinessBookingService {
     if (!stripe) throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Payments are unavailable right now');
 
     const publicBusiness = await loadPublicBusiness(idOrSlug);
+    // Accounts the business blocked can't book it
+    if (user?.id) {
+      await assertNotBlockedByBusiness(publicBusiness.id, user.id, "You can't book with this business");
+    }
     // A custom price offer: only the signed-in customer it was sent to can book it
     let offer = null;
     if (body.offerId) {
@@ -1423,11 +1565,13 @@ export class BusinessBookingService {
           amountDueNowCents: pricing.amountDueNowCents,
           customerFeeCents: pricing.customerFeeCents,
           platformCommissionCents: pricing.platformCommissionCents,
+          commissionUpfront: true,
           notes: body.notes?.trim() || null,
           answers,
           attachments,
           taxLiability,
           reserveAmountCents: 0,
+          customerTimezone: body.customerTimezone ?? null,
           // Snapshot now, so editing the service mid-checkout doesn't change the outcome
           needsApproval: !!service.requiresApproval,
         })
@@ -1774,7 +1918,7 @@ export class BusinessBookingService {
     const business = existing.business;
     const full = { ...booking, startAt: new Date(booking.startAt) };
     if (manual) {
-      await notifyOwner(business, 'New booking request', `${booking.customerName} requested ${booking.serviceName} on ${fmtWhen(full)}. Accept or decline it.`, booking, '/bookings?tab=appointment-requests');
+      await notifyOwner(business, 'New booking request', `${booking.customerName} requested ${booking.serviceName} on ${fmtWhen(full)}. Accept or decline it.`, booking, { kind: 'request', redirectTo: '/bookings?tab=appointment-requests' });
       emailCustomer(full, business, `Booking request sent to ${business.name}`, 'Your request was sent', [
         ['Status', 'Waiting for the business to accept. If they decline, you get a full refund.'],
       ]);
@@ -1785,7 +1929,7 @@ export class BusinessBookingService {
         ...(booking.servicePriceCents > booking.amountDueNowCents
           ? [['Due at your visit', money(booking.servicePriceCents - booking.amountDueNowCents)]]
           : []),
-      ]);
+      ], { checkInQr: true });
     }
   }
 
@@ -1803,7 +1947,7 @@ export class BusinessBookingService {
 
   /**
    * Customer pays what is still owed (deposit / pay-in-person bookings) online.
-   * No booking fee — it was charged once at booking. 5% commission applies to this payment.
+   * No booking fee — it was charged once at booking. Commission: see balanceCommissionCents.
    */
   static async createBalanceCheckout(user, bookingId, platform, mode) {
     if (!stripe) throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Payments are unavailable right now');
@@ -1827,7 +1971,7 @@ export class BusinessBookingService {
         bookingId: booking.id,
         paymentId: booking.id,
         balanceCents,
-        commissionCents: calculateBusinessCommissionCents(balanceCents),
+        commissionCents: balanceCommissionCents(booking, balanceCents),
       };
     }
 
@@ -1902,7 +2046,7 @@ export class BusinessBookingService {
     return {
       bookingId: booking.id,
       balanceCents,
-      commissionCents: calculateBusinessCommissionCents(balanceCents),
+      commissionCents: balanceCommissionCents(booking, balanceCents),
       expiresAt: new Date(session.expires_at * 1000),
       ...(nativeRedirect ? { checkoutUrl: session.url } : { clientSecret: session.client_secret }),
     };
@@ -1917,13 +2061,14 @@ export class BusinessBookingService {
     const taxAmountCents =
       stripeSession.total_details?.amount_tax ?? (Number(stripeSession.metadata?.taxAmountCents) || 0);
     const chargedCents = stripeSession.amount_total ?? balanceCents + taxAmountCents;
-    const commissionCents = calculateBusinessCommissionCents(balanceCents);
-
     const existing = await db.query.businessBookings.findFirst({
       where: eq(businessBookings.id, bookingId),
       with: { business: true },
     });
     if (!existing) return;
+    // Full cut: the 5% was already withheld at booking — only take what that payment
+    // couldn't cover (pay-in-person, or a deposit smaller than the 5%).
+    const commissionCents = balanceCommissionCents(existing, balanceCents);
     const netCents = applyTaxLiabilityToReserve(balanceCents - commissionCents, taxAmountCents, existing.taxLiability);
 
     // Atomic claim: only once per booking, and only while the booking is still live
@@ -1985,7 +2130,8 @@ export class BusinessBookingService {
       existing.business,
       'Balance paid',
       `${booking.customerName} paid the remaining ${money(balanceCents)} for ${booking.serviceName}.`,
-      booking
+      booking,
+      { kind: 'payment' }
     );
   }
 
@@ -2121,7 +2267,9 @@ export class BusinessBookingService {
   static async confirm(business, bookingId, access) {
     await getBookingForBusiness(business, bookingId, access);
     const row = await transition(bookingId, ['pending'], { status: 'confirmed', confirmedAt: new Date(), acceptDeadline: null });
-    emailCustomer(row, business, `Booking confirmed: ${business.name}`, `${business.name} accepted your booking`);
+    emailCustomer(row, business, `Booking confirmed: ${business.name}`, `${business.name} accepted your booking`, [], {
+      checkInQr: true,
+    });
     return serializeBooking(row, { forBusiness: true });
   }
 
@@ -2168,6 +2316,12 @@ export class BusinessBookingService {
   static async complete(business, bookingId, access, { charges } = {}) {
     const booking = await getBookingForBusiness(business, bookingId, access);
     if (booking.startAt > new Date()) throw new ApiError(httpStatus.CONFLICT, 'You can complete a booking once it has started');
+    // The customer has to be checked in (arrived) before the visit can be closed as done
+    if (booking.status === 'confirmed' && !booking.checkedInAt) {
+      throw new ApiError(httpStatus.CONFLICT, 'Check the customer in before completing this visit', true, '', {
+        code: 'CHECK_IN_REQUIRED',
+      });
+    }
     const extras = normalizeExtraCharges(charges);
     if ((charges?.length ?? 0) !== extras.lines.length) {
       throw new ApiError(httpStatus.BAD_REQUEST, 'Each extra charge needs a description and an amount above $0');
@@ -2177,19 +2331,23 @@ export class BusinessBookingService {
       completedAt: new Date(),
       ...(extras.lines.length ? { extraCharges: extras.lines, extraChargesCents: extras.totalCents } : {}),
     });
-    // 5% of anything the customer paid in person (the cron backfills if this fails)
-    await BusinessCommissionService.recordForCompletedBooking(row, business).catch(err =>
+    // Commission the online payment didn't cover — in-person part, extras (the cron backfills if this fails)
+    await BusinessCommissionService.syncForBooking(row, business).catch(err =>
       logger.error(`[businessBooking] commission record failed ${row.id}: ${err.message}`)
     );
     return serializeBooking(row, { forBusiness: true });
   }
 
-  /** Customer didn't show: business keeps what was paid online. */
+  /** Customer didn't show: business keeps what was paid online (less Briteside's 5%). */
   static async markNoShow(business, bookingId, access) {
     const booking = await getBookingForBusiness(business, bookingId, access);
     if (booking.startAt > new Date()) throw new ApiError(httpStatus.CONFLICT, 'You can mark a no-show once the booking has started');
     // completedAt marks "closed" — it starts the payout hold clock
     const row = await transition(bookingId, ['confirmed'], { status: 'no_show', completedAt: new Date() });
+    // Full cut with a deposit smaller than the 5%: the rest is owed (the cron backfills if this fails)
+    await BusinessCommissionService.syncForBooking(row, business).catch(err =>
+      logger.error(`[businessBooking] commission record failed ${row.id}: ${err.message}`)
+    );
     return serializeBooking(row, { forBusiness: true });
   }
 
@@ -2228,6 +2386,24 @@ export class BusinessBookingService {
       ...(reason ? [['Note', escapeHtml(reason)]] : []),
     ]);
     return { booking: serializeBooking(row, { forBusiness: true }), refund };
+  }
+
+  /**
+   * Record what the business actually received in hand (cash / card at the visit) for a
+   * completed booking — shown as "Off Platform" on the dashboard. null clears it (back to
+   * assuming the balance due). Bookkeeping only: Briteside's commission doesn't change.
+   */
+  static async setInHand(business, bookingId, access, { amountCents }) {
+    const booking = await getBookingForBusiness(business, bookingId, access);
+    if (booking.status !== 'completed') {
+      throw new ApiError(httpStatus.CONFLICT, 'You can record money received in hand once the visit is completed');
+    }
+    const [row] = await db
+      .update(businessBookings)
+      .set({ inHandCents: amountCents, updatedAt: new Date() })
+      .where(eq(businessBookings.id, booking.id))
+      .returning();
+    return serializeBooking(row, { forBusiness: true });
   }
 
   /** Free times to move a booking to (dashboard). Staff-role members: their own calendar only. */
@@ -2378,7 +2554,7 @@ export class BusinessBookingService {
     if (body.notifyCustomer !== false) {
       emailCustomer(row, business, `Booking confirmed: ${business.name}`, `You're booked at ${business.name}`, [
         ['Price', `${money(row.servicePriceCents)}, paid at your visit`],
-      ]);
+      ], { checkInQr: true });
     }
     return { booking: serializeBooking(row, { forBusiness: true }) };
   }
@@ -2398,7 +2574,7 @@ export class BusinessBookingService {
       ['Was', escapeHtml(fmtWhen(booking))],
       ...(row.staffId !== booking.staffId ? [['Previously with', escapeHtml(booking.staffName)]] : []),
       ...(message ? [['Message', escapeHtml(message)]] : []),
-    ]);
+    ], { checkInQr: row.status === 'confirmed' });
     return { booking: serializeBooking(row, { forBusiness: true }) };
   }
 
@@ -2464,7 +2640,7 @@ export class BusinessBookingService {
       { status: 'cancelled', cancelledAt: new Date(), cancelledBy: 'customer', cancellationReason: reason ?? null },
       { ...policy, reason: `customer_cancelled_${policy.rule}` }
     );
-    await notifyOwner(business, 'Booking cancelled', `${row.customerName} cancelled ${row.serviceName} on ${fmtWhen(row)}.`, row);
+    await notifyOwner(business, 'Booking cancelled', `${row.customerName} cancelled ${row.serviceName} on ${fmtWhen(row)}.`, row, { kind: 'change' });
     return { booking: serializeBooking(row), refund: { ...refund, rule: policy.rule } };
   }
 
@@ -2508,7 +2684,8 @@ export class BusinessBookingService {
       business,
       'Booking rescheduled',
       `${row.customerName} moved ${row.serviceName} from ${fmtWhen(booking)} to ${fmtWhen(row)}.`,
-      row
+      row,
+      { kind: 'change' }
     );
     return { booking: serializeBooking(row) };
   }
@@ -2544,9 +2721,13 @@ export class BusinessBookingService {
   }
 
   /**
-   * Confirmed bookings nobody closed: completed automatically AUTO_COMPLETE_AFTER_HOURS
-   * after they end (starts the payout clock and records any in-person commission).
-   * A business that wants a no-show has until then to mark it.
+   * Confirmed bookings nobody closed, AUTO_COMPLETE_AFTER_HOURS after they end
+   * (either way the payout clock starts):
+   *  - checked in → completed: the balance counts as collected in person and any
+   *    5% the online payment didn't cover is recorded as owed;
+   *  - never checked in → no-show, like completing (staff must check the customer
+   *    in first): no in-person amount; what was paid online stays (full cut: less
+   *    the 5%, with any part a small deposit couldn't cover recorded as owed).
    */
   static async autoCompletePastBookings() {
     const cutoff = new Date(Date.now() - AUTO_COMPLETE_AFTER_HOURS * 3_600_000);
@@ -2556,18 +2737,25 @@ export class BusinessBookingService {
       limit: 200,
     });
     let completed = 0;
+    let noShows = 0;
     for (const booking of due) {
       try {
+        if (!booking.checkedInAt) {
+          const row = await transition(booking.id, ['confirmed'], { status: 'no_show', completedAt: new Date() });
+          await BusinessCommissionService.syncForBooking(row, booking.business);
+          noShows++;
+          continue;
+        }
         const row = await transition(booking.id, ['confirmed'], { status: 'completed', completedAt: new Date() });
-        await BusinessCommissionService.recordForCompletedBooking(row, booking.business);
+        await BusinessCommissionService.syncForBooking(row, booking.business);
         completed++;
       } catch (err) {
         // CONFLICT = the business closed it meanwhile
-        if (!(err instanceof ApiError)) logger.error(`[businessBooking] auto-complete failed ${booking.id}: ${err.message}`);
+        if (!(err instanceof ApiError)) logger.error(`[businessBooking] auto-close failed ${booking.id}: ${err.message}`);
       }
     }
     const { created } = await BusinessCommissionService.backfillMissingCharges();
-    return { completed, commissionBackfilled: created };
+    return { completed, noShows, commissionBackfilled: created };
   }
 
   /** Abandoned checkouts whose expiry webhook never arrived. */

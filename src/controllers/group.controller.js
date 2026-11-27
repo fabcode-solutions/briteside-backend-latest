@@ -8,8 +8,10 @@ import {
   GroupInvitationService,
 } from '../services/group.service.js';
 import { OnboardingService } from '../services/onboarding.service.js';
+import { rankingCategoryIds } from '../services/businessAccount.service.js';
 import ApiError from '../utils/api-error.js';
 import { catchAsync } from '../utils/catch-async.js';
+import { assertCanPublishAs } from '../services/social/businessAuthor.js';
 
 /**
  * @desc Create a new group
@@ -17,10 +19,15 @@ import { catchAsync } from '../utils/catch-async.js';
  * @access Private (Authenticated User)
  */
 export const createGroups = catchAsync(async (req, res) => {
+  // Running it as a business (acting as it in the app): it must be one they can post for
+  const businessId = typeof req.body.businessId === 'string' && req.body.businessId ? req.body.businessId : null;
+  const business = businessId ? await assertCanPublishAs(req.user, businessId) : null;
+
   const group = await GroupService.createGroup(
     req.user.id,
     req.body,
-    req.user.isBritesidePlus
+    req.user.isBritesidePlus,
+    { business }
   );
 
   res.status(201).json({
@@ -48,8 +55,14 @@ export const getGroups = catchAsync(async (req, res) => {
   // "For you": rank groups in the user's setup-flow categories first. Uses the
   // authenticated user only (never the userId query param). Skipped when a
   // category is filtered explicitly or the caller opts out (?forYou=false).
+  // While acting as a business (?asBusinessId=), its own interests rank instead.
   if (req.user?.id && !filters.categoryId && req.query.forYou !== 'false') {
-    filters.preferredCategoryIds = await OnboardingService.getGroupCategoryIds(req.user.id);
+    filters.preferredCategoryIds = await rankingCategoryIds(
+      'group',
+      req.user,
+      req.query.asBusinessId,
+      OnboardingService.getGroupCategoryIds
+    );
   }
 
   const result = await GroupService.getGroups(filters, req.query.userId);

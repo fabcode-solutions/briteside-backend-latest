@@ -5,7 +5,7 @@ import {
   groupSubscriptions,
   stripeCustomers,
 } from '../db/schema/index.js';
-import { eq, and, inArray, sum, count, desc, gte, lt, isNotNull } from 'drizzle-orm';
+import { eq, and, inArray, sum, count, desc, gte, lt, isNotNull, isNull } from 'drizzle-orm';
 import { sql } from 'drizzle-orm';
 import Stripe from 'stripe';
 import config from '../config/config.js';
@@ -15,6 +15,15 @@ const stripe = config.stripe?.secretKey
   : null;
 
 const ACTIVE_SUB_STATUSES = ['active', 'trialing'];
+
+/**
+ * Whose spend log: a user id (personal — spends made as a business are
+ * excluded) or { businessId } (everything any team member paid as that business).
+ */
+const ownerWhere = owner =>
+  typeof owner === 'object' && owner?.businessId
+    ? eq(userSpends.businessId, owner.businessId)
+    : and(eq(userSpends.userId, owner), isNull(userSpends.businessId));
 
 export class UserSpendService {
   // Strip Stripe fields before any outbound response
@@ -31,6 +40,7 @@ export class UserSpendService {
    */
   static async recordSpend({
     userId,
+    businessId = null,
     spendType,
     amountCents,
     referenceId,
@@ -47,6 +57,7 @@ export class UserSpendService {
     try {
       await db.insert(userSpends).values({
         userId,
+        businessId,
         spendType,
         amountCents,
         referenceId,
@@ -158,14 +169,14 @@ export class UserSpendService {
   }
 
   /** Total spending grouped by spend type, with gross/refund/net breakdown. */
-  static async getSummary(userId) {
+  static async getSummary(owner) {
     const rows = await db
       .select({
         spendType: userSpends.spendType,
         totalCents: sum(userSpends.amountCents),
       })
       .from(userSpends)
-      .where(and(eq(userSpends.isRefunded, false), eq(userSpends.userId, userId)))
+      .where(and(eq(userSpends.isRefunded, false), ownerWhere(owner)))
       .groupBy(userSpends.spendType);
 
     const byType = {};
@@ -192,7 +203,7 @@ export class UserSpendService {
    * year only  → grouped by month for the full year.
    * year+month → grouped by day for that month.
    */
-  static async getTimeline(userId, { year, month } = {}) {
+  static async getTimeline(owner, { year, month } = {}) {
     if (!year) throw new Error('year is required');
     const yr = parseInt(year, 10);
     const mo = month ? parseInt(month, 10) : null;
@@ -213,7 +224,7 @@ export class UserSpendService {
       .from(userSpends)
       .where(
         and(
-          eq(userSpends.userId, userId),
+          ownerWhere(owner),
           eq(userSpends.isRefunded, false),
           gte(userSpends.paidAt, startDate),
           lt(userSpends.paidAt, endDate)
@@ -233,7 +244,7 @@ export class UserSpendService {
   static async getEventSpend(userId, eventId) {
     const rows = await db.query.userSpends.findMany({
       where: and(
-        eq(userSpends.userId, userId),
+        ownerWhere(userId),
         eq(userSpends.eventId, eventId),
         eq(userSpends.spendType, 'ticket_purchase'),
         eq(userSpends.isRefunded, false)
@@ -409,12 +420,12 @@ export class UserSpendService {
   }
 
   /** Paginated spend history. Stripe fields excluded from every row. */
-  static async getRecentSpends(userId, { page = 1, limit = 20, type } = {}) {
+  static async getRecentSpends(owner, { page = 1, limit = 20, type } = {}) {
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
     const offset = (pageNum - 1) * limitNum;
 
-    const conditions = [eq(userSpends.userId, userId)];
+    const conditions = [ownerWhere(owner)];
     if (type) conditions.push(eq(userSpends.spendType, type));
     const whereClause = and(...conditions);
 
@@ -429,7 +440,7 @@ export class UserSpendService {
     ]);
 
     return {
-      items: rows,
+      items: rows.map(r => this._serialize(r)),
       pagination: {
         page: pageNum,
         limit: limitNum,

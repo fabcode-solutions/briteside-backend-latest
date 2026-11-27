@@ -3,7 +3,7 @@ import multer from 'multer';
 import httpStatus from 'http-status';
 import { ipKeyGenerator } from 'express-rate-limit';
 import { authMiddleware, optionalAuthMiddleware } from '../middlewares/auth.middleware.js';
-import { createLimiter } from '../middlewares/rateLimiter.js';
+import { createLimiter, iapLimiter } from '../middlewares/rateLimiter.js';
 import ApiError from '../utils/api-error.js';
 import { ATTACHMENT_MAX_BYTES } from '../utils/businessQuestionnaire.js';
 import { ATTACHMENT_TYPES } from '../services/businessAttachment.service.js';
@@ -60,6 +60,19 @@ const inboxSendLimiter = createLimiter({
   message: {
     success: false,
     error: { code: 429, message: 'You are sending messages too fast. Please wait a moment.' },
+  },
+});
+
+// Import & Invite Clients: each request can add / invite up to 500 people
+const clientImportLimiter = createLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: process.env.NODE_ENV !== 'production' ? 1000 : 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: req => (req.user?.id ? `user:${req.user.id}` : ipKeyGenerator(req.ip)),
+  message: {
+    success: false,
+    error: { code: 429, message: 'Too many imports. Please wait a few minutes and try again.' },
   },
 });
 
@@ -208,12 +221,21 @@ router.post(
 );
 
 // Public profile (single segment — declared after the static paths above)
-router.get('/:idOrSlug', validateMiddleware(v.getPublicBusinessSchema), c.getPublicBusiness);
+router.get('/:idOrSlug', optionalAuthMiddleware, validateMiddleware(v.getPublicBusinessSchema), c.getPublicBusiness);
 router.get('/:idOrSlug/slots', validateMiddleware(v.getSlotsSchema), c.getSlots);
 router.get('/:idOrSlug/reviews', validateMiddleware(v.listPublicReviewsSchema), c.listPublicReviews);
 // Wall on standard pages — anyone reads approved posts (signed-in: also own / queued
 // requests), members post requests, the business approves or rejects them
 router.get('/:idOrSlug/wall', optionalAuthMiddleware, validateMiddleware(v.listWallPostsSchema), c.listWallPosts);
+// Events, groups and a live stream hosted as the business (its page)
+router.get('/:idOrSlug/activity', validateMiddleware(v.getPublicBusinessSchema), c.listBusinessActivity);
+// Same paging params as the wall
+router.get(
+  '/:idOrSlug/social-posts',
+  optionalAuthMiddleware,
+  validateMiddleware(v.listWallPostsSchema),
+  c.listBusinessSocialPosts
+);
 router.post('/:idOrSlug/wall', authMiddleware, validateMiddleware(v.createWallPostSchema), c.createWallPost);
 // Business inbox: open (or reopen) my conversation with this business
 router.post(
@@ -298,6 +320,15 @@ router.delete(
   c.unlikeWallComment
 );
 router.get('/:idOrSlug/bookings/quote', validateMiddleware(v.bookingQuoteSchema), c.getBookingQuote);
+// Followers: count + "am I following" for everyone, follow / unfollow for members
+router.get(
+  '/:idOrSlug/follow',
+  optionalAuthMiddleware,
+  validateMiddleware(v.businessFollowSchema),
+  c.getFollowStatus
+);
+router.post('/:idOrSlug/follow', authMiddleware, validateMiddleware(v.businessFollowSchema), c.followBusiness);
+router.delete('/:idOrSlug/follow', authMiddleware, validateMiddleware(v.businessFollowSchema), c.unfollowBusiness);
 // Gallery photos ("Posts"): counts for everyone, likes / comments for members
 router.get(
   '/:idOrSlug/gallery/engagement',
@@ -570,6 +601,12 @@ for (const [action, handler] of [
     handler
   );
 }
+// Money received in hand at the visit ("Off Platform" on the dashboard)
+router.put(
+  '/:businessId/bookings/:bookingId/in-hand',
+  ...scoped(P.BOOKINGS_MANAGE, v.businessInHandSchema),
+  c.setBookingInHand
+);
 // Refund (owner / admin / manager — enforced in service) and reschedule
 router.post(
   '/:businessId/bookings/:bookingId/refund',
@@ -614,6 +651,28 @@ router.post(
   ...scoped(P.WALLET_MANAGE, v.reserveNowConfirmSchema),
   c.reserveNowConfirm
 );
+// Video cover ($5/mo, bought in the app through Apple / Google)
+router.get('/:businessId/video-cover', ...scoped(P.VIEW, v.businessIdOnlySchema), c.getVideoCover);
+router.post(
+  '/:businessId/video-cover/iap/finalize',
+  iapLimiter,
+  ...scoped(P.WALLET_MANAGE, v.videoCoverFinalizeSchema),
+  c.finalizeVideoCoverPurchase
+);
+router.put('/:businessId/video-cover/video', ...scoped(P.PROFILE_EDIT, v.videoCoverVideoSchema), c.setVideoCover);
+// …or on the web through Stripe: in-page card form (intent → Stripe.js confirms → finalize), cancel / resume
+router.post(
+  '/:businessId/video-cover/web/intent',
+  ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema),
+  c.videoCoverWebIntent
+);
+router.post(
+  '/:businessId/video-cover/web/finalize',
+  ...scoped(P.WALLET_MANAGE, v.videoCoverWebFinalizeSchema),
+  c.videoCoverWebFinalize
+);
+router.post('/:businessId/video-cover/web/cancel', ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema), c.videoCoverWebCancel);
+router.post('/:businessId/video-cover/web/resume', ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema), c.videoCoverWebResume);
 router.post('/:businessId/reserve-now/cancel', ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema), c.reserveNowCancel);
 router.post('/:businessId/reserve-now/resume', ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema), c.reserveNowResume);
 
@@ -678,6 +737,30 @@ router.get(
   '/:businessId/wallet/stripe-onboarding',
   ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema),
   c.getStripeOnboardingLink
+);
+
+// Taxes: summary of tax collected on bookings; Stripe tax registrations (owner only, in service)
+router.get('/:businessId/tax/summary', ...scoped(P.TAXES_MANAGE, v.taxSummarySchema), c.getTaxSummary);
+router.get(
+  '/:businessId/tax/account-session',
+  ...scoped(P.TAXES_MANAGE, v.businessIdOnlySchema),
+  c.getTaxAccountSession
+);
+
+// Clients: Import & Invite (CSV or one contact) — saved, optionally invited by email / SMS
+router.get('/:businessId/clients', ...scoped(P.CUSTOMERS_VIEW, v.listClientsSchema), c.listClients);
+router.post(
+  '/:businessId/clients',
+  authMiddleware,
+  clientImportLimiter,
+  validateMiddleware(v.addClientsSchema),
+  requireBusinessPermission(P.CUSTOMERS_VIEW),
+  c.addClients
+);
+router.delete(
+  '/:businessId/clients/:clientId',
+  ...scoped(P.CUSTOMERS_VIEW, v.removeClientSchema),
+  c.removeClient
 );
 
 // Team access

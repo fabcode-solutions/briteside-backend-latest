@@ -6,12 +6,161 @@ import {
   events,
   purchasedTickets,
   users,
+  organizers,
+  venues,
 } from '../db/schema/index.js';
-import { eq, and, desc, count, gte, lte, sql } from 'drizzle-orm';
+import { eq, and, desc, count, gte, lte, sql, isNull, inArray } from 'drizzle-orm';
 import ApiError from '../utils/api-error.js';
 import { TextModerationService, TEXT_ENTITY } from './moderation/textModeration.service.js';
 
+/** Ended events stay in a ticket holder's pending-review list this long. */
+const PROMPT_WINDOW_DAYS = 30;
+/** users.preferences key holding the event ids whose review prompt was dismissed. */
+const DISMISSED_KEY = 'dismissedReviewPromptEventIds';
+
+async function dismissedEventIds(userId) {
+  const row = await db.query.users.findFirst({
+    where: eq(users.id, userId),
+    columns: { preferences: true },
+  });
+  const ids = row?.preferences?.[DISMISSED_KEY];
+  return new Set(Array.isArray(ids) ? ids : []);
+}
+
 export class ReviewService {
+  /**
+   * Events the user held an active ticket for that have ended (within the
+   * last PROMPT_WINDOW_DAYS) and that they haven't reviewed or dismissed.
+   * Prompts are computed live, so they only ever appear after the event ends.
+   */
+  static async getPendingPrompts(userId) {
+    const now = new Date();
+    const windowStart = new Date(now.getTime() - PROMPT_WINDOW_DAYS * 86_400_000);
+
+    const rows = await db
+      .selectDistinctOn([events.id], {
+        id: events.id,
+        title: events.title,
+        startDate: events.startDate,
+        endDate: events.endDate,
+        organizerBusinessName: organizers.businessName,
+        venueName: venues.name,
+      })
+      .from(purchasedTickets)
+      .innerJoin(events, eq(events.id, purchasedTickets.eventId))
+      .leftJoin(organizers, eq(organizers.id, events.organizerId))
+      .leftJoin(venues, eq(venues.id, events.venueId))
+      .leftJoin(
+        eventReviews,
+        and(eq(eventReviews.eventId, events.id), eq(eventReviews.userId, userId))
+      )
+      .where(
+        and(
+          eq(purchasedTickets.userId, userId),
+          eq(purchasedTickets.status, 'active'),
+          isNull(events.deletedAt),
+          lte(events.endDate, now),
+          gte(events.endDate, windowStart),
+          isNull(eventReviews.id)
+        )
+      )
+      .orderBy(events.id);
+
+    const dismissed = await dismissedEventIds(userId);
+
+    return rows
+      .filter(r => !dismissed.has(r.id))
+      .sort((a, b) => new Date(b.endDate) - new Date(a.endDate))
+      .map(r => ({
+        id: r.id,
+        eventId: r.id,
+        userId,
+        event: {
+          id: r.id,
+          title: r.title,
+          startDate: r.startDate,
+          endDate: r.endDate,
+          organizer: { businessName: r.organizerBusinessName ?? '' },
+          venue: r.venueName ? { name: r.venueName } : undefined,
+        },
+      }));
+  }
+
+  /** Hide an event's review prompt for this user. Idempotent. */
+  static async dismissPrompt(userId, eventId) {
+    const event = await db.query.events.findFirst({
+      where: eq(events.id, eventId),
+      columns: { id: true },
+    });
+    if (!event) throw new ApiError(404, 'Event not found');
+
+    // Append atomically so concurrent dismissals don't overwrite each other
+    await db
+      .update(users)
+      .set({
+        preferences: sql`jsonb_set(
+          coalesce(${users.preferences}, '{}'::jsonb),
+          ${`{${DISMISSED_KEY}}`}::text[],
+          coalesce(${users.preferences} -> ${DISMISSED_KEY}, '[]'::jsonb) || to_jsonb(${eventId}::text)
+        )`,
+      })
+      .where(
+        and(
+          eq(users.id, userId),
+          sql`not coalesce(${users.preferences} -> ${DISMISSED_KEY}, '[]'::jsonb) ? ${eventId}`
+        )
+      );
+
+    return { eventId, dismissed: true };
+  }
+
+  /**
+   * Prompts are derived from tickets + reviews at read time, so there is
+   * nothing to insert. This reports how many attendees currently have a
+   * pending prompt for the event (0 until the event has ended).
+   */
+  static async createReviewPrompts(eventId) {
+    const event = await db.query.events.findFirst({
+      where: and(eq(events.id, eventId), isNull(events.deletedAt)),
+      columns: { id: true, endDate: true },
+    });
+    if (!event) throw new ApiError(404, 'Event not found');
+
+    if (new Date(event.endDate) > new Date()) {
+      return { eventId, eventEnded: false, eligibleAttendees: 0 };
+    }
+
+    const holders = await db
+      .selectDistinct({ userId: purchasedTickets.userId })
+      .from(purchasedTickets)
+      .where(and(eq(purchasedTickets.eventId, eventId), eq(purchasedTickets.status, 'active')));
+    const holderIds = holders.map(h => h.userId);
+    if (!holderIds.length) return { eventId, eventEnded: true, eligibleAttendees: 0 };
+
+    const [reviewed, dismissedRows] = await Promise.all([
+      db
+        .select({ userId: eventReviews.userId })
+        .from(eventReviews)
+        .where(and(eq(eventReviews.eventId, eventId), inArray(eventReviews.userId, holderIds))),
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(
+          and(
+            inArray(users.id, holderIds),
+            sql`coalesce(${users.preferences} -> ${DISMISSED_KEY}, '[]'::jsonb) ? ${eventId}`
+          )
+        ),
+    ]);
+    const excluded = new Set([...reviewed.map(r => r.userId), ...dismissedRows.map(r => r.id)]);
+
+    return {
+      eventId,
+      eventEnded: true,
+      eligibleAttendees: holderIds.filter(id => !excluded.has(id)).length,
+    };
+  }
+
   /**
    * Check if user should be prompted to review an event
    */
@@ -54,8 +203,10 @@ export class ReviewService {
       const existingReview = await db.query.eventReviews.findFirst({
         where: and(eq(eventReviews.eventId, eventId), eq(eventReviews.userId, userId)),
       });
+      if (existingReview) return false;
 
-      return !existingReview;
+      // Dismissed via "Maybe later"
+      return !(await dismissedEventIds(userId)).has(eventId);
     } catch (error) {
       console.error('Should show review prompt error:', error);
       return false;

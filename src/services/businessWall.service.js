@@ -24,7 +24,12 @@ import { BUSINESS_PERMISSIONS } from '../config/business-permissions.js';
 import { resolveBusinessAccess } from '../middlewares/businessAccess.middleware.js';
 import { isBusinessPublic } from './business.service.js';
 import { createNotification } from './notification.service.js';
+import { assertNotBlockedByBusiness } from './businessBlock.service.js';
+import { maskProfanity } from './moderation/textMasking.service.js';
 
+/** Visitor text with profanity masked when the business turned its filter on. */
+export const filterText = (business, text) =>
+  business?.profanityFilter ? maskProfanity(text).masked : text;
 
 /** Anti-spam: posts one person may leave on one wall per hour. */
 export const WALL_POSTS_PER_HOUR = 5;
@@ -334,14 +339,22 @@ export class BusinessWallService {
       throw new ApiError(httpStatus.TOO_MANY_REQUESTS, 'You are posting too often. Try again later.');
     }
 
-    // The business's own team posts straight to the wall; everyone else asks first
-    const autoApprove = await canModerate(business, user);
+    // The business's own team posts straight to the wall. Visitors follow the
+    // business's privacy setting: 'everyone' publishes, 'approval' asks first, 'off' refuses.
+    const isTeam = await canModerate(business, user);
+    if (!isTeam) {
+      if (business.wallPosts === 'off') {
+        throw new ApiError(httpStatus.FORBIDDEN, "This business isn't accepting wall posts");
+      }
+      await assertNotBlockedByBusiness(business.id, user.id, "You can't post on this business's wall");
+    }
+    const autoApprove = isTeam || business.wallPosts === 'everyone';
     const [row] = await db
       .insert(businessWallPosts)
       .values({
         businessId: business.id,
         authorId: user.id,
-        text,
+        text: !isTeam ? filterText(business, text) : text,
         status: autoApprove ? 'approved' : 'pending',
         approvedAt: autoApprove ? new Date() : null,
       })
@@ -351,12 +364,23 @@ export class BusinessWallService {
       createNotification({
         userId: business.ownerId,
         title: `New wall post request on ${business.name}`,
-        message: excerpt(text),
+        message: excerpt(row.text),
         type: 'business_wall_post',
         redirectTo: `/business/${business.slug}`,
         relatedId: row.id,
-        metadata: { businessId: business.id, postId: row.id, status: 'pending' },
+        metadata: { businessId: business.id, postId: row.id, status: 'pending', kind: 'pendingApproval' },
       }).catch(err => logger.error(`[businessWall] request notification failed: ${err.message}`));
+    } else if (!isTeam) {
+      // Published straight away (wall open to everyone) — let the business know
+      createNotification({
+        userId: business.ownerId,
+        title: `${authorName(user)} posted on ${business.name}'s wall`,
+        message: excerpt(row.text),
+        type: 'business_wall_post',
+        redirectTo: `/business/${business.slug}`,
+        relatedId: row.id,
+        metadata: { businessId: business.id, postId: row.id, status: 'approved', kind: 'newPost' },
+      }).catch(err => logger.error(`[businessWall] post notification failed: ${err.message}`));
     }
 
     return serializePost(await withAuthor(row.id), true);
@@ -566,6 +590,11 @@ export class BusinessWallService {
   static async createComment(user, idOrSlug, postId, { text, parentId = null, mentionedUserIds = [] }) {
     const business = await loadPublicBusiness(idOrSlug);
     const post = await loadApprovedPost(business, postId);
+    // Visitors: not blocked by the business, and its profanity filter applies
+    if (!(await canModerate(business, user))) {
+      await assertNotBlockedByBusiness(business.id, user.id, "You can't comment on this business's wall");
+      text = filterText(business, text);
+    }
 
     let parent = null;
     if (parentId) {
@@ -656,6 +685,7 @@ export class BusinessWallService {
     if (comment.authorId !== user.id) {
       throw new ApiError(httpStatus.FORBIDDEN, 'You can only edit your own comments');
     }
+    if (!(await canModerate(business, user))) text = filterText(business, text);
 
     const mentions = await resolveMentions(text, mentionedUserIds);
     await db

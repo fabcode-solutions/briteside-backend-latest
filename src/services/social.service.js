@@ -152,6 +152,14 @@ export class SocialService {
     return PinnedProfileService.isPinned(userId, targetUserId);
   }
 
+  static async togglePinBusiness(userId, businessId) {
+    return PinnedProfileService.togglePinBusiness(userId, businessId);
+  }
+
+  static async isBusinessPinned(userId, businessId) {
+    return PinnedProfileService.isBusinessPinned(userId, businessId);
+  }
+
   static async getPinnedProfiles(userId, page = 1, limit = 20, search = '') {
     return PinnedProfileService.getPinnedProfiles(userId, page, limit, search);
   }

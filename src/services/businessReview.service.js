@@ -13,6 +13,7 @@ import { businessByIdOrSlug } from '../utils/handles.js';
 import logger from '../config/logger.js';
 import { isBusinessPublic } from './business.service.js';
 import { createNotification } from './notification.service.js';
+import { assertNotBlockedByBusiness } from './businessBlock.service.js';
 import { sendMail } from './mail.service.js';
 import { emailWrapper, ctaRow, ctaButton, appUrl } from '../templates/emailLayout.js';
 
@@ -43,6 +44,7 @@ const serializeReview = r => ({
   bookingId: r.bookingId,
   rating: r.rating,
   comment: r.comment,
+  images: Array.isArray(r.images) ? r.images : [],
   authorName: displayName(r.user),
   authorImage: r.user?.image ?? null,
   serviceName: r.booking?.serviceName ?? null,
@@ -51,6 +53,7 @@ const serializeReview = r => ({
   visitDate: r.booking?.startAt ?? null,
   ownerReply: r.ownerReply,
   ownerRepliedAt: r.ownerRepliedAt,
+  ownerReplyEditedAt: r.ownerReplyEditedAt ?? null,
   createdAt: r.createdAt,
   updatedAt: r.updatedAt,
 });
@@ -142,13 +145,23 @@ export class BusinessReviewService {
   static async listPublic(idOrSlug, query) {
     const business = await db.query.businesses.findFirst({
       where: and(businessByIdOrSlug(idOrSlug), isNull(businesses.deletedAt)),
-      columns: { id: true, isPublished: true, deletedAt: true },
+      columns: { id: true, isPublished: true, deletedAt: true, showReviews: true },
       with: { owner: { columns: { isBritesidePlus: true } } },
     });
     if (!business || !isBusinessPublic(business, business.owner)) {
       throw new ApiError(httpStatus.NOT_FOUND, 'Business not found');
     }
-    return listFor(business.id, query, query.locationId ? [query.locationId] : null);
+    // The business hid its reviews (privacy) — its team reads them in the dashboard
+    if (business.showReviews === false) {
+      const { page = 1, limit = 10 } = query;
+      return {
+        reviews: [],
+        hidden: true,
+        summary: { rating: 0, reviewCount: 0, distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } },
+        pagination: { page, limit, total: 0, totalPages: 0, hasMore: false },
+      };
+    }
+    return { ...(await listFor(business.id, query, query.locationId ? [query.locationId] : null)), hidden: false };
   }
 
   // ── Dashboard ─────────────────────────────────────────────────────────────
@@ -158,17 +171,36 @@ export class BusinessReviewService {
     return listFor(business.id, query, viewLocationIds(access, query.locationId));
   }
 
-  /** Set (or with an empty reply, remove) the business's public response. */
+  /**
+   * The business's one public response per review: the first call posts it
+   * (and tells the customer), later calls edit it (marked edited, no new
+   * notification), and an empty reply removes it.
+   */
   static async reply(business, reviewId, replyText) {
     const reply = replyText?.trim() || null;
+    const where = and(eq(businessReviews.id, reviewId), eq(businessReviews.businessId, business.id));
+    const existing = await db.query.businessReviews.findFirst({
+      where,
+      columns: { id: true, ownerReply: true },
+    });
+    if (!existing) throw new ApiError(httpStatus.NOT_FOUND, 'Review not found');
+
+    const now = new Date();
+    const isFirstReply = !!reply && !existing.ownerReply;
+    if (reply === existing.ownerReply) return BusinessReviewService.getById(existing.id);
+    const changes = !reply
+      ? { ownerReply: null, ownerRepliedAt: null, ownerReplyEditedAt: null }
+      : isFirstReply
+        ? { ownerReply: reply, ownerRepliedAt: now, ownerReplyEditedAt: null }
+        : { ownerReply: reply, ownerReplyEditedAt: now };
     const [row] = await db
       .update(businessReviews)
-      .set({ ownerReply: reply, ownerRepliedAt: reply ? new Date() : null, updatedAt: new Date() })
-      .where(and(eq(businessReviews.id, reviewId), eq(businessReviews.businessId, business.id)))
+      .set({ ...changes, updatedAt: now })
+      .where(where)
       .returning({ id: businessReviews.id, userId: businessReviews.userId });
     if (!row) throw new ApiError(httpStatus.NOT_FOUND, 'Review not found');
 
-    if (reply) {
+    if (isFirstReply) {
       createNotification({
         userId: row.userId,
         title: `${business.name} replied to your review`,
@@ -196,8 +228,9 @@ export class BusinessReviewService {
 
   // ── Customer ──────────────────────────────────────────────────────────────
 
-  static async create(user, bookingId, { rating, comment }) {
+  static async create(user, bookingId, { rating, comment, images }) {
     const booking = await loadOwnBooking(user, bookingId);
+    await assertNotBlockedByBusiness(booking.businessId, user.id, "You can't review this business");
     if (!canReviewBooking(booking, user.id)) {
       throw new ApiError(
         httpStatus.CONFLICT,
@@ -219,6 +252,7 @@ export class BusinessReviewService {
             staffId: booking.staffId,
             rating,
             comment: comment?.trim() || null,
+            images: images ?? [],
           })
           .returning({ id: businessReviews.id });
         await recomputeAggregates(booking.businessId, tx);
@@ -245,7 +279,7 @@ export class BusinessReviewService {
     return BusinessReviewService.getById(reviewId);
   }
 
-  static async update(user, bookingId, { rating, comment }) {
+  static async update(user, bookingId, { rating, comment, images }) {
     const booking = await loadOwnBooking(user, bookingId);
     const existing = await db.query.businessReviews.findFirst({
       where: and(eq(businessReviews.bookingId, booking.id), eq(businessReviews.userId, user.id)),
@@ -260,6 +294,7 @@ export class BusinessReviewService {
         .set({
           ...(rating != null ? { rating } : {}),
           ...(comment !== undefined ? { comment: comment?.trim() || null } : {}),
+          ...(images !== undefined ? { images } : {}),
           updatedAt: new Date(),
         })
         .where(eq(businessReviews.id, existing.id));

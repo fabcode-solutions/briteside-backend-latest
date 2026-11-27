@@ -14,6 +14,7 @@ import {
   interestCategories,
   pinnedPosts,
   postCollaborators,
+  businesses,
   userPostOrder,
   postShopProducts,
   shopProducts,
@@ -55,6 +56,7 @@ import { BlockService } from './block.service.js';
 import { FollowService } from './follow.service.js';
 import { StoryService } from './story.service.js';
 import { sanitizeLinkButton } from '../../utils/link-button.js';
+import { assertCanPublishAs, attachBusinessAuthorsToPosts } from './businessAuthor.js';
 
 /** Products a single post may link to. Mirrored in the create-post drawer. */
 const MAX_LINKED_PRODUCTS = 3;
@@ -78,6 +80,7 @@ export class PostService {
    */
   static async _finalizePostList(mapped, viewerId) {
     const moderated = await MediaModerationService.applyPostModeration(mapped, viewerId);
+    await attachBusinessAuthorsToPosts(moderated);
     const filterEnabled = await TextModerationService.getFilterEnabled(viewerId);
     return TextModerationService.maskFlaggedText(moderated, {
       entityType: TEXT_ENTITY.POST,
@@ -388,6 +391,8 @@ export class PostService {
       linkedProductIds,
       linkedEventId,
       isPlus,
+      // Already access-checked by the caller (assertCanPublishAs)
+      businessId = null,
     }
   ) {
     const LINK_REGEX = /(https?:\/\/|www\.)\S+/i;
@@ -405,7 +410,17 @@ export class PostService {
     }
 
     const VALID_VISIBILITY = ['public', 'followers', 'private'];
-    const resolvedVisibility = VALID_VISIBILITY.includes(visibility) ? visibility : 'public';
+    // A business page is public, so are its posts
+    const resolvedVisibility =
+      !businessId && VALID_VISIBILITY.includes(visibility) ? visibility : 'public';
+    const businessName = businessId
+      ? (
+          await db.query.businesses.findFirst({
+            where: eq(businesses.id, businessId),
+            columns: { name: true },
+          })
+        )?.name
+      : null;
     const mergedSettings = {
       commentsDisabled: false,
       hideLikes: false,
@@ -458,6 +473,7 @@ export class PostService {
       .insert(posts)
       .values({
         userId,
+        businessId,
         caption,
         mediaUrls: mediaUrls || [],
         mediaTypes: mediaTypes || [],
@@ -522,14 +538,16 @@ export class PostService {
               await createNotification({
                 userId: mentionedUserId,
                 title: 'You were mentioned',
-                message: `${poster?.username || 'Someone'} mentioned you in a post`,
+                message: `${businessName || poster?.username || 'Someone'} mentioned you in a post`,
                 type: 'social_update',
                 relatedId: post.id,
                 redirectTo: `/feed/post/${post.id}`,
                 metadata: {
                   postId: post.id,
-                  mentionedByUserId: userId,
-                  mentionedByUsername: poster?.username,
+                  // A business post never reveals the person behind it
+                  ...(businessId
+                    ? { businessId, audience: 'personal' }
+                    : { mentionedByUserId: userId, mentionedByUsername: poster?.username }),
                 },
               });
             } catch (err) {
@@ -540,8 +558,9 @@ export class PostService {
       }
     }
 
-    // Scheduled posts don't count until published
-    if (!isScheduled) {
+    // Scheduled posts don't count until published; a business's posts are
+    // never on the person's profile
+    if (!isScheduled && !businessId) {
       await db
         .update(socialProfiles)
         .set({
@@ -551,8 +570,8 @@ export class PostService {
         .where(eq(socialProfiles.userId, userId));
     }
     // Invite collaborators (pending until they accept — post only counts
-    // toward their profile/postsCount once accepted)
-    if (Array.isArray(collaboratorIds) && collaboratorIds.length > 0) {
+    // toward their profile/postsCount once accepted). Personal posts only.
+    if (!businessId && Array.isArray(collaboratorIds) && collaboratorIds.length > 0) {
       const uniqueIds = [...new Set(collaboratorIds)].filter(id => id !== userId);
 
       if (uniqueIds.length > 5) {
@@ -737,6 +756,8 @@ export class PostService {
             AND pc.status = 'accepted'
         )`
       ),
+      // Posts made as a business are on the business page, not the person's profile
+      isNull(posts.businessId),
       eq(posts.isArchived, false),
       eq(posts.isStatusPost, false),
       eq(posts.status, 'published'),
@@ -920,6 +941,7 @@ export class PostService {
         pinnedWhereConditions.push(postsModerationGateStrict());
       }
 
+      pinnedWhereConditions.push(isNull(posts.businessId));
       pinnedWhereConditions.push(sql`(
     ${posts.userId} = ${userId}
     OR EXISTS (
@@ -1110,10 +1132,75 @@ export class PostService {
     const scheduledPosts = await db
       .select()
       .from(posts)
-      .where(and(eq(posts.userId, userId), eq(posts.status, 'scheduled')))
+      .where(and(eq(posts.userId, userId), eq(posts.status, 'scheduled'), isNull(posts.businessId)))
       .orderBy(asc(posts.scheduledAt));
 
     return scheduledPosts;
+  }
+
+  /**
+   * A business page's posts (published as the business), newest first.
+   * Business posts are always public; held media stays hidden from visitors.
+   */
+  static async getBusinessPosts(businessId, viewerId, { page = 1, limit = 20 } = {}) {
+    const offset = (Math.max(1, Number(page)) - 1) * Number(limit);
+    const rows = await db.query.posts.findMany({
+      where: and(
+        eq(posts.businessId, businessId),
+        eq(posts.isArchived, false),
+        eq(posts.status, 'published'),
+        isNull(posts.deletedAt),
+        or(isNull(posts.expiresAt), gt(posts.expiresAt, new Date())),
+        postsModerationGate(viewerId)
+      ),
+      with: {
+        likes: { where: eq(postLikes.userId, viewerId), columns: { id: true } },
+        saves: { where: eq(savedPosts.userId, viewerId), columns: { id: true } },
+        reposts: { where: eq(postReposts.userId, viewerId), columns: { id: true } },
+        tags: { with: { category: true } },
+      },
+      orderBy: desc(posts.createdAt),
+      limit: Number(limit) + 1,
+      offset,
+    });
+    const hasMore = rows.length > Number(limit);
+    const pageRows = hasMore ? rows.slice(0, Number(limit)) : rows;
+    const linkedProducts = await PostService._linkedProductsByPost(pageRows.map(p => p.id));
+    const linkedEvents = await PostService._linkedEventsByPost(pageRows);
+
+    const mapped = pageRows.map(post => ({
+      id: post.id,
+      userId: post.userId,
+      caption: post.caption,
+      mediaUrls: post.mediaUrls || [],
+      mediaTypes: post.mediaTypes || [],
+      aspectRatios: post.aspectRatios || [],
+      location: post.location,
+      tags: post.tags?.map(t => t.category?.name).filter(Boolean) || [],
+      likesCount: post.likesCount,
+      commentsCount: post.commentsCount,
+      sharesCount: post.sharesCount,
+      repostsCount: post.repostsCount,
+      viewsCount: post.viewsCount || 0,
+      isArchived: post.isArchived,
+      createdAt: post.createdAt,
+      updatedAt: post.updatedAt,
+      visibility: post.visibility,
+      commentsDisabled: post.settings?.commentsDisabled || false,
+      hideLikes: post.settings?.hideLikes || false,
+      linkButton: post.settings?.linkButton || null,
+      linkedProducts: linkedProducts.get(post.id) || [],
+      linkedEvent: linkedEvents.get(post.id) || null,
+      collaborators: [],
+      isLiked: post.likes.length > 0,
+      isSaved: post.saves.length > 0,
+      isReposted: post.reposts.length > 0,
+    }));
+
+    return {
+      posts: await PostService._finalizePostList(mapped, viewerId),
+      pagination: { page: Number(page), limit: Number(limit), hasMore },
+    };
   }
 
   /**
@@ -1231,6 +1318,7 @@ export class PostService {
       moderationStatus: post.moderationStatus ?? 'approved',
       copyrightStatus: post.copyrightStatus ?? null,
     };
+    await attachBusinessAuthorsToPosts(response);
 
     const filterEnabled = await TextModerationService.getFilterEnabled(viewerId);
     return TextModerationService.maskFlaggedTextSingle(response, {
@@ -1366,13 +1454,26 @@ export class PostService {
    * @param {string} userId - The user's ID
    */
   static async deletePost(postId, userId) {
-    const postData = await db.query.posts.findFirst({
+    let postData = await db.query.posts.findFirst({
       where: and(eq(posts.id, postId), eq(posts.userId, userId)),
     });
+
+    // A business's post: anyone who can post as the business may remove it
+    if (!postData) {
+      const businessPost = await db.query.posts.findFirst({ where: eq(posts.id, postId) });
+      if (businessPost?.businessId) {
+        await assertCanPublishAs({ id: userId }, businessPost.businessId).catch(() => {
+          throw new ApiError(404, 'Post not found or unauthorized');
+        });
+        postData = businessPost;
+      }
+    }
 
     if (!postData) {
       throw new ApiError(404, 'Post not found or unauthorized');
     }
+    // The delete below matches on the creator
+    const creatorId = postData.userId;
 
     // Capture accepted collaborators before the cascade-delete removes their
     // rows, so their postsCount can be fixed up afterward
@@ -1396,15 +1497,16 @@ export class PostService {
 
     const deleted = await db
       .delete(posts)
-      .where(and(eq(posts.id, postId), eq(posts.userId, userId)))
+      .where(and(eq(posts.id, postId), eq(posts.userId, creatorId)))
       .returning();
 
     if (deleted.length === 0) {
       throw new ApiError(404, 'Post not found or unauthorized');
     }
 
-    // Only decrement postsCount for published posts (not status posts, not scheduled)
-    if (!postData.isStatusPost && postData.status !== 'scheduled') {
+    // Only decrement postsCount for published posts (not status posts, not
+    // scheduled, not a business's — those never counted)
+    if (!postData.isStatusPost && postData.status !== 'scheduled' && !postData.businessId) {
       await db
         .update(socialProfiles)
         .set({

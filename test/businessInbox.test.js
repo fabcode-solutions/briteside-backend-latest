@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  KINDS,
   normalizeMessage,
   isUnreadFor,
   otherSide,
@@ -13,6 +14,21 @@ const OFFER_ID = '4b0f6a7e-2c1d-4e8f-9a3b-5c6d7e8f9a0b';
 const FILE_URL = 'https://cdn.example.com/uploads/photo.jpg';
 
 describe('business inbox messages', () => {
+  it('has the three inboxes, and previews a paid message without its text', () => {
+    expect(KINDS).toEqual(['inquiry', 'general', 'paid']);
+    expect(replyPreview({ messageType: 'text', content: 'Call me at 555', metadata: { priority: { itemId: OFFER_ID } } })).toBe(
+      'Sent you a priority message'
+    );
+  });
+
+  it('never lets a client set the service name on an inquiry (the server stamps it)', () => {
+    const msg = normalizeMessage(
+      { messageType: 'inquiry', content: 'How much?', metadata: { serviceId: OFFER_ID, serviceName: 'Fake' } },
+      'customer'
+    );
+    expect(msg.metadata).toEqual({ serviceId: OFFER_ID });
+  });
+
   it('keeps text, trimmed, and rejects empty or oversized text', () => {
     expect(normalizeMessage({ content: '  Hi there  ' }, 'customer')).toEqual({
       messageType: 'text',

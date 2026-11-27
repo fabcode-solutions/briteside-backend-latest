@@ -181,6 +181,9 @@ export * from './analyticsRollupState.js';
 export * from './businesses.js';
 // Business inbox (customer ↔ business conversations, separate from personal DMs)
 export * from './businessInbox.js';
+export * from './businessStoreSubscriptions.js';
+// The business's own pins, blocks and interests (business = separate account)
+export * from './businessAccount.js';
 // Shared namespace for personal usernames + business @usernames (trigger-maintained)
 export * from './handles.js';
 // Business sign-ups whose business isn't created yet (cross-device onboarding resume)

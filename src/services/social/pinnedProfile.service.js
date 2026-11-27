@@ -1,12 +1,28 @@
 import { db } from '../../db/index.js';
 import { pinnedProfiles, users, socialProfiles } from '../../db/schema/index.js';
-import { eq, and, or, sql, count, desc, notInArray } from 'drizzle-orm';
+import { eq, and, or, sql, count, desc, notInArray, isNotNull } from 'drizzle-orm';
 import { BlockService } from './block.service.js';
+import {
+  countPinnedBusinesses,
+  isBusinessPinned,
+  mergePinPage,
+  pinnedBusinessRows,
+  toggleBusinessPin,
+} from '../pinnedBusiness.helper.js';
 
 /**
- * Pinned profiles — a user bookmarking another user's profile for quick access.
+ * Pinned profiles — a user bookmarking another user's profile (or a business
+ * page) for quick access.
  */
 export class PinnedProfileService {
+  static async togglePinBusiness(userId, businessId) {
+    return toggleBusinessPin(pinnedProfiles, 'userId', userId, businessId);
+  }
+
+  static async isBusinessPinned(userId, businessId) {
+    return isBusinessPinned(pinnedProfiles, 'userId', userId, businessId);
+  }
+
   static async togglePin(userId, targetUserId) {
     const existing = await db.query.pinnedProfiles.findFirst({
       where: and(eq(pinnedProfiles.userId, userId), eq(pinnedProfiles.pinnedUserId, targetUserId)),
@@ -31,6 +47,9 @@ export class PinnedProfileService {
 
   static async getPinnedProfiles(userId, page = 1, limit = 20, search = '') {
     const offset = (page - 1) * limit;
+    // People and business pages are merged newest-first, so each source
+    // supplies everything up to the end of this page (+1 to know hasMore).
+    const take = offset + limit + 1;
 
     // A block (either direction) doesn't unpin the profile — it just hides
     // it here, same as it hides from search/followers — so a later unblock
@@ -50,9 +69,10 @@ export class PinnedProfileService {
         )
       : undefined;
 
-    const whereCondition = and(eq(pinnedProfiles.userId, userId), blockCondition, nameCondition);
+    const peoplePins = and(eq(pinnedProfiles.userId, userId), isNotNull(pinnedProfiles.pinnedUserId));
+    const whereCondition = and(peoplePins, blockCondition, nameCondition);
 
-    const [rows, [{ value: total }]] = await Promise.all([
+    const [rows, [{ value: peopleTotal }], businessRows, businessTotal] = await Promise.all([
       db
         .select({
           id: users.id,
@@ -68,21 +88,19 @@ export class PinnedProfileService {
         .leftJoin(socialProfiles, eq(socialProfiles.userId, users.id))
         .where(whereCondition)
         .orderBy(desc(pinnedProfiles.createdAt))
-        .limit(limit)
-        .offset(offset),
+        .limit(take),
       // Total is the unfiltered-by-search (but still block-filtered) pin
       // count — it feeds the menu badge, which shouldn't jump around while
       // the user is typing a search, but also shouldn't count a blocked pin.
       db
         .select({ value: count() })
         .from(pinnedProfiles)
-        .where(and(eq(pinnedProfiles.userId, userId), blockCondition)),
+        .where(and(peoplePins, blockCondition)),
+      pinnedBusinessRows(pinnedProfiles, 'userId', userId, { search, take }),
+      countPinnedBusinesses(pinnedProfiles, 'userId', userId),
     ]);
 
-    return {
-      items: rows,
-      hasMore: rows.length === limit,
-      total,
-    };
+    const { items, hasMore } = mergePinPage(rows, businessRows, offset, limit);
+    return { items, hasMore, total: Number(peopleTotal) + businessTotal };
   }
 }

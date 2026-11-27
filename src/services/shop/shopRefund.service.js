@@ -24,7 +24,8 @@ export const REFUND_REASONS = ['not_as_described', 'not_received', 'wrong_item',
 export class ShopRefundService {
   /** Paid orders the buyer could still dispute. */
   static async listEligibleOrders(buyerId) {
-    const { orders } = await ShopOrderService.listPurchases(buyerId, 1, 100);
+    // 'all': the payer can dispute what they bought as a business too
+    const { orders } = await ShopOrderService.listPurchases(buyerId, 1, 100, 'all');
     const existing = await db.query.shopRefundRequests.findMany({
       where: eq(shopRefundRequests.buyerId, buyerId),
       columns: { orderId: true },

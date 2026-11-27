@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import { MESSAGE_TYPES } from '../utils/businessInbox.js';
+import { KINDS, MESSAGE_TYPES } from '../utils/businessInbox.js';
 
 const uuid = z.string().uuid();
+const kind = z.enum(KINDS);
 const idOrSlug = z.string().trim().min(1).max(120);
 
 const listQuery = z.object({
@@ -22,7 +23,11 @@ const messageBody = z.object({
 });
 
 // ─── Customer ───────────────────────────────────────────────────────────────
-export const openForCustomerSchema = z.object({ params: z.object({ idOrSlug }) });
+// Send inquiry / Inquire → 'inquiry' (default); "Message" → 'general'
+export const openForCustomerSchema = z.object({
+  params: z.object({ idOrSlug }),
+  body: z.object({ kind: z.enum(['inquiry', 'general']).optional() }).optional(),
+});
 export const listMineSchema = z.object({ query: listQuery });
 export const myConversationSchema = z.object({
   params: z.object({ conversationId: uuid }),
@@ -42,12 +47,14 @@ export const listInboxSchema = z.object({
       .enum(['true', 'false'])
       .transform(v => v === 'true')
       .optional(),
+    kind: kind.optional(),
   }),
 });
 export const unreadInboxSchema = z.object({ params: z.object({ businessId: uuid }) });
 export const openForBusinessSchema = z.object({
   params: z.object({ businessId: uuid }),
-  body: z.object({ customerId: uuid }),
+  // 'inquiry' (default): customers only; 'general': anyone (paid opens by paying)
+  body: z.object({ customerId: uuid, kind: z.enum(['inquiry', 'general']).optional() }),
 });
 export const inboxConversationSchema = z.object({
   params: z.object({ businessId: uuid, conversationId: uuid }),

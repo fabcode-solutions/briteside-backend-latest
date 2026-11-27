@@ -6,18 +6,30 @@ import {
   events,
   groupEventPromotions,
   groupMembers,
+  groups,
   purchasedTickets,
   users,
   venues,
   userInformation,
 } from '../db/schema/index.js';
-import { eq, and, count, asc, gte, sql, inArray } from 'drizzle-orm';
+import { eq, and, count, asc, gte, sql, inArray, ne } from 'drizzle-orm';
 
 export async function getGroupMemberCount(groupId) {
+  // A group run as a business doesn't count the person behind it as a member
+  const group = await db.query.groups.findFirst({
+    where: eq(groups.id, groupId),
+    columns: { businessId: true, createdBy: true },
+  });
   const result = await db
     .select({ count: count() })
     .from(groupMembers)
-    .where(and(eq(groupMembers.groupId, groupId), eq(groupMembers.status, 'joined')));
+    .where(
+      and(
+        eq(groupMembers.groupId, groupId),
+        eq(groupMembers.status, 'joined'),
+        group?.businessId ? ne(groupMembers.userId, group.createdBy) : undefined
+      )
+    );
   return result[0]?.count || 0;
 }
 

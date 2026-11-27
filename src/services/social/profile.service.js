@@ -181,6 +181,7 @@ static async getOrCreateSocialProfile(userId) {
         .where(
           and(
             eq(posts.userId, userId),
+            isNull(posts.businessId), // a business's posts aren't the person's
             eq(posts.isStatusPost, false),
             eq(posts.isCoverPost, false),
             eq(posts.isArchived, false),
@@ -219,7 +220,9 @@ static async getOrCreateSocialProfile(userId) {
 
   static viewerVisibilityCondition(viewerId) {
     return sql`(
-      EXISTS (
+      -- A business's posts are public whatever the person's own profile is
+      ${posts.businessId} IS NOT NULL
+      OR EXISTS (
         SELECT 1 FROM social_profiles sp
         WHERE sp.user_id = ${posts.userId} AND sp.is_public = TRUE
       )

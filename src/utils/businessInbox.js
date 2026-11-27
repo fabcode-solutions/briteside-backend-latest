@@ -4,6 +4,8 @@
  */
 
 export const SIDES = ['customer', 'business'];
+// The business's three inboxes (db/schema/businessInbox.js)
+export const KINDS = ['inquiry', 'general', 'paid'];
 export const MESSAGE_TYPES = ['text', 'inquiry', 'image', 'video', 'file'];
 export const MEDIA_TYPES = ['image', 'video', 'file'];
 
@@ -80,6 +82,7 @@ export function applyMediaVerdict(view, status, viewerSide, heldStatuses) {
  * message (so a photo still under review never puts its URL in a notification).
  */
 export function replyPreview(message) {
+  if (message.metadata?.priority) return 'Sent you a priority message';
   if (message.messageType === 'image') return 'Sent you a photo';
   if (message.messageType === 'video') return 'Sent you a video';
   if (message.messageType === 'file') return 'Sent you a file';

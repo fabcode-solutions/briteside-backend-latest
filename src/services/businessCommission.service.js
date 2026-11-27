@@ -1,13 +1,17 @@
 /**
- * 5% commission on what customers pay a business IN PERSON.
+ * 5% commission the business owes beyond what was withheld online.
  *
- * Online payments already have their 5% withheld at payment time
- * (business_bookings.platformCommissionCents). For the part paid in person —
- * a "pay in person" service, or the at-visit remainder of a deposit booking —
- * Briteside never touches the money, so the business owner owes it:
+ * Full cut (business_bookings.commissionUpfront, all new bookings): the whole 5% of
+ * the service price is withheld from the online payment at booking, and it's
+ * non-refundable. Something is owed here only when the online payment couldn't
+ * cover it: pay-in-person bookings, deposits smaller than the 5%, extras added at
+ * the visit, or a refund that took back money the 5% was withheld from.
+ * Split (older bookings): 5% of what was paid online is withheld; the 5% of the
+ * part paid in person is owed here once the booking completes.
  *
- *   1. Booking completed (by the business, or auto-completed 48h after it ends)
- *      → business_commission_charges row: 5% of servicePrice − amountPaid online.
+ *   1. Booking closes (completed — by the business or auto-completed 48h after it
+ *      ends — or, for full cut, cancelled / no-show / refunded)
+ *      → business_commission_charges row (see commissionOwedCents).
  *   2. Collected oldest-first by, in order of preference:
  *        a. deduction from the owner's next business-booking payout
  *           (reserveForPayoutOffset, called from cron/reserveRelease.js)
@@ -24,7 +28,7 @@
  */
 import httpStatus from 'http-status';
 import Stripe from 'stripe';
-import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import {
   businesses,
@@ -43,6 +47,8 @@ import { sendMail } from './mail.service.js';
 import { createNotification } from './notification.service.js';
 import { emailWrapper, ctaRow, ctaButton, appUrl, infoBox } from '../templates/emailLayout.js';
 import { getRedirectUrls, isNativePlatform } from '../utils/redirect-urls.js';
+import { businessDefaultCard } from './businessAccount.service.js';
+import { UserSpendService } from './userSpend.service.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://briteside.app';
@@ -75,6 +81,47 @@ export function inPersonCents(booking) {
 export function inPersonCommissionCents(booking) {
   return calculateBusinessCommissionCents(inPersonCents(booking));
 }
+
+/**
+ * Full-cut bookings (commissionUpfront): the whole 5% the booking costs the business,
+ * by how it ended. Non-refundable — a refund never lowers it.
+ *   completed                       → 5% of price + extras
+ *   pending / confirmed             → 5% of price (what it will be; used for display)
+ *   cancelled / no_show             → 5% of price, if anything was paid online
+ *                                     (a pay-in-person booking that never happened owes nothing)
+ *   declined / expired / unpaid     → 0 (the business never accepted it; everything is refunded)
+ */
+export function upfrontCommissionTotalCents(booking) {
+  const price = booking.servicePriceCents ?? 0;
+  switch (booking.status) {
+    case 'completed':
+      return calculateBusinessCommissionCents(price + (booking.extraChargesCents ?? 0));
+    case 'pending':
+    case 'confirmed':
+      return calculateBusinessCommissionCents(price);
+    case 'cancelled':
+    case 'no_show':
+      return (booking.amountPaidCents ?? 0) > 0 ? calculateBusinessCommissionCents(price) : 0;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Commission the business owes on top of what Briteside withheld from the online payment.
+ *   split (older bookings):  5% of the in-person part, once completed
+ *   full cut:                the booking's full 5% minus what was withheld (usually 0 — only a
+ *                            deposit smaller than the 5%, extras, pay-in-person, or a refund
+ *                            that ate into the withheld 5% leave something owed)
+ */
+export function commissionOwedCents(booking) {
+  if (!booking.commissionUpfront) {
+    return booking.status === 'completed' ? inPersonCommissionCents(booking) : 0;
+  }
+  return Math.max(0, upfrontCommissionTotalCents(booking) - (booking.platformCommissionCents ?? 0));
+}
+
+const OWED_STATUSES = ['completed', 'cancelled', 'no_show'];
 
 /** Run fn(tx) holding the per-owner commission lock. */
 function withOwnerLock(ownerId, fn) {
@@ -156,18 +203,60 @@ function emailOwner(owner, subject, headline, rows, cta = 'Open Earnings') {
   );
 }
 
-function notifyOwner(ownerId, title, message) {
+/** The business the owner runs (one per owner), or null. */
+async function ownedBusiness(ownerId) {
+  return db.query.businesses.findFirst({
+    where: and(eq(businesses.ownerId, ownerId), isNull(businesses.deletedAt)),
+  });
+}
+
+async function notifyOwner(ownerId, title, message) {
+  const business = await ownedBusiness(ownerId).catch(() => null);
   return createNotification({
     userId: ownerId,
     title,
     message,
     type: 'business_commission',
     redirectTo: '/business/dashboard?tab=earnings',
+    ...(business ? { metadata: { businessId: business.id } } : {}),
   }).catch(err => logger.error(`[businessCommission] notification failed: ${err.message}`));
 }
 
-/** The owner's saved card: their Plus subscription's default, else the customer default, else any card. */
+/** A paid commission goes in the business's spend log. Never throws. */
+async function recordCommissionSpend(ownerId, collectionId, amountCents, businessId = null) {
+  try {
+    if (!amountCents || amountCents <= 0) return;
+    const id = businessId ?? (await ownedBusiness(ownerId))?.id ?? null;
+    if (!id) return;
+    await UserSpendService.recordSpend({
+      userId: ownerId,
+      businessId: id,
+      spendType: 'business_commission',
+      amountCents,
+      referenceId: collectionId,
+      referenceType: 'business_commission_collection',
+      metadata: { description: '5% commission on bookings paid in person' },
+    });
+  } catch (err) {
+    logger.error(`[businessCommission] spend log failed for ${collectionId}: ${err.message}`);
+  }
+}
+
+/**
+ * The card to charge: the business's own default card (Business → Payment
+ * Methods) first, then the owner's personal one.
+ */
 async function savedCard(ownerId) {
+  const business = await ownedBusiness(ownerId).catch(() => null);
+  if (business) {
+    const card = await businessDefaultCard(business).catch(() => null);
+    if (card) return card;
+  }
+  return personalSavedCard(ownerId);
+}
+
+/** The owner's saved card: their Plus subscription's default, else the customer default, else any card. */
+async function personalSavedCard(ownerId) {
   const customer = await db.query.stripeCustomers.findFirst({ where: eq(stripeCustomers.userId, ownerId) });
   if (!customer) return null;
   const customerId = customer.stripeCustomerId;
@@ -199,7 +288,45 @@ async function savedCard(ownerId) {
 export class BusinessCommissionService {
   // ── Creating what's owed ───────────────────────────────────────────────────
 
-  /** Call when a booking becomes 'completed'. Idempotent (one charge per booking). */
+  /**
+   * Call whenever a booking closes (completed / no-show / cancelled) or is refunded.
+   * Split bookings: records the in-person 5% once completed (unchanged behaviour).
+   * Full-cut bookings: sets the booking's charge to what's still owed. Idempotent
+   * (one charge per booking); the amount only ever goes up to match, never below
+   * what was already collected, and a waived charge stays waived.
+   */
+  static async syncForBooking(booking, business) {
+    if (!booking.commissionUpfront) {
+      return booking.status === 'completed' ? this.recordForCompletedBooking(booking, business) : null;
+    }
+    if (!OWED_STATUSES.includes(booking.status)) return null;
+    const amount = commissionOwedCents(booking);
+    if (amount <= 0) return null;
+    const base = inPersonCents(booking);
+    const c = businessCommissionCharges;
+    const [row] = await db
+      .insert(c)
+      .values({
+        businessId: booking.businessId,
+        ownerId: business.ownerId,
+        bookingId: booking.id,
+        inPersonCents: base,
+        amountCents: amount,
+      })
+      .onConflictDoUpdate({
+        target: c.bookingId,
+        set: {
+          amountCents: sql`greatest(${amount}, ${c.collectedCents})`,
+          inPersonCents: base,
+          status: sql`case when ${c.status} = 'waived' then 'waived' when ${amount} > ${c.collectedCents} then 'owed' else 'collected' end`,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return row ?? null;
+  }
+
+  /** Split bookings: call when a booking becomes 'completed'. Idempotent (one charge per booking). */
   static async recordForCompletedBooking(booking, business) {
     const base = inPersonCents(booking);
     const amount = calculateBusinessCommissionCents(base);
@@ -219,26 +346,45 @@ export class BusinessCommissionService {
   }
 
   /**
-   * Safety net for the cron: completed bookings with an in-person part that
-   * have no charge yet (e.g. recording failed when they were completed).
+   * Safety net for the cron: closed bookings that owe commission but have no
+   * charge yet (e.g. recording failed when they were completed / refunded).
    */
   static async backfillMissingCharges(limit = 200) {
+    const b = businessBookings;
     const rows = await db
-      .select({ booking: businessBookings, ownerId: businesses.ownerId })
-      .from(businessBookings)
-      .innerJoin(businesses, eq(businesses.id, businessBookings.businessId))
-      .leftJoin(businessCommissionCharges, eq(businessCommissionCharges.bookingId, businessBookings.id))
+      .select({ booking: b, ownerId: businesses.ownerId })
+      .from(b)
+      .innerJoin(businesses, eq(businesses.id, b.businessId))
+      .leftJoin(businessCommissionCharges, eq(businessCommissionCharges.bookingId, b.id))
       .where(
         and(
-          eq(businessBookings.status, 'completed'),
-          sql`${businessBookings.servicePriceCents} + ${businessBookings.extraChargesCents} > ${businessBookings.amountPaidCents}`,
-          isNull(businessCommissionCharges.id)
+          isNull(businessCommissionCharges.id),
+          or(
+            // split: completed with an in-person part
+            and(
+              eq(b.commissionUpfront, false),
+              eq(b.status, 'completed'),
+              sql`${b.servicePriceCents} + ${b.extraChargesCents} > ${b.amountPaidCents}`
+            ),
+            // full cut: the booking's 5% is more than what was withheld online
+            and(
+              eq(b.commissionUpfront, true),
+              eq(b.status, 'completed'),
+              sql`round((${b.servicePriceCents} + ${b.extraChargesCents}) * 0.05) > ${b.platformCommissionCents}`
+            ),
+            and(
+              eq(b.commissionUpfront, true),
+              inArray(b.status, ['cancelled', 'no_show']),
+              sql`${b.amountPaidCents} > 0`,
+              sql`round(${b.servicePriceCents} * 0.05) > ${b.platformCommissionCents}`
+            )
+          )
         )
       )
       .limit(limit);
     let created = 0;
     for (const { booking, ownerId } of rows) {
-      if (await this.recordForCompletedBooking(booking, { ownerId })) created++;
+      if (await this.syncForBooking(booking, { ownerId })) created++;
     }
     return { created };
   }
@@ -436,6 +582,7 @@ export class BusinessCommissionService {
       .update(businessCommissionCollections)
       .set({ status: 'succeeded', stripePaymentIntentId: intent.id })
       .where(eq(businessCommissionCollections.id, reserved.id));
+    await recordCommissionSpend(ownerId, reserved.id, reserved.amountCents);
     emailOwner(owner, 'Your Briteside commission receipt', 'Commission paid', [
       ['Amount', money(reserved.amountCents)],
       ['For', `5% commission on ${reserved.allocations.length} booking(s) your customers paid in person`],
@@ -608,6 +755,7 @@ export class BusinessCommissionService {
       return { total };
     });
     if (!result) return;
+    await recordCommissionSpend(ownerId, collectionId, result.total, businessId || null);
 
     // Something else (a payout deduction) covered part of it meanwhile — give that back
     const excess = paid - result.total;

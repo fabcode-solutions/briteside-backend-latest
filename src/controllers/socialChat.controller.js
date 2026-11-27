@@ -384,6 +384,8 @@ export const sharePostToUsers = catchAsync(async (req, res) => {
           ? 'social:story:shared'
           : contentType === 'event'
             ? 'social:event:shared'
+            : contentType === 'business'
+            ? 'social:business:shared'
             : contentType === 'profile'
             ? 'social:profile:shared'
             : 'social:post:shared';
@@ -394,6 +396,8 @@ export const sharePostToUsers = catchAsync(async (req, res) => {
           ? 'shared a story'
           : contentType === 'event'
             ? 'shared an event'
+            : contentType === 'business'
+            ? 'shared a business'
             : contentType === 'profile'
             ? 'shared a profile'
             : 'shared a post';
@@ -404,6 +408,8 @@ export const sharePostToUsers = catchAsync(async (req, res) => {
           ? 'story_share'
           : contentType === 'event'
             ? 'event_share'
+            : contentType === 'business'
+            ? 'business_share'
             : contentType === 'profile'
             ? 'profile_share'
             : 'post_share';
@@ -414,6 +420,8 @@ export const sharePostToUsers = catchAsync(async (req, res) => {
           ? 'Shared a story with you'
           : contentType === 'event'
             ? 'Shared an event with you'
+            : contentType === 'business'
+            ? 'Shared a business with you'
             : contentType === 'profile'
             ? 'Shared a profile with you'
             : 'Shared a post with you';

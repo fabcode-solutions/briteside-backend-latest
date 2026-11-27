@@ -40,6 +40,7 @@ import {
   ne,
   avg,
 } from 'drizzle-orm';
+import { attachBusinessHostsToEvents } from './social/businessAuthor.js';
 import { generateEventCode, generateTicketCode } from '../utils/code-generator.js';
 import QRCode from 'qrcode';
 import slugify from 'slugify';
@@ -164,7 +165,11 @@ export class EventService {
     }
   }
 
-  static async createEvent(organizerId, eventData) {
+  /**
+   * `business` (already access-checked by the caller): host the event as that
+   * business — it's shown as the host; the organizer still runs tickets/payouts.
+   */
+  static async createEvent(organizerId, eventData, { business = null } = {}) {
     let createdTopicArn = null;
     try {
       const eventCode = generateEventCode();
@@ -247,7 +252,8 @@ export class EventService {
         platformFeePercentage,
         isRefundable: rest.isRefundable !== undefined ? rest.isRefundable : true,
         refundCutoffDays: rest.refundCutoffDays || 3,
-        hostedBy: rest.hostedBy,
+        hostedBy: business ? business.name : rest.hostedBy,
+        businessId: business?.id ?? null,
         groupId: rest.groupId || null,
         refundPolicy: rest.refundPolicy,
         termsConditions: rest.termsConditions,
@@ -1054,6 +1060,7 @@ export class EventService {
 
       await MediaModerationService.attachEventModerationStatuses(eventsWithPrices);
 
+      await attachBusinessHostsToEvents(eventsWithPrices);
       const discoverFilterEnabled = await TextModerationService.getFilterEnabled(userId);
       await TextModerationService.maskFlaggedText(eventsWithPrices, {
         entityType: TEXT_ENTITY.EVENT,
@@ -1070,6 +1077,32 @@ export class EventService {
       throw new ApiError(500, 'Failed to get discover events');
     }
   }
+  /** A business page's upcoming published events (hosted as the business). */
+  static async getBusinessEvents(businessId, { limit = 20 } = {}) {
+    const rows = await db.query.events.findMany({
+      where: and(
+        eq(events.businessId, businessId),
+        eq(events.eventStatus, 'published'),
+        gte(events.endDate, new Date())
+      ),
+      columns: {
+        id: true,
+        title: true,
+        slug: true,
+        coverImages: true,
+        startDate: true,
+        endDate: true,
+        eventMode: true,
+        isFree: true,
+      },
+      with: { venue: { columns: { name: true, city: true } } },
+      orderBy: asc(events.startDate),
+      limit: Number(limit),
+    });
+    await MediaModerationService.attachEventModerationStatuses(rows);
+    return rows;
+  }
+
   // Helper to keep code clean
   static emptyPaginationResponse(page, limit) {
     return {
@@ -1331,6 +1364,14 @@ export class EventService {
       if (organizerId && signedUp === undefined) {
         let organizerConditions = [eq(events.organizerId, organizerId)];
 
+        // Each account manages its own events: 'none' = the person's own,
+        // a business id = the events hosted as that business. Omitted = all.
+        if (filters.businessId === 'none') {
+          organizerConditions.push(isNull(events.businessId));
+        } else if (typeof filters.businessId === 'string' && /^[0-9a-f-]{36}$/i.test(filters.businessId)) {
+          organizerConditions.push(eq(events.businessId, filters.businessId));
+        }
+
         if (status !== undefined && status !== null) {
           organizerConditions.push(eq(events.eventStatus, status));
         }
@@ -1514,6 +1555,7 @@ export class EventService {
 
       await MediaModerationService.attachEventModerationStatuses(eventsWithPrices);
 
+      await attachBusinessHostsToEvents(eventsWithPrices);
       const myEventsFilterEnabled = await TextModerationService.getFilterEnabled(userId);
       await TextModerationService.maskFlaggedText(eventsWithPrices, {
         entityType: TEXT_ENTITY.EVENT,
@@ -1798,7 +1840,7 @@ export class EventService {
         });
       }
 
-      return {
+      const result = {
         ...event,
         expired: dayjs(event.endDate).isBefore(dayjs()),
         tickets: ticketsWithSessionInventory,
@@ -1810,6 +1852,9 @@ export class EventService {
         activePreset: event.preset ?? null,
         organizer: event.organizer ? { ...event.organizer, ...organizerRating } : event.organizer,
       };
+      // Hosted as a business → the business is shown as the host
+      await attachBusinessHostsToEvents(result);
+      return result;
     } catch (error) {
       if (error instanceof ApiError) {
         throw error;

@@ -8,6 +8,11 @@ const updateNotificationSchema = z.object({
   isSeen: z.boolean().optional(),
 });
 
+// Optional: just these notifications (one account's bell — personal or business)
+const markAsReadSchema = z.object({
+  ids: z.array(z.string().uuid()).max(1000).optional(),
+});
+
 const updateSettingsSchema = z.object({
   eventUpdates: z.boolean().optional(),
   purchaseConfirmation: z.boolean().optional(),
@@ -39,7 +44,8 @@ export const markAsRead = catchAsync(async (req, res) => {
     throw new ApiError(400, 'User ID is required');
   }
 
-  const notifications = await notificationService.markAsRead(userId);
+  const { ids } = markAsReadSchema.parse(req.body ?? {});
+  const notifications = await notificationService.markAsRead(userId, ids);
 
   res.json({
     success: true,

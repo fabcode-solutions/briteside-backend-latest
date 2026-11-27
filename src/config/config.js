@@ -73,6 +73,10 @@ const EnvVariables = z.object({
   // ISO date. Once the App build that tags purchases with the buyer is out,
   // purchases made after this without that tag are refused.
   IAP_ACCOUNT_TOKEN_REQUIRED_FROM: z.string().datetime({ offset: true }).optional(),
+  // Business video cover ($5/month auto-renewing subscription) — the product
+  // id set up in App Store Connect / Play Console (same id on both by default)
+  APPLE_VIDEO_COVER_PRODUCT_ID: z.string().optional().default('business_video_cover_monthly'),
+  GOOGLE_VIDEO_COVER_PRODUCT_ID: z.string().optional().default('business_video_cover_monthly'),
 
   // Firebase Cloud Messaging — service-account JSON for push notifications (optional)
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
@@ -239,6 +243,10 @@ const env = {
     accountTokenRequiredFrom: envVars.IAP_ACCOUNT_TOKEN_REQUIRED_FROM
       ? new Date(envVars.IAP_ACCOUNT_TOKEN_REQUIRED_FROM)
       : null,
+    videoCoverProductIds: {
+      apple: envVars.APPLE_VIDEO_COVER_PRODUCT_ID,
+      google: envVars.GOOGLE_VIDEO_COVER_PRODUCT_ID,
+    },
   },
   firebase: {
     serviceAccountJson: envVars.FIREBASE_SERVICE_ACCOUNT_JSON,

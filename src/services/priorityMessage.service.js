@@ -45,6 +45,13 @@ import {
   applyTaxLiabilityToReserve,
 } from '../lib/tax/serviceCheckoutTax.js';
 import { normalizeStateToAbbr } from '../lib/tax/usStates.js';
+import { BusinessInboxService } from './businessInbox.service.js';
+import { businesses } from '../db/schema/businesses.js';
+import { businessConversations } from '../db/schema/businessInbox.js';
+import { resolveBusinessAccess } from '../middlewares/businessAccess.middleware.js';
+import { BUSINESS_PERMISSIONS } from '../config/business-permissions.js';
+import { hideContactInfo } from '../utils/contactInfo.js';
+import { InquiryContactService } from './inquiryContact.service.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 
@@ -100,7 +107,7 @@ export class PriorityMessageService {
    */
   static async _createPendingPayment(
     senderId,
-    { talentProfileId, subject, messageContent, messages, contentExtended, attachmentIds }
+    { talentProfileId, subject, messageContent, messages, contentExtended, attachmentIds, business }
   ) {
     if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
 
@@ -111,6 +118,7 @@ export class PriorityMessageService {
       messages,
       contentExtended,
       attachmentIds,
+      business,
     });
   }
 
@@ -121,9 +129,14 @@ export class PriorityMessageService {
    *   textMessageCount, totalExtensionUnits, totalUnits, totalAttachments,
    *   totalAttachmentCents, baseCents, platformAndServiceFeeCents, chargedCents }}
    */
+  /**
+   * `business` (optional, already access-checked by the caller — see
+   * assertCanSendAsBusiness): sent as that business. senderId still pays; the
+   * message is delivered into the business's paid thread with the talent.
+   */
   static async _prepareMessagePayment(
     senderId,
-    { talentProfileId, subject, messageContent, messages, contentExtended, attachmentIds }
+    { talentProfileId, subject, messageContent, messages, contentExtended, attachmentIds, business = null }
   ) {
     const deriveSubject = text => {
       const trimmed = (text || '').trim();
@@ -269,13 +282,19 @@ export class PriorityMessageService {
       throw new ApiError(403, 'This talent is not currently accepting priority messages');
     }
 
+    // As a business: never to someone on its own team, never across a block
+    if (business) await BusinessInboxService.assertCanReach(business, profile.userId);
+
     // One outstanding paid message per talent at a time — the sender must wait
     // for the talent's reply (status → 'replied') or the 72h auto-refund
     // (status → 'refunded'/'partial_refunded') before paying for another.
-    if (await this.hasPendingMessage(senderId, talentProfileId)) {
+    // A business counts as one sender, whichever team member paid.
+    if (await this.hasPendingMessage(senderId, talentProfileId, { businessId: business?.id })) {
       throw new ApiError(
         403,
-        'You already have a message pending reply with this talent. Wait for their reply or for it to expire before sending another.'
+        business
+          ? `${business.name} already has a message pending reply with this talent. Wait for their reply or for it to expire before sending another.`
+          : 'You already have a message pending reply with this talent. Wait for their reply or for it to expire before sending another.'
       );
     }
 
@@ -348,6 +367,7 @@ export class PriorityMessageService {
           senderId,
           talentProfileId,
           talentUserId: profile.userId,
+          businessId: business?.id ?? null,
           messageCount: msgList.length,
           amountCents: chargedCents,
           baseCents,
@@ -549,9 +569,26 @@ export class PriorityMessageService {
     ];
   }
 
+  /**
+   * Sending as a business: the business `user` may send paid messages for —
+   * owner, or a team member who answers its inbox ('inbox.manage'). Returns it.
+   */
+  static async assertCanSendAsBusiness(user, businessId) {
+    const business = await db.query.businesses.findFirst({
+      where: and(eq(businesses.id, businessId), isNull(businesses.deletedAt)),
+      columns: { id: true, name: true, slug: true, logoUrl: true, ownerId: true },
+    });
+    const access = business ? await resolveBusinessAccess(business, user) : null;
+    if (!access) throw new ApiError(404, 'Business not found');
+    if (!access.permissions.includes(BUSINESS_PERMISSIONS.INBOX_MANAGE)) {
+      throw new ApiError(403, 'You do not have permission to message as this business');
+    }
+    return business;
+  }
+
   static async createCheckout(
     senderId,
-    { talentProfileId, subject, messageContent, messages, platform, contentExtended, attachmentIds }
+    { talentProfileId, subject, messageContent, messages, platform, contentExtended, attachmentIds, business }
   ) {
     if (!stripe) throw new ApiError(503, 'Payment processing is not configured');
 
@@ -579,6 +616,7 @@ export class PriorityMessageService {
       messages,
       contentExtended,
       attachmentIds,
+      business,
     });
 
     // Reusing the sender's canonical Stripe customer (shared with
@@ -1248,7 +1286,18 @@ export class PriorityMessageService {
     });
     if (!payment || payment.status === 'paid') return null;
     try {
-      const conversation = await SocialChatService.getOrCreateConversation(senderId, talentUserId);
+      // Sent as a business → its paid thread (business inbox), never a
+      // personal DM from the team member who paid
+      const business = payment.businessId
+        ? await db.query.businesses.findFirst({
+            where: eq(businesses.id, payment.businessId),
+            columns: { id: true, name: true, slug: true, logoUrl: true, ownerId: true },
+          })
+        : null;
+      if (payment.businessId && !business) throw new Error(`business ${payment.businessId} not found`);
+      const conversation = business
+        ? null
+        : await SocialChatService.getOrCreateConversation(senderId, talentUserId);
 
       // Pull the drafted messages from the items table — this is what was
       // missing. payment.messages no longer exists.
@@ -1297,8 +1346,29 @@ export class PriorityMessageService {
       }));
 
       const deliveredMessages = [];
+      let businessDelivery = null;
 
-      for (const item of items) {
+      if (business) {
+        businessDelivery = await BusinessInboxService.deliverPriority({
+          business,
+          talentUserId,
+          senderId,
+          payment,
+          items,
+          attachments: priorityAttachmentsPayload,
+        });
+        const deliveredAt = new Date();
+        for (const [idx, item] of items.entries()) {
+          const row = businessDelivery.rows[idx];
+          await db
+            .update(priorityMessageItems)
+            .set({ businessMessageId: row.id, deliveredAt })
+            .where(eq(priorityMessageItems.id, item.id));
+          deliveredMessages.push(row.id);
+        }
+      }
+
+      for (const item of business ? [] : items) {
         // Content was already moderated once in createCheckout(), before
         // Stripe payment. This delivery runs from the payment-success path
         // (webhook) — re-checking here would double-spend quota and, if it
@@ -1363,7 +1433,8 @@ export class PriorityMessageService {
         .set({
           status: 'paid',
           ...paidFields,
-          conversationId: conversation.id,
+          conversationId: conversation?.id ?? null,
+          businessConversationId: businessDelivery?.conversation.id ?? null,
           paidAt: new Date(),
           reserveAmountCents,
           taxAmountCents,
@@ -1392,6 +1463,8 @@ export class PriorityMessageService {
       // Record spend — fire-and-forget
       UserSpendService.recordSpend({
         userId: payment.senderId,
+        // Sent as a business → that business's spend log
+        businessId: payment.businessId ?? null,
         spendType: 'priority_message',
         amountCents: payment.amountCents,
         referenceId: payment.id,
@@ -1406,14 +1479,61 @@ export class PriorityMessageService {
         paidAt: new Date(),
       }).catch(err => console.error('[UserSpend] priority_message record failed:', err.message));
 
+      const amountDollars = (payment.baseCents / 100).toFixed(2);
+      const countLabel = items.length > 1 ? ` (${items.length} messages)` : '';
+
+      if (business) {
+        // Shown as the business — its name and logo, never the team member
+        const businessConversationId = businessDelivery.conversation.id;
+        await createNotification({
+          userId: talentUserId,
+          title: `⭐ Priority message from ${business.name}`,
+          message: `${business.name} sent you a $${amountDollars} priority message${countLabel}. Reply within 72 hours to earn it.`,
+          type: 'chat_message',
+          redirectTo: `/messages/businesses?conversationId=${businessConversationId}`,
+          relatedId: deliveredMessages[0],
+          metadata: {
+            isPriority: true,
+            businessInbox: true,
+            businessId: business.id,
+            paymentId: payment.id,
+            conversationId: businessConversationId,
+            messageIds: deliveredMessages,
+            amountCents: payment.amountCents,
+            organizerLogoUrl: business.logoUrl ?? null,
+          },
+        }).catch(err => console.error('[PriorityMessage] talent notify failed:', err.message));
+
+        if (io) {
+          const businessConversation = { ...businessDelivery.conversation, kind: 'paid' };
+          for (const [idx, customerMessage] of businessDelivery.customerMessages.entries()) {
+            await BusinessInboxService.broadcastMessage(io, businessConversation, business, 'business', {
+              customerMessage,
+              businessMessage: businessDelivery.businessMessages[idx],
+            });
+          }
+          const { emitSocialChat } = await import('../socket/emitter.js');
+          // Lets the talent's Priority tab refresh its list
+          emitSocialChat(io, `user:${talentUserId}`, 'priority:message:received', {
+            messageId: deliveredMessages[0],
+            businessConversationId,
+            businessId: business.id,
+            amount: Math.round(payment.baseCents / 100),
+            amountCents: payment.baseCents,
+            subject: items[0]?.subject ?? null,
+            paidAt: new Date().toISOString(),
+            talentProfileId: payment.talentProfileId ?? null,
+          });
+        }
+        return { conversationId: null, businessConversationId, messageIds: deliveredMessages };
+      }
+
       // Notify talent once (not per message)
       const sender = await db.query.users.findFirst({
         where: eq(users.id, senderId),
         columns: { firstName: true, lastName: true },
       });
       const senderName = sender ? `${sender.firstName} ${sender.lastName}` : 'Someone';
-      const amountDollars = (payment.baseCents / 100).toFixed(2);
-      const countLabel = items.length > 1 ? ` (${items.length} messages)` : '';
 
       // Unlike every other createNotification() call in this file, this one
       // wasn't wrapped in .catch() — if it ever threw (e.g. a first-time
@@ -1489,7 +1609,7 @@ export class PriorityMessageService {
     const items = await db.query.priorityMessageItems.findMany({
       where: eq(priorityMessageItems.paymentId, payment.id),
       orderBy: (i, { asc }) => [asc(i.position)],
-      columns: { messageId: true },
+      columns: { messageId: true, businessMessageId: true },
     });
 
     // The webhook is what flips `status` to 'paid', and it can land a few
@@ -1512,7 +1632,10 @@ export class PriorityMessageService {
       status: payment.status,
       paymentConfirmed,
       conversationId: payment.conversationId,
-      messageIds: items.map(i => i.messageId).filter(Boolean),
+      // Sent as a business: its paid thread (Business inbox → Paid)
+      businessId: payment.businessId ?? null,
+      businessConversationId: payment.businessConversationId ?? null,
+      messageIds: items.map(i => i.messageId ?? i.businessMessageId).filter(Boolean),
       paidAt: payment.paidAt,
       amountCents: payment.amountCents,
       talentProfileId: payment.talentProfileId,
@@ -1661,6 +1784,8 @@ export class PriorityMessageService {
         paidAt: priorityMessagePayments.paidAt,
         conversationId: priorityMessagePayments.conversationId,
         senderId: priorityMessagePayments.senderId,
+        businessId: priorityMessagePayments.businessId,
+        businessConversationId: priorityMessagePayments.businessConversationId,
       })
       .from(priorityMessageItems)
       .innerJoin(
@@ -1683,7 +1808,45 @@ export class PriorityMessageService {
       .limit(limit)
       .offset(offset);
 
-    const senderIds = [...new Set(rows.map(r => r.senderId).filter(Boolean))];
+    // Sent as a business: the business is the sender (never the team member
+    // who paid), it's answered in the business thread, and contact details
+    // stay hidden until the talent has booked the business — like the thread.
+    const businessIds = [...new Set(rows.map(r => r.businessId).filter(Boolean))];
+    const businessRows = businessIds.length
+      ? await db.query.businesses.findMany({
+          where: inArray(businesses.id, businessIds),
+          columns: { id: true, name: true, slug: true, logoUrl: true },
+        })
+      : [];
+    const businessMap = new Map(businessRows.map(b => [b.id, b]));
+    const unlockedBusinesses = new Set();
+    for (const id of businessIds) {
+      if (await InquiryContactService.isUnlockedForBusiness(id, talentUserId)) unlockedBusinesses.add(id);
+    }
+    const businessThreadIds = [...new Set(rows.map(r => r.businessConversationId).filter(Boolean))];
+    const businessThreads = businessThreadIds.length
+      ? await db.query.businessConversations.findMany({
+          where: inArray(businessConversations.id, businessThreadIds),
+          columns: { id: true, customerLastReadAt: true },
+        })
+      : [];
+    const threadReadAt = new Map(businessThreads.map(t => [t.id, t.customerLastReadAt]));
+    for (const row of rows) {
+      if (!row.businessId || unlockedBusinesses.has(row.businessId)) continue;
+      row.messageContent = hideContactInfo(row.messageContent).text;
+      row.subject = hideContactInfo(row.subject).text;
+    }
+    const businessSender = b => ({
+      id: b.id,
+      firstName: b.name,
+      lastName: '',
+      username: b.slug,
+      image: b.logoUrl ?? null,
+      isBusiness: true,
+      businessId: b.id,
+    });
+
+    const senderIds = [...new Set(rows.filter(r => !r.businessId).map(r => r.senderId).filter(Boolean))];
     const senders = senderIds.length
       ? await db.query.users.findMany({
           where: inArray(users.id, senderIds),
@@ -1773,11 +1936,23 @@ export class PriorityMessageService {
       paidAt: row.paidAt,
       conversationId: row.conversationId,
       messageId: row.messageId,
-      isSeen: row.messageId ? (seenMap.get(row.messageId) ?? true) : true,
+      // Business-sent: open /messages/businesses?conversationId=<this> to reply
+      businessId: row.businessId ?? null,
+      businessConversationId: row.businessConversationId ?? null,
+      isSeen: row.businessConversationId
+        ? !!threadReadAt.get(row.businessConversationId) &&
+          new Date(threadReadAt.get(row.businessConversationId)) >= new Date(row.paidAt)
+        : row.messageId
+          ? (seenMap.get(row.messageId) ?? true)
+          : true,
       hasReplied: !!row.repliedAt,
       status: row.itemStatus,
       replyCount: row.replyCount,
-      sender: senderMap.get(row.senderId) ?? null,
+      sender: row.businessId
+        ? businessMap.has(row.businessId)
+          ? businessSender(businessMap.get(row.businessId))
+          : null
+        : (senderMap.get(row.senderId) ?? null),
       attachments: attachmentsByPayment.get(row.paymentId) ?? [],
     }));
 
@@ -2017,15 +2192,31 @@ export class PriorityMessageService {
    * @param {string} talentUserId
    */
   // ── releaseOnReply — per-item tracking, not per-payment ───────────────────
+  /** The talent replied in a business's paid thread (business inbox). */
+  static releaseOnBusinessReply(businessConversationId, talentUserId, newMessageId = null) {
+    return this.releaseOnReply(businessConversationId, talentUserId, null, newMessageId, { business: true });
+  }
+
+  /**
+   * `business: true` — conversationId is a business paid thread and the
+   * message ids are business_messages (payments sent as a business).
+   */
   static async releaseOnReply(
     conversationId,
     talentUserId,
     replyToMessageId = null,
-    newMessageId = null
+    newMessageId = null,
+    { business = false } = {}
   ) {
+    const conversationCol = business
+      ? priorityMessagePayments.businessConversationId
+      : priorityMessagePayments.conversationId;
+    const messageCol = business ? priorityMessageItems.businessMessageId : priorityMessageItems.messageId;
+    const replyField = business ? 'businessReplyMessageId' : 'replyMessageId';
+
     const outstanding = await db.query.priorityMessagePayments.findMany({
       where: and(
-        eq(priorityMessagePayments.conversationId, conversationId),
+        eq(conversationCol, conversationId),
         eq(priorityMessagePayments.talentUserId, talentUserId),
         inArray(priorityMessagePayments.status, ['paid', 'partial'])
       ),
@@ -2043,7 +2234,7 @@ export class PriorityMessageService {
       itemToRelease = await db.query.priorityMessageItems.findFirst({
         where: and(
           inArray(priorityMessageItems.paymentId, paymentIds),
-          eq(priorityMessageItems.messageId, replyToMessageId)
+          eq(messageCol, replyToMessageId)
         ),
         columns: { id: true, paymentId: true, repliedAt: true, deliveredAt: true },
       });
@@ -2055,10 +2246,7 @@ export class PriorityMessageService {
       // a plain (non-quoted) reply should land on something it can still
       // earn for, when there's a choice.
       const candidates = await db.query.priorityMessageItems.findMany({
-        where: and(
-          inArray(priorityMessageItems.paymentId, paymentIds),
-          sql`${priorityMessageItems.messageId} IS NOT NULL`
-        ),
+        where: and(inArray(priorityMessageItems.paymentId, paymentIds), sql`${messageCol} IS NOT NULL`),
         orderBy: (i, { asc }) => [asc(i.position)],
         columns: { id: true, paymentId: true, repliedAt: true, deliveredAt: true },
       });
@@ -2083,7 +2271,7 @@ export class PriorityMessageService {
         .update(priorityMessageItems)
         .set({
           replyCount: sql`${priorityMessageItems.replyCount} + 1`,
-          replyMessageId: newMessageId ?? null,
+          [replyField]: newMessageId ?? null,
         })
         .where(eq(priorityMessageItems.id, itemToRelease.id));
       return { released: 0, replyCountIncremented: true };
@@ -2103,7 +2291,7 @@ export class PriorityMessageService {
         .update(priorityMessageItems)
         .set({
           replyCount: sql`${priorityMessageItems.replyCount} + 1`,
-          replyMessageId: newMessageId ?? null,
+          [replyField]: newMessageId ?? null,
           status: 'expired',
         })
         .where(eq(priorityMessageItems.id, itemToRelease.id));
@@ -2115,7 +2303,7 @@ export class PriorityMessageService {
       .update(priorityMessageItems)
       .set({
         replyCount: sql`${priorityMessageItems.replyCount} + 1`,
-        replyMessageId: newMessageId ?? null,
+        [replyField]: newMessageId ?? null,
         repliedAt: new Date(),
         status: 'replied',
       })
@@ -2126,7 +2314,7 @@ export class PriorityMessageService {
       where: and(
         eq(priorityMessageItems.paymentId, itemToRelease.paymentId),
         sql`${priorityMessageItems.repliedAt} IS NULL`,
-        sql`${priorityMessageItems.messageId} IS NOT NULL`
+        sql`${messageCol} IS NOT NULL`
       ),
       columns: { id: true },
     });
@@ -2676,10 +2864,14 @@ export class PriorityMessageService {
    * "Send Message" click can warn the sender before they fill out the whole
    * form, instead of only failing at the very end.
    */
-  static async hasPendingMessage(senderId, talentProfileId) {
+  static async hasPendingMessage(senderId, talentProfileId, { businessId = null } = {}) {
     const pendingPayment = await db.query.priorityMessagePayments.findFirst({
       where: and(
-        eq(priorityMessagePayments.senderId, senderId),
+        // As a business: any of its team's payments counts; personally: only
+        // the person's own (not ones they paid for a business)
+        businessId
+          ? eq(priorityMessagePayments.businessId, businessId)
+          : and(eq(priorityMessagePayments.senderId, senderId), isNull(priorityMessagePayments.businessId)),
         eq(priorityMessagePayments.talentProfileId, talentProfileId),
         inArray(priorityMessagePayments.status, ['paid', 'partial'])
       ),

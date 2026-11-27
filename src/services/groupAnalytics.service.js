@@ -260,12 +260,26 @@ export class GroupAnalyticsService {
 
 
 
+/**
+ * Group Dashboard overview for the account being acted as:
+ *  - filters.businessId = a business id (access-checked by the caller): the
+ *    groups run as that business, whoever on its team created them
+ *  - 'none': the person's own groups (not ones run as a business)
+ *  - omitted: every group the person created (older clients)
+ */
 static async getOrganizerOverview(userId, filters = {}) {
   try {
-    const { dateFrom, dateTo } = filters;
+    const { dateFrom, dateTo, businessId } = filters;
+
+    const scope =
+      businessId && businessId !== 'none'
+        ? eq(groups.businessId, businessId)
+        : businessId === 'none'
+          ? and(eq(groups.createdBy, userId), isNull(groups.businessId))
+          : eq(groups.createdBy, userId);
 
     const organizerGroups = await db.query.groups.findMany({
-      where: and(eq(groups.createdBy, userId), isNull(groups.deletedAt)),
+      where: and(scope, isNull(groups.deletedAt)),
       columns: {
         id: true,
         name: true,

@@ -42,6 +42,11 @@ import {
   isReserveNowLive,
   serializeReserveNow,
 } from './businessReserveNow.service.js';
+import {
+  BusinessVideoCoverService,
+  isVideoCoverLive,
+  serializeVideoCover,
+} from './businessVideoCover.service.js';
 import { serviceDepositCents } from '../utils/businessDeposit.js';
 import {
   listLocations,
@@ -73,6 +78,7 @@ const RESERVED_SLUGS = new Set([
   'onboarding',
   'edit-profile',
   'invitations',
+  'taxes',
   'mine',
   'categories',
   'fees',
@@ -143,13 +149,18 @@ const serializeService = (service, business) => {
   };
 };
 
-const serializeStaff = (staff, { includePrivate = false } = {}) => ({
+/**
+ * `hideProfiles`: the business hid its team (privacy: showStaff = false) —
+ * customers still get what booking needs (name, title, hours, locations),
+ * not the bio / photo / specialties.
+ */
+const serializeStaff = (staff, { includePrivate = false, hideProfiles = false } = {}) => ({
   id: staff.id,
   name: staff.name,
   title: staff.title,
-  bio: staff.bio,
-  avatarUrl: staff.avatarUrl,
-  specialties: staff.specialties,
+  bio: hideProfiles ? null : staff.bio,
+  avatarUrl: hideProfiles ? null : staff.avatarUrl,
+  specialties: hideProfiles ? [] : staff.specialties,
   schedule: staff.schedule,
   acceptingBookings: staff.acceptingBookings,
   bookingConfirmation: staff.bookingConfirmation,
@@ -183,7 +194,16 @@ export const serializeQuestionnaire = (q, { includeInactive = true } = {}) => ({
 
 const serializeBusiness = (
   b,
-  { services = [], staff = [], addOns = [], questionnaires = [], locations = [], includePrivate = false } = {}
+  {
+    services = [],
+    staff = [],
+    addOns = [],
+    questionnaires = [],
+    locations = [],
+    includePrivate = false,
+    // Public reads pass the moderation-checked value (BusinessVideoCoverService.publicVideoUrl)
+    heroVideoUrl,
+  } = {}
 ) => ({
   id: b.id,
   slug: b.slug,
@@ -195,14 +215,18 @@ const serializeBusiness = (
   bio: b.bio,
   logoUrl: b.logoUrl,
   heroUrl: b.heroUrl,
+  // Video cover (≤30s) — shown instead of heroUrl (its poster) while the $5/mo add-on is live
+  heroVideoUrl: heroVideoUrl !== undefined ? heroVideoUrl : isVideoCoverLive(b) ? (b.heroVideoUrl ?? null) : null,
   gallery: b.gallery,
   // { url: [locationId] } — posts shown only at those locations (missing = everywhere)
   galleryLocations: b.galleryLocations ?? {},
   amenities: b.amenities,
   locationType: b.locationType,
   city: b.city,
-  // Mobile: home base address / pin only for the owner; customers get city + service radius
-  ...placeFields(b, includePrivate),
+  // Mobile: home base address / pin only for the owner; customers get city + service radius.
+  // Same for a business that shares its address only once booked (privacy).
+  ...placeFields(b, includePrivate, { hideAddress: !!b.hideAddressUntilBooked }),
+  addressHidden: !includePrivate && (b.locationType === 'mobile' || !!b.hideAddressUntilBooked),
   phone: b.phone,
   email: b.email,
   websiteUrl: b.websiteUrl ?? null,
@@ -229,10 +253,18 @@ const serializeBusiness = (
     freeCancellationHours: b.freeCancellationHours,
     lateCancellationRefundPercent: b.lateCancellationRefundPercent,
   },
-  rating: Number(b.rating ?? 0),
-  reviewCount: b.reviewCount,
+  // Hidden reviews (privacy) hide the rating publicly too
+  rating: !includePrivate && b.showReviews === false ? 0 : Number(b.rating ?? 0),
+  reviewCount: !includePrivate && b.showReviews === false ? 0 : b.reviewCount,
+  // Privacy settings the public page follows (the dashboard edits them via /account/privacy)
+  showReviews: b.showReviews !== false,
+  showStaff: b.showStaff !== false,
+  wallPosts: b.wallPosts ?? 'approval',
+  messagesFrom: b.messagesFrom ?? 'everyone',
   // Branches, primary first (the flat location fields above mirror the primary)
-  locations: locations.map(l => serializeLocation(l, { includePrivate })),
+  locations: locations.map(l =>
+    serializeLocation(l, { includePrivate, hideAddress: !!b.hideAddressUntilBooked })
+  ),
   services: services.map(s =>
     // "Starts from" pricing: the starting price is public, but nothing is booked or
     // charged at it — deposit / fee / per-location terms come with each custom offer
@@ -240,7 +272,7 @@ const serializeBusiness = (
       ? { ...serializeService(s, b), depositCents: null, effectiveDepositCents: null, locationOverrides: [], customerFeeCents: 0 }
       : serializeService(s, b)
   ),
-  staff: staff.map(s => serializeStaff(s, { includePrivate })),
+  staff: staff.map(s => serializeStaff(s, { includePrivate, hideProfiles: !includePrivate && b.showStaff === false })),
   // Public: active only. Dashboard: all (inactive ones are kept but not offered).
   addOns: (includePrivate ? addOns : addOns.filter(a => a.active)).map(serializeAddOn),
   // Public: only ones a service uses, active questions only
@@ -254,6 +286,7 @@ const serializeBusiness = (
         isPublished: b.isPublished,
         inquiryEmail: b.inquiryEmail ?? null,
         reserveNow: serializeReserveNow(b),
+        videoCover: serializeVideoCover(b),
         createdAt: b.createdAt,
         updatedAt: b.updatedAt,
       }
@@ -402,7 +435,8 @@ function sessionColumns(s) {
     sessionType: type,
     capacity: type === 'group' ? s.capacity : null,
     showRemainingSeats: s.showRemainingSeats ?? true,
-    minGuests: type === 'private_group' ? s.minGuests : null,
+    // Minimum guests is no longer set by the business — always 1 (minimumTotalCents is the floor).
+    minGuests: type === 'private_group' ? 1 : null,
     maxGuests: type === 'private_group' ? s.maxGuests : null,
     minimumTotalCents: type === 'private_group' ? (s.minimumTotalCents ?? 0) : null,
   };
@@ -536,6 +570,8 @@ export class BusinessService {
     const conditions = [
       isNull(businesses.deletedAt),
       eq(businesses.isPublished, true),
+      // Privacy: left out of search / the directory (the page stays reachable by link)
+      eq(businesses.discoverable, true),
     ];
     if (category) conditions.push(eq(businesses.category, category));
     const hasPoint = lat != null && lng != null;
@@ -550,17 +586,14 @@ export class BusinessService {
         sql`exists (select 1 from ${businessLocations} l where l.business_id = ${businesses.id} and l.deleted_at is null and l.city ilike ${pattern})`
       );
     })();
-    // Miles from the point to location `l`. A mobile location is measured from
-    // its public (rounded) centre, so search results reveal no more about the
-    // owner's home base than the profile map already does.
+    // Miles from the point to location `l`. A mobile location (or one whose
+    // business shares its address only once booked) is measured from its public
+    // (rounded) centre, so search results reveal no more than the profile map does.
     const milesToL = hasPoint
       ? (() => {
-          const lLat = sql.raw(
-            `(case when l.location_type = 'mobile' then round(l.latitude, 2) else l.latitude end)::float8`
-          );
-          const lLng = sql.raw(
-            `(case when l.location_type = 'mobile' then round(l.longitude, 2) else l.longitude end)::float8`
-          );
+          const rounded = sql`(l.location_type = 'mobile' or ${businesses.hideAddressUntilBooked})`;
+          const lLat = sql`(case when ${rounded} then round(l.latitude, 2) else l.latitude end)::float8`;
+          const lLng = sql`(case when ${rounded} then round(l.longitude, 2) else l.longitude end)::float8`;
           return sql`(3958.8 * acos(least(1, greatest(-1,
             cos(radians(${lat}::float8)) * cos(radians(${lLat})) * cos(radians(${lLng}) - radians(${lng}::float8))
             + sin(radians(${lat}::float8)) * sin(radians(${lLat}))
@@ -631,6 +664,9 @@ export class BusinessService {
         .where(where),
     ]);
 
+    // Video covers visitors may see (add-on live + passed moderation), one lookup for the page
+    const videoUrls = await BusinessVideoCoverService.publicVideoUrls(rows.map(r => r.business)).catch(() => new Map());
+
     return {
       businesses: rows.map(r => ({
         id: r.business.id,
@@ -646,13 +682,17 @@ export class BusinessService {
         distanceMiles: r.distanceMiles,
         logoUrl: r.business.logoUrl,
         heroUrl: r.business.heroUrl,
+        // Video cover (≤30s) — the card plays it instead of heroUrl (its poster)
+        heroVideoUrl: videoUrls.get(r.business.id) ?? null,
         amenities: r.business.amenities,
         hours: r.business.hours,
         timezone: r.business.timezone,
         acceptingBookings: r.business.acceptingBookings,
         defaultPaymentModel: r.business.defaultPaymentModel,
-        rating: Number(r.business.rating ?? 0),
-        reviewCount: r.business.reviewCount,
+        // Hidden reviews (privacy) hide the rating too
+        rating: r.business.showReviews === false ? 0 : Number(r.business.rating ?? 0),
+        reviewCount: r.business.showReviews === false ? 0 : r.business.reviewCount,
+        reviewsHidden: r.business.showReviews === false,
         minPriceCents: r.minPriceCents,
         firstServiceDurationMins: r.firstServiceDurationMins,
         locationCount: Math.max(1, r.locationCount ?? 1),
@@ -672,8 +712,11 @@ export class BusinessService {
   /**
    * Public profile by id, slug or an old @username (the response's slug is the
    * current one, so the page can redirect). 404 when hidden (unpublished / deleted).
+   * viewerId: the signed-in visitor, if any — the owner also sees their own video
+   * cover while moderation is still reviewing it (heroVideoUnderReview), like their
+   * other media; everyone else only once it's approved.
    */
-  static async getPublic(idOrSlug) {
+  static async getPublic(idOrSlug, viewerId = null) {
     const business = await db.query.businesses.findFirst({
       where: and(businessByIdOrSlug(idOrSlug), isNull(businesses.deletedAt)),
       with: { owner: { columns: { id: true, isBritesidePlus: true } } },
@@ -681,18 +724,24 @@ export class BusinessService {
     if (!business || !isBusinessPublic(business, business.owner)) {
       throw new ApiError(httpStatus.NOT_FOUND, 'Business not found');
     }
-    const [{ services, staff, addOns, questionnaires, locations }, paused] = await Promise.all([
+    const [{ services, staff, addOns, questionnaires, locations }, paused, heroVideoUrl] = await Promise.all([
       loadServicesAndStaff(business.id),
       BusinessCommissionService.isBookingPaused(business.id),
+      BusinessVideoCoverService.publicVideoUrl(business),
     ]);
+    // The owner previews their own video cover before moderation clears it
+    const ownerPreview =
+      !heroVideoUrl && !!viewerId && viewerId === business.ownerId && isVideoCoverLive(business) && !!business.heroVideoUrl;
     // Overdue in-person commission pauses new bookings (shown as not accepting)
-    return serializeBusiness(paused ? { ...business, acceptingBookings: false } : business, {
+    const serialized = serializeBusiness(paused ? { ...business, acceptingBookings: false } : business, {
       services,
       staff,
       addOns,
       questionnaires,
       locations,
+      heroVideoUrl: ownerPreview ? business.heroVideoUrl : heroVideoUrl,
     });
+    return { ...serialized, heroVideoUnderReview: ownerPreview };
   }
 
   // ── Owner / team ──────────────────────────────────────────────────────────
@@ -1208,6 +1257,8 @@ export class BusinessService {
       .where(eq(businesses.id, business.id));
     // Stop the Reserve Now subscription — there's no page left to show the button on
     await BusinessReserveNowService.cancelImmediately(business);
+    // …and a video cover bought on the web (app-store ones are cancelled by the owner in the store)
+    await BusinessVideoCoverService.cancelWebImmediately(business).catch(() => {});
   }
 
   // ── Services ──────────────────────────────────────────────────────────────
