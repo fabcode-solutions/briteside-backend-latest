@@ -27,6 +27,7 @@ export const spendTypeEnum = pgEnum('spend_type', [
   'business_booking',
   // Spent by a business account (user_spends.business_id set)
   'business_reserve_now',
+  'business_video_cover',
   'business_commission',
 ]);
 

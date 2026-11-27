@@ -31,6 +31,7 @@ import { TalentSessionService } from '../services/talentSession.service.js';
 import { BusinessBookingService } from '../services/businessBooking.service.js';
 import { BusinessCommissionService } from '../services/businessCommission.service.js';
 import { BusinessReserveNowService, RESERVE_NOW_TYPE } from '../services/businessReserveNow.service.js';
+import { BusinessVideoCoverService, VIDEO_COVER_STRIPE_TYPE } from '../services/businessVideoCover.service.js';
 import { ShopOrderService } from '../services/shop/shopOrder.service.js';
 import { ShopCustomOfferService } from '../services/shop/shopCustomOffer.service.js';
 import { handleDisputeCreated, handleDisputeClosed } from '../services/paymentDispute.service.js';
@@ -255,6 +256,8 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
         await GroupSubscriptionService.handleSubscriptionUpdated(sub);
       } else if (sub.metadata?.type === RESERVE_NOW_TYPE) {
         await BusinessReserveNowService.handleSubscriptionChanged(sub);
+      } else if (sub.metadata?.type === VIDEO_COVER_STRIPE_TYPE) {
+        await BusinessVideoCoverService.handleStripeSubscription(sub);
       } else {
         await SubscriptionService.handleSubscriptionUpdated(sub);
       }
@@ -262,7 +265,11 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
       // BriteSide Plus only — group subscriptions don't offer trials.
       // Requires trial_will_end enabled for this endpoint in the Stripe Dashboard.
       const sub = event.data.object;
-      if (sub.metadata?.type !== 'group_subscription' && sub.metadata?.type !== RESERVE_NOW_TYPE) {
+      if (
+        sub.metadata?.type !== 'group_subscription' &&
+        sub.metadata?.type !== RESERVE_NOW_TYPE &&
+        sub.metadata?.type !== VIDEO_COVER_STRIPE_TYPE
+      ) {
         await SubscriptionService.handleTrialWillEnd(sub);
       }
     } else if (event.type === 'customer.subscription.deleted') {
@@ -271,6 +278,8 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
         await GroupSubscriptionService.handleSubscriptionDeleted(sub);
       } else if (sub.metadata?.type === RESERVE_NOW_TYPE) {
         await BusinessReserveNowService.handleSubscriptionChanged(sub);
+      } else if (sub.metadata?.type === VIDEO_COVER_STRIPE_TYPE) {
+        await BusinessVideoCoverService.handleStripeSubscription(sub);
       } else {
         await SubscriptionService.handleSubscriptionDeleted(sub);
       }
@@ -285,6 +294,10 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
           await BusinessReserveNowService.handleSubscriptionChanged(paidSub);
           // The business's spend log (first month + each renewal)
           await BusinessReserveNowService.recordInvoicePaid(paidInvoice, paidSub);
+        } else if (paidSub.metadata?.type === VIDEO_COVER_STRIPE_TYPE) {
+          // First month + each renewal: refresh the paid-through date and log the charge
+          await BusinessVideoCoverService.handleStripeSubscription(paidSub);
+          await BusinessVideoCoverService.recordStripeInvoicePaid(paidInvoice, paidSub);
         } else {
           await SubscriptionService.handleInvoicePaid(paidInvoice);
         }
@@ -299,6 +312,8 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
           await GroupSubscriptionService.handleInvoicePaymentFailed(invoice);
         } else if (stripeSub.metadata?.type === RESERVE_NOW_TYPE) {
           await BusinessReserveNowService.handleSubscriptionChanged(stripeSub);
+        } else if (stripeSub.metadata?.type === VIDEO_COVER_STRIPE_TYPE) {
+          await BusinessVideoCoverService.handleStripeSubscription(stripeSub);
         } else {
           await SubscriptionService.handleInvoicePaymentFailed(invoice);
         }

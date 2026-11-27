@@ -221,7 +221,7 @@ router.post(
 );
 
 // Public profile (single segment — declared after the static paths above)
-router.get('/:idOrSlug', validateMiddleware(v.getPublicBusinessSchema), c.getPublicBusiness);
+router.get('/:idOrSlug', optionalAuthMiddleware, validateMiddleware(v.getPublicBusinessSchema), c.getPublicBusiness);
 router.get('/:idOrSlug/slots', validateMiddleware(v.getSlotsSchema), c.getSlots);
 router.get('/:idOrSlug/reviews', validateMiddleware(v.listPublicReviewsSchema), c.listPublicReviews);
 // Wall on standard pages — anyone reads approved posts (signed-in: also own / queued
@@ -601,6 +601,12 @@ for (const [action, handler] of [
     handler
   );
 }
+// Money received in hand at the visit ("Off Platform" on the dashboard)
+router.put(
+  '/:businessId/bookings/:bookingId/in-hand',
+  ...scoped(P.BOOKINGS_MANAGE, v.businessInHandSchema),
+  c.setBookingInHand
+);
 // Refund (owner / admin / manager — enforced in service) and reschedule
 router.post(
   '/:businessId/bookings/:bookingId/refund',
@@ -654,6 +660,19 @@ router.post(
   c.finalizeVideoCoverPurchase
 );
 router.put('/:businessId/video-cover/video', ...scoped(P.PROFILE_EDIT, v.videoCoverVideoSchema), c.setVideoCover);
+// …or on the web through Stripe: in-page card form (intent → Stripe.js confirms → finalize), cancel / resume
+router.post(
+  '/:businessId/video-cover/web/intent',
+  ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema),
+  c.videoCoverWebIntent
+);
+router.post(
+  '/:businessId/video-cover/web/finalize',
+  ...scoped(P.WALLET_MANAGE, v.videoCoverWebFinalizeSchema),
+  c.videoCoverWebFinalize
+);
+router.post('/:businessId/video-cover/web/cancel', ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema), c.videoCoverWebCancel);
+router.post('/:businessId/video-cover/web/resume', ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema), c.videoCoverWebResume);
 router.post('/:businessId/reserve-now/cancel', ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema), c.reserveNowCancel);
 router.post('/:businessId/reserve-now/resume', ...scoped(P.WALLET_MANAGE, v.businessIdOnlySchema), c.reserveNowResume);
 

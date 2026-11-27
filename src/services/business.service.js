@@ -664,6 +664,9 @@ export class BusinessService {
         .where(where),
     ]);
 
+    // Video covers visitors may see (add-on live + passed moderation), one lookup for the page
+    const videoUrls = await BusinessVideoCoverService.publicVideoUrls(rows.map(r => r.business)).catch(() => new Map());
+
     return {
       businesses: rows.map(r => ({
         id: r.business.id,
@@ -679,6 +682,8 @@ export class BusinessService {
         distanceMiles: r.distanceMiles,
         logoUrl: r.business.logoUrl,
         heroUrl: r.business.heroUrl,
+        // Video cover (≤30s) — the card plays it instead of heroUrl (its poster)
+        heroVideoUrl: videoUrls.get(r.business.id) ?? null,
         amenities: r.business.amenities,
         hours: r.business.hours,
         timezone: r.business.timezone,
@@ -707,8 +712,11 @@ export class BusinessService {
   /**
    * Public profile by id, slug or an old @username (the response's slug is the
    * current one, so the page can redirect). 404 when hidden (unpublished / deleted).
+   * viewerId: the signed-in visitor, if any — the owner also sees their own video
+   * cover while moderation is still reviewing it (heroVideoUnderReview), like their
+   * other media; everyone else only once it's approved.
    */
-  static async getPublic(idOrSlug) {
+  static async getPublic(idOrSlug, viewerId = null) {
     const business = await db.query.businesses.findFirst({
       where: and(businessByIdOrSlug(idOrSlug), isNull(businesses.deletedAt)),
       with: { owner: { columns: { id: true, isBritesidePlus: true } } },
@@ -721,15 +729,19 @@ export class BusinessService {
       BusinessCommissionService.isBookingPaused(business.id),
       BusinessVideoCoverService.publicVideoUrl(business),
     ]);
+    // The owner previews their own video cover before moderation clears it
+    const ownerPreview =
+      !heroVideoUrl && !!viewerId && viewerId === business.ownerId && isVideoCoverLive(business) && !!business.heroVideoUrl;
     // Overdue in-person commission pauses new bookings (shown as not accepting)
-    return serializeBusiness(paused ? { ...business, acceptingBookings: false } : business, {
+    const serialized = serializeBusiness(paused ? { ...business, acceptingBookings: false } : business, {
       services,
       staff,
       addOns,
       questionnaires,
       locations,
-      heroVideoUrl,
+      heroVideoUrl: ownerPreview ? business.heroVideoUrl : heroVideoUrl,
     });
+    return { ...serialized, heroVideoUnderReview: ownerPreview };
   }
 
   // ── Owner / team ──────────────────────────────────────────────────────────
@@ -1245,6 +1257,8 @@ export class BusinessService {
       .where(eq(businesses.id, business.id));
     // Stop the Reserve Now subscription — there's no page left to show the button on
     await BusinessReserveNowService.cancelImmediately(business);
+    // …and a video cover bought on the web (app-store ones are cancelled by the owner in the store)
+    await BusinessVideoCoverService.cancelWebImmediately(business).catch(() => {});
   }
 
   // ── Services ──────────────────────────────────────────────────────────────

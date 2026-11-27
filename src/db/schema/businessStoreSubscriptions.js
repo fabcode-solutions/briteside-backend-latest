@@ -25,10 +25,10 @@ export const businessStoreSubscriptions = pgTable(
     purchasedBy: uuid('purchased_by').references(() => users.id, { onDelete: 'set null' }),
     // 'video_cover'
     feature: varchar('feature', { length: 30 }).notNull(),
-    // 'apple' | 'google'
+    // 'apple' | 'google' (in the app) | 'stripe' (on the web)
     store: varchar('store', { length: 10 }).notNull(),
     productId: varchar('product_id', { length: 100 }).notNull(),
-    // Apple originalTransactionId / Google purchaseToken
+    // Apple originalTransactionId / Google purchaseToken / Stripe subscription id
     storeSubscriptionId: varchar('store_subscription_id', { length: 512 }).notNull(),
     // Apple: latest transactionId; Google: latest orderId
     latestTransactionId: varchar('latest_transaction_id', { length: 255 }),
@@ -47,7 +47,7 @@ export const businessStoreSubscriptions = pgTable(
   table => [
     uniqueIndex('uq_business_store_subs_store_id').on(table.store, table.storeSubscriptionId),
     index('idx_business_store_subs_business').on(table.businessId, table.feature),
-    check('chk_business_store_subs_store', sql`${table.store} IN ('apple', 'google')`),
+    check('chk_business_store_subs_store', sql`${table.store} IN ('apple', 'google', 'stripe')`),
   ]
 );
 

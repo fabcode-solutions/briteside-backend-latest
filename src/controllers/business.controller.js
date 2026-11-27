@@ -36,7 +36,8 @@ export const listBusinesses = catchAsync(async (req, res) => {
 });
 
 export const getPublicBusiness = catchAsync(async (req, res) => {
-  const business = await BusinessService.getPublic(req.params.idOrSlug);
+  // Signed in (optional): the owner also sees their own video cover while it's under review
+  const business = await BusinessService.getPublic(req.params.idOrSlug, req.user?.id ?? null);
   res.json({ success: true, data: { business } });
 });
 
@@ -587,6 +588,32 @@ export const setVideoCover = catchAsync(async (req, res) => {
   res.json({ success: true, data });
 });
 
+// Bought on the web (Stripe)
+export const videoCoverWebIntent = catchAsync(async (req, res) => {
+  const data = await BusinessVideoCoverService.createWebIntent(req.business, req.user);
+  res.json({ success: true, data });
+});
+
+export const videoCoverWebFinalize = catchAsync(async (req, res) => {
+  const data = await BusinessVideoCoverService.finalizeWeb(
+    req.business,
+    req.user,
+    req.body.subscriptionId,
+    req.body.paymentIntentId
+  );
+  res.json({ success: true, data });
+});
+
+export const videoCoverWebCancel = catchAsync(async (req, res) => {
+  const data = await BusinessVideoCoverService.setWebCancelled(req.business, true);
+  res.json({ success: true, data });
+});
+
+export const videoCoverWebResume = catchAsync(async (req, res) => {
+  const data = await BusinessVideoCoverService.setWebCancelled(req.business, false);
+  res.json({ success: true, data });
+});
+
 export const getCommissionSummary = catchAsync(async (req, res) => {
   const data = await BusinessCommissionService.summaryForBusiness(req.business);
   res.json({ success: true, data });
@@ -687,6 +714,11 @@ export const createManualBooking = catchAsync(async (req, res) => {
   res.status(httpStatus.CREATED).json({ success: true, data });
 });
 export const markBookingNoShow = bookingAction('markNoShow');
+
+export const setBookingInHand = catchAsync(async (req, res) => {
+  const data = await BusinessBookingService.setInHand(req.business, req.params.bookingId, req.businessAccess, req.body);
+  res.json({ success: true, data });
+});
 
 export const refundBookingByBusiness = catchAsync(async (req, res) => {
   const data = await BusinessBookingService.refundByBusiness(

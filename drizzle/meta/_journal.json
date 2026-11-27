@@ -1310,6 +1310,27 @@
       "when": 1795443000000,
       "tag": "0194_business_booking_customer_timezone",
       "breakpoints": true
+    },
+    {
+      "idx": 195,
+      "version": "7",
+      "when": 1795444000000,
+      "tag": "0195_business_booking_commission_upfront",
+      "breakpoints": true
+    },
+    {
+      "idx": 196,
+      "version": "7",
+      "when": 1795445000000,
+      "tag": "0196_business_booking_in_hand",
+      "breakpoints": true
+    },
+    {
+      "idx": 197,
+      "version": "7",
+      "when": 1795446000000,
+      "tag": "0197_video_cover_web_billing",
+      "breakpoints": true
     }
   ]
 }

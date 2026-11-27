@@ -92,7 +92,7 @@ export const businesses = pgTable(
     reserveNowSubscriptionId: varchar('reserve_now_subscription_id', { length: 255 }),
     reserveNowPeriodEnd: timestamp('reserve_now_period_end', { withTimezone: true }),
     reserveNowCancelAtPeriodEnd: boolean('reserve_now_cancel_at_period_end').notNull().default(false),
-    // Video cover ($5/month, bought in the app through Apple / Google — see
+    // Video cover ($5/month, bought in the app through Apple / Google or on the web through Stripe — see
     // business_store_subscriptions). heroVideoUrl (≤ 30s) replaces the cover
     // photo while videoCoverUntil is in the future; heroUrl stays as its
     // poster and comes back by itself when the subscription lapses.
@@ -100,7 +100,7 @@ export const businesses = pgTable(
     // When the paid time (incl. any store grace period) ends — set from the stores
     videoCoverUntil: timestamp('video_cover_until', { withTimezone: true }),
     videoCoverAutoRenew: boolean('video_cover_auto_renew').notNull().default(false),
-    // 'apple' | 'google' — where it's billed (managed / cancelled there)
+    // 'apple' | 'google' | 'stripe' — where it's billed (managed / cancelled there; stripe = dashboard)
     videoCoverStore: varchar('video_cover_store', { length: 10 }),
     // Where "Send inquiry" goes: 'inbox' (owner's Inquiry inbox) | 'email'
     inquiryChannel: varchar('inquiry_channel', { length: 10 }).notNull().default('email'),
@@ -677,10 +677,14 @@ export const businessTeamMembers = pgTable(
  * Fees (see utils/orderProcessingFee.js):
  *   customerFeeCents        — tiered booking fee on the FULL service price, charged online once,
  *                             at the initial booking (pay-in-person included), never again
- *   platformCommissionCents — 5% of every service amount paid ONLINE (full price, deposit, and any
- *                             balance paid online later), withheld from the payment itself.
- *                             The 5% on what is paid IN PERSON is owed separately — see
- *                             business_commission_charges (created when the booking completes).
+ *   commissionUpfront       — true on bookings made under the full-cut model (all new bookings):
+ *   platformCommissionCents     the 5% of the FULL service price withheld from the online payment
+ *                               at booking (capped at what was paid online). Non-refundable: a
+ *                               refund only lowers it to what Briteside still holds, and the
+ *                               difference is owed by the business (business_commission_charges).
+ *                             false (older bookings, split model): 5% of every service amount paid
+ *                               ONLINE, withheld from it; the 5% on what's paid IN PERSON is owed
+ *                               separately once the booking completes.
  *   amountDueNowCents       — service portion charged at booking (full | deposit | 0 for in_person)
  *   customer pays at booking = amountDueNowCents + customerFeeCents (+ tax)
  */
@@ -728,11 +732,15 @@ export const businessBookings = pgTable(
     amountDueNowCents: integer('amount_due_now_cents').notNull(),
     customerFeeCents: integer('customer_fee_cents').notNull(),
     platformCommissionCents: integer('platform_commission_cents').notNull(),
+    commissionUpfront: boolean('commission_upfront').notNull().default(false),
     taxAmountCents: integer('tax_amount_cents').notNull().default(0),
     // 'account' (business collects/remits tax → tax flows into its payout) | 'self' | 'none'
     taxLiability: varchar('tax_liability', { length: 20 }).notNull().default('none'),
     amountPaidCents: integer('amount_paid_cents').notNull().default(0),
     refundedCents: integer('refunded_cents').notNull().default(0),
+    // What the business entered as received in hand at the visit (completed bookings).
+    // NULL = not entered → the balance due is assumed. Dashboard "Off Platform"; no effect on commission.
+    inHandCents: integer('in_hand_cents'),
     stripeFeeCents: integer('stripe_fee_cents'),
     reserveAmountCents: integer('reserve_amount_cents'),
 

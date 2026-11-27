@@ -907,6 +907,14 @@ export const manualBookingSchema = z.object({
     }),
 });
 
+export const businessInHandSchema = z.object({
+  params: businessIdParams.extend({ bookingId: uuid }),
+  body: z.object({
+    // Received in hand at the visit; null = clear (assume the balance due)
+    amountCents: z.number().int().min(0).max(10_000_000).nullable(),
+  }),
+});
+
 export const businessRefundSchema = z.object({
   params: businessIdParams.extend({ bookingId: uuid }),
   body: z
@@ -961,6 +969,14 @@ export const reserveNowNativeIntentSchema = z.object({
 });
 
 export const reserveNowNativeFinalizeSchema = z.object({
+  params: businessIdParams,
+  body: z.object({
+    subscriptionId: z.string().trim().regex(/^sub_[A-Za-z0-9]+$/, 'Invalid subscription'),
+    paymentIntentId: z.string().trim().regex(/^pi_[A-Za-z0-9]+$/, 'Invalid payment'),
+  }),
+});
+
+export const videoCoverWebFinalizeSchema = z.object({
   params: businessIdParams,
   body: z.object({
     subscriptionId: z.string().trim().regex(/^sub_[A-Za-z0-9]+$/, 'Invalid subscription'),

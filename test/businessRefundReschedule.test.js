@@ -174,11 +174,11 @@ describe('serviceDepositCents', () => {
 });
 
 describe('priceBooking with a percentage deposit', () => {
-  it('charges the % deposit now and withholds 5% of it', async () => {
+  it('charges the % deposit now and withholds the full 5% of the price from it', async () => {
     const { priceBooking } = await import('../src/services/businessBooking.service.js');
     const p = priceBooking({ priceCents: 20_000, paymentModel: 'deposit', depositPercent: 30 }, { defaultPaymentModel: 'full' });
     expect(p.amountDueNowCents).toBe(6_000);
-    expect(p.platformCommissionCents).toBe(300);
+    expect(p.platformCommissionCents).toBe(1_000);
     expect(p.balanceDueAtVisitCents).toBe(14_000);
     expect(p.customerFeeCents).toBe(700); // $200 → $7 tier, on the full price
   });

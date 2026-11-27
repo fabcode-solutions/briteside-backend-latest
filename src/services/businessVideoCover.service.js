@@ -2,8 +2,12 @@
  * Video cover — a $5/month add-on: a business page's cover can be a video
  * (30 seconds max) instead of a photo.
  *
- * Billing is an auto-renewing subscription bought IN THE APP through Apple /
- * Google (never Stripe). The app tags the purchase with the business it's for
+ * Billing is an auto-renewing subscription bought either IN THE APP through
+ * Apple / Google, or ON THE WEB through Stripe (store 'stripe' — the business's
+ * own Stripe customer, like Reserve Now; metadata.type = 'business_video_cover').
+ * All three land in business_store_subscriptions, so the rest is the same.
+ *
+ * In the app: the app tags the purchase with the business it's for
  * — Apple `appAccountToken` = business id, Google `obfuscatedAccountId` =
  * business id — and then calls finalize() with the transaction / token. The
  * stores are the source of truth: finalize() and every store notification
@@ -16,10 +20,11 @@
  * subscription lapses. The saved video is kept, so resubscribing restores it.
  */
 import httpStatus from 'http-status';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import Stripe from 'stripe';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { Environment, Status as AppleStatus, AutoRenewStatus } from '@apple/app-store-server-library';
 import { db } from '../db/index.js';
-import { businesses, businessStoreSubscriptions } from '../db/schema/index.js';
+import { businesses, businessStoreSubscriptions, userSpends } from '../db/schema/index.js';
 import { media, mediaOwners } from '../db/schema/fileTracking.js';
 import ApiError from '../utils/api-error.js';
 import config from '../config/config.js';
@@ -28,8 +33,16 @@ import { ShopIapService } from './shop/shopIap.service.js';
 import FileManagementService from './fileManagement.service.js';
 import { MediaModerationService, HELD_FROM_OTHERS } from './moderation/mediaModeration.service.js';
 import { probeDurationSeconds } from '../utils/mediaDuration.js';
+import { getInvoicePaymentIntent } from './subscription.service.js';
+import { getOrCreateBusinessCustomer } from './businessAccount.service.js';
+import { UserSpendService } from './userSpend.service.js';
+
+const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 
 export const VIDEO_COVER_FEATURE = 'video_cover';
+/** Stripe metadata.type of a web-bought video cover subscription. */
+export const VIDEO_COVER_STRIPE_TYPE = 'business_video_cover';
+const STRIPE_PRODUCT_ID = 'briteside_video_cover';
 export const VIDEO_COVER_PRICE_CENTS = 500;
 export const VIDEO_COVER_MAX_SECONDS = 30;
 // Encoders round; a "30 second" clip is often 30.03s
@@ -46,7 +59,7 @@ export const serializeVideoCover = b => ({
   live: isVideoCoverLive(b),
   until: b.videoCoverUntil ?? null,
   autoRenew: !!b.videoCoverAutoRenew,
-  // Where it's billed — cancel / manage it there
+  // Where it's billed — cancel / manage it there ('stripe' = on the web, from the dashboard)
   store: b.videoCoverStore ?? null,
   heroVideoUrl: b.heroVideoUrl ?? null,
   priceCents: VIDEO_COVER_PRICE_CENTS,
@@ -77,6 +90,52 @@ const GOOGLE_STATE = {
 
 const toDate = ms => (ms ? new Date(Number(ms)) : null);
 const laterOf = (a, b) => (!a ? b : !b ? a : a > b ? a : b);
+
+/** Stripe subscription status → our status ('past_due' keeps it on while Stripe retries). */
+const STRIPE_STATUS = {
+  active: 'active',
+  trialing: 'active',
+  past_due: 'grace',
+  unpaid: 'on_hold',
+  incomplete: 'on_hold',
+  incomplete_expired: 'expired',
+  canceled: 'expired',
+  paused: 'on_hold',
+};
+
+const stripePeriodEnd = sub => {
+  const end = sub.current_period_end ?? sub.items?.data?.[0]?.current_period_end ?? null;
+  return end ? new Date(end * 1000) : null;
+};
+
+const ensureStripe = () => {
+  if (!stripe) throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Payments are unavailable right now');
+};
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/** One Stripe Product for every web video cover subscription (created on first use). */
+let productReady = null;
+function ensureStripeProduct() {
+  productReady ??= stripe.products.retrieve(STRIPE_PRODUCT_ID).catch(async err => {
+    if (err?.code !== 'resource_missing' && err?.statusCode !== 404) throw err;
+    return stripe.products
+      .create({
+        id: STRIPE_PRODUCT_ID,
+        name: 'Video cover',
+        description: 'A 30-second video as your Briteside business page cover',
+        metadata: { source: VIDEO_COVER_STRIPE_TYPE },
+      })
+      .catch(e => {
+        if (e?.code === 'resource_already_exists') return stripe.products.retrieve(STRIPE_PRODUCT_ID);
+        throw e;
+      });
+  });
+  productReady.catch(() => {
+    productReady = null;
+  });
+  return productReady;
+}
 
 export class BusinessVideoCoverService {
   // ── Purchase (called by the app after the store sheet completes) ─────────
@@ -255,6 +314,215 @@ export class BusinessVideoCoverService {
     return !!row;
   }
 
+  // ── Stripe (bought on the web) ───────────────────────────────────────────
+
+  /** This business's web video cover subscriptions on its Stripe customer. */
+  static async #stripeSubscriptions(business, customer) {
+    const { data } = await stripe.subscriptions.list({ customer, status: 'all', limit: 30 });
+    return data.filter(s => s.metadata?.type === VIDEO_COVER_STRIPE_TYPE && s.metadata?.businessId === business.id);
+  }
+
+  /**
+   * In-app card form, step 1 (web): an unpaid $5/month subscription on the business's
+   * Stripe customer whose first invoice the browser confirms with Stripe.js.
+   * Returns { paymentId: subscriptionId, clientSecret, intentType: 'payment' }.
+   * Refused while the video cover is already on — from any store — so nobody pays twice.
+   */
+  static async createWebIntent(business, user) {
+    ensureStripe();
+    if (isVideoCoverLive(business)) {
+      const where = { apple: 'the App Store', google: 'Google Play', stripe: 'the web' }[business.videoCoverStore] ?? 'another store';
+      throw new ApiError(httpStatus.CONFLICT, `Video cover is already on for this business (billed through ${where})`);
+    }
+    const customer = await getOrCreateBusinessCustomer(business);
+    const ours = await this.#stripeSubscriptions(business, customer);
+    const running = ours.find(s => LIVE_STATUSES.has(STRIPE_STATUS[s.status]));
+    if (running) {
+      // Paid already (webhook not in yet) — catch up instead of charging twice
+      await this.syncStripe(running);
+      throw new ApiError(httpStatus.CONFLICT, 'Video cover is already on for this business');
+    }
+    const stale = ours.find(s => s.status === 'incomplete');
+    if (stale) {
+      const pi = await getInvoicePaymentIntent(stale.latest_invoice);
+      if (pi?.client_secret) return { paymentId: stale.id, clientSecret: pi.client_secret, intentType: 'payment' };
+      await stripe.subscriptions.cancel(stale.id).catch(() => {});
+    }
+
+    const product = await ensureStripeProduct();
+    const metadata = {
+      type: VIDEO_COVER_STRIPE_TYPE,
+      businessId: business.id,
+      ownerId: business.ownerId,
+      purchasedBy: user?.id ?? '',
+    };
+    const subscription = await stripe.subscriptions.create({
+      customer,
+      items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product: product.id,
+            unit_amount: VIDEO_COVER_PRICE_CENTS,
+            recurring: { interval: 'month' },
+          },
+        },
+      ],
+      description: `Video cover — ${business.name}`,
+      payment_behavior: 'default_incomplete',
+      payment_settings: { save_default_payment_method: 'on_subscription', payment_method_types: ['card'] },
+      expand: ['latest_invoice'],
+      metadata,
+    });
+
+    // The invoice's PaymentIntent can take a moment to appear
+    let pi = await getInvoicePaymentIntent(subscription.latest_invoice?.id);
+    for (const wait of [300, 600]) {
+      if (pi?.client_secret) break;
+      await sleep(wait);
+      pi = await getInvoicePaymentIntent(subscription.latest_invoice?.id);
+    }
+    if (!pi?.client_secret) {
+      await stripe.subscriptions.cancel(subscription.id).catch(() => {});
+      throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, 'Couldn’t start the payment. Please try again.');
+    }
+    return { paymentId: subscription.id, clientSecret: pi.client_secret, intentType: 'payment' };
+  }
+
+  /** In-app card form, step 2: verify the first payment with Stripe and turn the video cover on. */
+  static async finalizeWeb(business, user, subscriptionId, paymentIntentId) {
+    ensureStripe();
+    const sub = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['latest_invoice'] });
+    if (sub.metadata?.type !== VIDEO_COVER_STRIPE_TYPE || sub.metadata?.businessId !== business.id) {
+      throw new ApiError(httpStatus.NOT_FOUND, 'Subscription not found');
+    }
+    const pi = await getInvoicePaymentIntent(sub.latest_invoice?.id);
+    if (!pi || pi.id !== paymentIntentId || pi.status !== 'succeeded') {
+      throw new ApiError(httpStatus.BAD_REQUEST, 'The payment hasn’t gone through yet');
+    }
+    // Paid invoice → Stripe flips the subscription to active; re-read if this beat it
+    const fresh = sub.status === 'incomplete' ? await stripe.subscriptions.retrieve(subscriptionId) : sub;
+    await this.syncStripe(fresh.status === 'incomplete' ? { ...fresh, status: 'active' } : fresh, {
+      businessId: business.id,
+      purchasedBy: user?.id ?? null,
+    });
+    const updated = await db.query.businesses.findFirst({ where: eq(businesses.id, business.id) });
+    return serializeVideoCover(updated);
+  }
+
+  /** Stop at the end of the paid month (true) / undo that (false). Web subscriptions only. */
+  static async setWebCancelled(business, cancelAtPeriodEnd) {
+    ensureStripe();
+    const row = await db.query.businessStoreSubscriptions.findFirst({
+      where: and(
+        eq(businessStoreSubscriptions.businessId, business.id),
+        eq(businessStoreSubscriptions.feature, VIDEO_COVER_FEATURE),
+        eq(businessStoreSubscriptions.store, 'stripe')
+      ),
+      orderBy: [desc(businessStoreSubscriptions.expiresAt)],
+    });
+    if (!row || !LIVE_STATUSES.has(row.status) || !(row.expiresAt > new Date())) {
+      throw new ApiError(
+        httpStatus.CONFLICT,
+        business.videoCoverStore && business.videoCoverStore !== 'stripe'
+          ? 'This video cover was bought in the app. Manage it in the App Store or Google Play.'
+          : 'Video cover isn’t on for this business'
+      );
+    }
+    const sub = await stripe.subscriptions.update(row.storeSubscriptionId, { cancel_at_period_end: cancelAtPeriodEnd });
+    await this.syncStripe(sub);
+    const updated = await db.query.businesses.findFirst({ where: eq(businesses.id, business.id) });
+    return serializeVideoCover(updated);
+  }
+
+  /** Business deleted: stop web billing now. Never blocks the delete. */
+  static async cancelWebImmediately(business) {
+    if (!stripe) return;
+    const rows = await db.query.businessStoreSubscriptions.findMany({
+      where: and(eq(businessStoreSubscriptions.businessId, business.id), eq(businessStoreSubscriptions.store, 'stripe')),
+    });
+    for (const row of rows.filter(r => LIVE_STATUSES.has(r.status))) {
+      await stripe.subscriptions
+        .cancel(row.storeSubscriptionId)
+        .catch(err => logger.error(`[VideoCover] cancel on delete failed ${row.storeSubscriptionId}: ${err.message}`));
+    }
+  }
+
+  /** Copy a Stripe subscription's state into business_store_subscriptions (and onto the business). */
+  static async syncStripe(sub, claim = null) {
+    if (!sub?.id || sub.metadata?.type !== VIDEO_COVER_STRIPE_TYPE) return null;
+    const status = STRIPE_STATUS[sub.status] ?? 'expired';
+    const expiresAt = LIVE_STATUSES.has(status)
+      ? stripePeriodEnd(sub)
+      : sub.ended_at
+        ? new Date(sub.ended_at * 1000)
+        : new Date();
+    const latestInvoice = typeof sub.latest_invoice === 'string' ? sub.latest_invoice : (sub.latest_invoice?.id ?? null);
+    return this.#save({
+      store: 'stripe',
+      storeSubscriptionId: sub.id,
+      productId: STRIPE_PRODUCT_ID,
+      latestTransactionId: latestInvoice,
+      status,
+      expiresAt,
+      autoRenew: LIVE_STATUSES.has(status) && !sub.cancel_at_period_end,
+      environment: sub.livemode === false ? 'sandbox' : 'production',
+      // Whoever paid (set on the subscription at checkout), even when the webhook lands first
+      claim:
+        claim ??
+        (sub.metadata?.businessId && sub.metadata?.purchasedBy
+          ? { businessId: sub.metadata.businessId, purchasedBy: sub.metadata.purchasedBy }
+          : null),
+      taggedBusinessId: sub.metadata?.businessId ?? null,
+    });
+  }
+
+  /** customer.subscription.created / updated / deleted, invoice.paid / payment_failed (webhook). */
+  static async handleStripeSubscription(sub) {
+    await this.syncStripe(sub);
+  }
+
+  /** invoice.paid: log the $5 in the business's spend log (first month + renewals). Never throws. */
+  static async recordStripeInvoicePaid(invoice, sub) {
+    try {
+      const businessId = sub?.metadata?.businessId;
+      const amountCents = invoice?.amount_paid ?? 0;
+      if (!businessId || !invoice?.id || amountCents <= 0) return;
+      const business = await db.query.businesses.findFirst({
+        where: eq(businesses.id, businessId),
+        columns: { id: true, ownerId: true, name: true },
+      });
+      if (!business) return;
+      const already = await db.query.userSpends.findFirst({
+        where: and(
+          eq(userSpends.businessId, businessId),
+          eq(userSpends.spendType, 'business_video_cover'),
+          sql`${userSpends.metadata}->>'invoiceId' = ${invoice.id}`
+        ),
+        columns: { id: true },
+      });
+      if (already) return;
+      const paidAtSec = invoice.status_transitions?.paid_at ?? invoice.created;
+      await UserSpendService.recordSpend({
+        userId: business.ownerId,
+        businessId,
+        spendType: 'business_video_cover',
+        amountCents,
+        referenceId: businessId,
+        referenceType: 'business_video_cover',
+        metadata: {
+          invoiceId: invoice.id,
+          description: 'Video cover — monthly',
+          businessName: business.name,
+          periodEnd: stripePeriodEnd(sub),
+        },
+        paidAt: paidAtSec ? new Date(paidAtSec * 1000) : new Date(),
+      });
+    } catch (err) {
+      logger.error(`[VideoCover] spend log for invoice ${invoice?.id} failed: ${err.message}`);
+    }
+  }
+
   // ── Storing ──────────────────────────────────────────────────────────────
 
   static async #save({
@@ -429,5 +697,17 @@ export class BusinessVideoCoverService {
     const [row] = await MediaModerationService.mediaRowsForUrls([business.heroVideoUrl]);
     if (row && HELD_FROM_OTHERS.has(row.status)) return null;
     return business.heroVideoUrl;
+  }
+
+  /**
+   * publicVideoUrl for a whole page of businesses (search / directory cards) in one
+   * moderation lookup. Returns Map<businessId, videoUrl> — only the ones visitors may see.
+   */
+  static async publicVideoUrls(list) {
+    const live = (list ?? []).filter(b => b?.heroVideoUrl && isVideoCoverLive(b));
+    if (!live.length) return new Map();
+    const rows = await MediaModerationService.mediaRowsForUrls(live.map(b => b.heroVideoUrl));
+    const held = new Set(rows.filter(r => HELD_FROM_OTHERS.has(r.status)).map(r => r.url));
+    return new Map(live.filter(b => !held.has(b.heroVideoUrl)).map(b => [b.id, b.heroVideoUrl]));
   }
 }
