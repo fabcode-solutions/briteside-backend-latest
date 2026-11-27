@@ -149,6 +149,27 @@ export const businesses = pgTable(
     // Owner can unpublish without deleting
     isPublished: boolean('is_published').notNull().default(true),
 
+    // ── Business account settings (the business is its own account) ──
+    // Which business notifications are on: { [key]: boolean }, missing = on.
+    // Keys: BUSINESS_NOTIFICATION_KEYS in config/business-account.js
+    notificationPrefs: jsonb('notification_prefs').notNull().default(sql`'{}'::jsonb`),
+    // Privacy
+    // Who can start a conversation: everyone | followers | customers | nobody
+    messagesFrom: varchar('messages_from', { length: 20 }).notNull().default('everyone'),
+    // Visitor wall posts: everyone (published right away) | approval | off
+    wallPosts: varchar('wall_posts', { length: 20 }).notNull().default('approval'),
+    showReviews: boolean('show_reviews').notNull().default(true),
+    showFollowerCount: boolean('show_follower_count').notNull().default(true),
+    showStaff: boolean('show_staff').notNull().default(true),
+    // Public page shows the city only; the address is shared once booked
+    hideAddressUntilBooked: boolean('hide_address_until_booked').notNull().default(false),
+    // Listed in search / directory (the page stays reachable by link)
+    discoverable: boolean('discoverable').notNull().default(true),
+    // Mask profanity in visitor wall posts and comments
+    profanityFilter: boolean('profanity_filter').notNull().default(false),
+    // The business's own Stripe customer (saved cards for Reserve Now, commission…)
+    stripeCustomerId: varchar('stripe_customer_id', { length: 255 }),
+
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
@@ -170,6 +191,11 @@ export const businesses = pgTable(
     ),
     check('chk_businesses_free_cancel_hours', sql`${table.freeCancellationHours} >= 0`),
     check('chk_businesses_page_type', sql`${table.pageType} IN ('appointments', 'standard')`),
+    check(
+      'chk_businesses_messages_from',
+      sql`${table.messagesFrom} IN ('everyone', 'followers', 'customers', 'nobody')`
+    ),
+    check('chk_businesses_wall_posts', sql`${table.wallPosts} IN ('everyone', 'approval', 'off')`),
   ]
 );
 
@@ -690,6 +716,9 @@ export const businessBookings = pgTable(
     startAt: timestamp('start_at', { withTimezone: true }).notNull(),
     endAt: timestamp('end_at', { withTimezone: true }).notNull(),
     timezone: varchar('timezone', { length: 64 }).notNull(),
+    // The customer's own zone when they booked (browser), so emails can also show
+    // their local time; null for walk-ins and older bookings
+    customerTimezone: varchar('customer_timezone', { length: 64 }),
 
     status: varchar('status', { length: 20 }).notNull().default('awaiting_payment'),
 

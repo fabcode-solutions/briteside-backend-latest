@@ -43,6 +43,8 @@ import { sendMail } from './mail.service.js';
 import { createNotification } from './notification.service.js';
 import { emailWrapper, ctaRow, ctaButton, appUrl, infoBox } from '../templates/emailLayout.js';
 import { getRedirectUrls, isNativePlatform } from '../utils/redirect-urls.js';
+import { businessDefaultCard } from './businessAccount.service.js';
+import { UserSpendService } from './userSpend.service.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://briteside.app';
@@ -156,18 +158,60 @@ function emailOwner(owner, subject, headline, rows, cta = 'Open Earnings') {
   );
 }
 
-function notifyOwner(ownerId, title, message) {
+/** The business the owner runs (one per owner), or null. */
+async function ownedBusiness(ownerId) {
+  return db.query.businesses.findFirst({
+    where: and(eq(businesses.ownerId, ownerId), isNull(businesses.deletedAt)),
+  });
+}
+
+async function notifyOwner(ownerId, title, message) {
+  const business = await ownedBusiness(ownerId).catch(() => null);
   return createNotification({
     userId: ownerId,
     title,
     message,
     type: 'business_commission',
     redirectTo: '/business/dashboard?tab=earnings',
+    ...(business ? { metadata: { businessId: business.id } } : {}),
   }).catch(err => logger.error(`[businessCommission] notification failed: ${err.message}`));
 }
 
-/** The owner's saved card: their Plus subscription's default, else the customer default, else any card. */
+/** A paid commission goes in the business's spend log. Never throws. */
+async function recordCommissionSpend(ownerId, collectionId, amountCents, businessId = null) {
+  try {
+    if (!amountCents || amountCents <= 0) return;
+    const id = businessId ?? (await ownedBusiness(ownerId))?.id ?? null;
+    if (!id) return;
+    await UserSpendService.recordSpend({
+      userId: ownerId,
+      businessId: id,
+      spendType: 'business_commission',
+      amountCents,
+      referenceId: collectionId,
+      referenceType: 'business_commission_collection',
+      metadata: { description: '5% commission on bookings paid in person' },
+    });
+  } catch (err) {
+    logger.error(`[businessCommission] spend log failed for ${collectionId}: ${err.message}`);
+  }
+}
+
+/**
+ * The card to charge: the business's own default card (Business → Payment
+ * Methods) first, then the owner's personal one.
+ */
 async function savedCard(ownerId) {
+  const business = await ownedBusiness(ownerId).catch(() => null);
+  if (business) {
+    const card = await businessDefaultCard(business).catch(() => null);
+    if (card) return card;
+  }
+  return personalSavedCard(ownerId);
+}
+
+/** The owner's saved card: their Plus subscription's default, else the customer default, else any card. */
+async function personalSavedCard(ownerId) {
   const customer = await db.query.stripeCustomers.findFirst({ where: eq(stripeCustomers.userId, ownerId) });
   if (!customer) return null;
   const customerId = customer.stripeCustomerId;
@@ -436,6 +480,7 @@ export class BusinessCommissionService {
       .update(businessCommissionCollections)
       .set({ status: 'succeeded', stripePaymentIntentId: intent.id })
       .where(eq(businessCommissionCollections.id, reserved.id));
+    await recordCommissionSpend(ownerId, reserved.id, reserved.amountCents);
     emailOwner(owner, 'Your Briteside commission receipt', 'Commission paid', [
       ['Amount', money(reserved.amountCents)],
       ['For', `5% commission on ${reserved.allocations.length} booking(s) your customers paid in person`],
@@ -608,6 +653,7 @@ export class BusinessCommissionService {
       return { total };
     });
     if (!result) return;
+    await recordCommissionSpend(ownerId, collectionId, result.total, businessId || null);
 
     // Something else (a payout deduction) covered part of it meanwhile — give that back
     const excess = paid - result.total;

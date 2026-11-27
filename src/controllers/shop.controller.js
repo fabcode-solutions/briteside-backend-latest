@@ -7,6 +7,17 @@ import * as userService from '../services/user.service.js';
 import { catchAsync } from '../utils/catch-async.js';
 import ApiError from '../utils/api-error.js';
 import { ShopCustomOfferService } from '../services/shop/shopCustomOffer.service.js';
+import { assertBusinessPermission } from '../services/businessAccount.service.js';
+import { BUSINESS_PERMISSIONS } from '../config/business-permissions.js';
+
+/** Buying while acting as a business: needs wallet access to it. */
+async function buyerBusinessIdFrom(req) {
+  const businessId = req.body?.businessId;
+  if (!businessId) return null;
+  if (typeof businessId !== 'string') throw new ApiError(400, 'Invalid businessId');
+  await assertBusinessPermission(businessId, req.user, BUSINESS_PERMISSIONS.WALLET_MANAGE);
+  return businessId;
+}
 
 
 // Routes take a username so they line up with the profile URLs, and resolve it
@@ -148,11 +159,13 @@ export const setShopRefundPolicy = catchAsync(async (req, res) => {
 // ── Purchases ────────────────────────────────────────────────────────────────
 
 export const createShopCheckout = catchAsync(async (req, res) => {
+  const buyerBusinessId = await buyerBusinessIdFrom(req);
   const result = await ShopOrderService.createCheckout(
     req.user.id,
     req.params.productId,
     req.body?.platform,
-    { customerName: req.body?.customerName, customerEmail: req.body?.customerEmail }
+    { customerName: req.body?.customerName, customerEmail: req.body?.customerEmail },
+    { buyerBusinessId }
   );
 
   res.json({
@@ -165,11 +178,13 @@ export const createShopCheckout = catchAsync(async (req, res) => {
 // ── Native Briteside checkout (NativeCheckoutModal) ─────────────────────────
 
 export const prepareShopNativeCheckout = catchAsync(async (req, res) => {
+  const buyerBusinessId = await buyerBusinessIdFrom(req);
   const result = await ShopOrderService.prepareNativeCheckout(
     req.user.id,
     req.params.productId,
     req.body?.platform,
-    { customerName: req.body?.customerName, customerEmail: req.body?.customerEmail }
+    { customerName: req.body?.customerName, customerEmail: req.body?.customerEmail },
+    { buyerBusinessId }
   );
   res.status(201).json({ success: true, data: result });
 });

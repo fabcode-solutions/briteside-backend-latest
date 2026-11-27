@@ -48,11 +48,13 @@ const coord = v => (v === undefined ? undefined : v === null ? null : String(v))
  * pin are its home base, so customers get only the city and a centre rounded
  * to 2 decimals (~1 km) — enough to draw the service-area circle.
  * `includePrivate` (owner / team) returns the exact values.
+ * `hideAddress`: the business chose to share its address only once booked
+ * (privacy: hideAddressUntilBooked) — same treatment as a mobile business.
  */
-export function placeFields(p, includePrivate = false) {
+export function placeFields(p, includePrivate = false, { hideAddress = false } = {}) {
   const lat = p.latitude != null ? Number(p.latitude) : null;
   const lng = p.longitude != null ? Number(p.longitude) : null;
-  const hide = p.locationType === 'mobile' && !includePrivate;
+  const hide = (p.locationType === 'mobile' || hideAddress) && !includePrivate;
   const round = v => (v == null ? null : Math.round(v * 100) / 100);
   return {
     address: hide ? p.city : p.address,
@@ -62,12 +64,12 @@ export function placeFields(p, includePrivate = false) {
   };
 }
 
-export const serializeLocation = (l, { includePrivate = false } = {}) => ({
+export const serializeLocation = (l, { includePrivate = false, hideAddress = false } = {}) => ({
   id: l.id,
   name: l.name,
   locationType: l.locationType,
   city: l.city,
-  ...placeFields(l, includePrivate),
+  ...placeFields(l, includePrivate, { hideAddress }),
   phone: l.phone ?? null,
   timezone: l.timezone,
   hours: l.hours,

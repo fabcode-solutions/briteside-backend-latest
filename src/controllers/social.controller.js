@@ -21,6 +21,7 @@ import { db } from '../db/index.js';
 import { eq, and } from 'drizzle-orm';
 import { userFollowRequests } from '../db/schema/index.js';
 import { isUserOnline } from '../socket/index.js';
+import { findPinnableBusiness } from '../services/pinnedBusiness.helper.js';
 
 // Same rule enforced at registration (auth.route.js) — kept identical for consistency
 const USERNAME_REGEX = /^[a-zA-Z0-9_]+$/;
@@ -640,6 +641,23 @@ export const togglePinProfile = catchAsync(async (req, res) => {
     message: result.pinned ? 'Profile pinned' : 'Profile unpinned',
     data: result,
   });
+});
+
+/** Pin / unpin a business page (shows in the same Pinned Profiles list). */
+export const togglePinBusiness = catchAsync(async (req, res) => {
+  const business = await findPinnableBusiness(req.params.idOrSlug);
+  const result = await SocialService.togglePinBusiness(req.user.id, business.id);
+  res.json({
+    success: true,
+    message: result.pinned ? 'Business pinned' : 'Business unpinned',
+    data: result,
+  });
+});
+
+export const getBusinessPinStatus = catchAsync(async (req, res) => {
+  const business = await findPinnableBusiness(req.params.idOrSlug);
+  const pinned = await SocialService.isBusinessPinned(req.user.id, business.id);
+  res.json({ success: true, data: { pinned } });
 });
 
 export const getPinnedProfiles = catchAsync(async (req, res) => {

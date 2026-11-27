@@ -1282,6 +1282,34 @@
       "when": 1795439000000,
       "tag": "0190_business_review_images_reply_edit",
       "breakpoints": true
+    },
+    {
+      "idx": 191,
+      "version": "7",
+      "when": 1795440000000,
+      "tag": "0191_remove_pay_in_person",
+      "breakpoints": true
+    },
+    {
+      "idx": 192,
+      "version": "7",
+      "when": 1795441000000,
+      "tag": "0192_business_account_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 193,
+      "version": "7",
+      "when": 1795442000000,
+      "tag": "0193_pin_business_pages",
+      "breakpoints": true
+    },
+    {
+      "idx": 194,
+      "version": "7",
+      "when": 1795443000000,
+      "tag": "0194_business_booking_customer_timezone",
+      "breakpoints": true
     }
   ]
 }

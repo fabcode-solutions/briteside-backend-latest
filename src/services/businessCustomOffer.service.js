@@ -331,7 +331,7 @@ export class BusinessCustomOfferService {
         type: 'business_booking',
         redirectTo: '/business/dashboard',
         relatedId: offer.id,
-        metadata: { businessId: offer.business.id, offerId: offer.id },
+        metadata: { businessId: offer.business.id, offerId: offer.id, kind: 'change' },
       });
     } catch (err) {
       logger.error(`[businessOffer] owner notification failed: ${err.message}`);

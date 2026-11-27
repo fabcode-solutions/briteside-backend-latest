@@ -33,6 +33,7 @@ import contactRoute from './contact.route.js';
 import searchRoute from './search.route.js';
 import talentRoute from './talent.route.js';
 import businessRoute from './business.route.js';
+import businessAccountRoute from './businessAccount.route.js';
 import priorityMessageRoute from './priorityMessage.route.js';
 import liveStreamRoute from './livestream.route.js';
 import subscriptionRoute from './subscription.route.js';
@@ -153,6 +154,8 @@ router.use('/stream', streamRoute);
 router.use('/talent', talentRoute);
 
 // business accounts (service providers)
+// The business's own account tools (/:businessId/account/…) — before the main router
+router.use('/businesses', businessAccountRoute);
 router.use('/businesses', businessRoute);
 router.use('/priority-messages', priorityMessageRoute);
 router.use('/livestream', liveStreamRoute);

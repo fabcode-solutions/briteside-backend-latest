@@ -18,6 +18,7 @@ import {
   businessBookings,
   businessConversations,
   businessCustomOffers,
+  businessFollowers,
   businessMessages,
   businesses,
   businessServices,
@@ -47,6 +48,7 @@ import { BUSINESS_PERMISSIONS, permissionsForMember } from '../config/business-p
 import { resolveBusinessAccess } from '../middlewares/businessAccess.middleware.js';
 import { loadPublicBusiness } from './businessWall.service.js';
 import { BlockService } from './social/block.service.js';
+import { isBlockedByBusiness } from './businessBlock.service.js';
 import { InquiryContactService } from './inquiryContact.service.js';
 import { TextModerationService, TEXT_ENTITY } from './moderation/textModeration.service.js';
 import FileManagementService from './fileManagement.service.js';
@@ -65,7 +67,64 @@ const BUSINESS_COLUMNS = {
   inquiryChannel: true,
   inquiryEmail: true,
   deletedAt: true,
+  // Privacy: who may start a conversation with the business
+  messagesFrom: true,
 };
+
+/** Has this person booked the business or been sent a custom offer by it? */
+async function isCustomerOf(businessId, userId) {
+  const [booking] = await db
+    .select({ id: businessBookings.id })
+    .from(businessBookings)
+    .where(and(eq(businessBookings.businessId, businessId), eq(businessBookings.customerId, userId)))
+    .limit(1);
+  if (booking) return true;
+  const [offer] = await db
+    .select({ id: businessCustomOffers.id })
+    .from(businessCustomOffers)
+    .where(and(eq(businessCustomOffers.businessId, businessId), eq(businessCustomOffers.customerId, userId)))
+    .limit(1);
+  return !!offer;
+}
+
+const MESSAGES_FROM_REFUSALS = {
+  followers: 'This business only accepts messages from its followers and customers',
+  customers: 'This business only accepts messages from its customers',
+  nobody: "This business isn't accepting new messages",
+};
+
+/**
+ * The business's privacy settings for a customer writing to it:
+ *  - never across a business block;
+ *  - messagesFrom: everyone | followers (+ customers) | customers | nobody.
+ * Customers can always send an inquiry about their bookings, and anyone can
+ * keep replying in a thread the business already wrote in.
+ */
+async function assertCustomerMayMessage(business, userId, kind, conversationId = null) {
+  if (await isBlockedByBusiness(business.id, userId)) {
+    throw new ApiError(httpStatus.FORBIDDEN, "You can't message this business");
+  }
+  const mode = business.messagesFrom ?? 'everyone';
+  if (mode === 'everyone') return;
+  if (conversationId) {
+    const [fromBusiness] = await db
+      .select({ id: businessMessages.id })
+      .from(businessMessages)
+      .where(and(eq(businessMessages.conversationId, conversationId), eq(businessMessages.senderSide, 'business')))
+      .limit(1);
+    if (fromBusiness) return;
+  }
+  const customer = await isCustomerOf(business.id, userId);
+  if (customer && (kind === 'inquiry' || mode !== 'nobody')) return;
+  if (mode === 'followers') {
+    const follower = await db.query.businessFollowers.findFirst({
+      columns: { userId: true },
+      where: and(eq(businessFollowers.businessId, business.id), eq(businessFollowers.userId, userId)),
+    });
+    if (follower) return;
+  }
+  throw new ApiError(httpStatus.FORBIDDEN, MESSAGES_FROM_REFUSALS[mode] ?? MESSAGES_FROM_REFUSALS.nobody);
+}
 
 // Same window as PriorityMessageService's REPLY_WINDOW_MS (talent's 72h to reply)
 const PRIORITY_REPLY_WINDOW_MS = 72 * 60 * 60 * 1000;
@@ -112,6 +171,18 @@ export class BusinessInboxService {
     if (await BlockService.isBlocked(user.id, business.ownerId)) {
       throw new ApiError(httpStatus.FORBIDDEN, 'You cannot message this business');
     }
+    // Platform admins aren't held to the business's privacy settings
+    if (!access) {
+      const existing = await db.query.businessConversations.findFirst({
+        where: and(
+          eq(businessConversations.businessId, business.id),
+          eq(businessConversations.customerId, user.id),
+          eq(businessConversations.kind, kind)
+        ),
+        columns: { id: true },
+      });
+      await assertCustomerMayMessage(business, user.id, kind, existing?.id ?? null);
+    }
     const conversation = await this.#getOrCreate(business.id, user.id, kind);
     return { conversation: { ...this.#summary(conversation), business: publicBusiness(business) } };
   }
@@ -127,25 +198,14 @@ export class BusinessInboxService {
   static async openForBusiness(business, customerId, kind = 'inquiry') {
     if (kind === 'general') return this.#openGeneralForBusiness(business, customerId);
     if (kind !== 'inquiry') throw new ApiError(httpStatus.BAD_REQUEST, 'Send a paid message to start this conversation');
-    const [booking] = await db
-      .select({ id: businessBookings.id })
-      .from(businessBookings)
-      .where(and(eq(businessBookings.businessId, business.id), eq(businessBookings.customerId, customerId)))
-      .limit(1);
-    const [offer] = booking
-      ? [true]
-      : await db
-          .select({ id: businessCustomOffers.id })
-          .from(businessCustomOffers)
-          .where(
-            and(eq(businessCustomOffers.businessId, business.id), eq(businessCustomOffers.customerId, customerId))
-          )
-          .limit(1);
-    if (!booking && !offer) {
+    if (!(await isCustomerOf(business.id, customerId))) {
       throw new ApiError(httpStatus.BAD_REQUEST, 'You can only message customers of this business');
     }
     if (await BlockService.isBlocked(customerId, business.ownerId)) {
       throw new ApiError(httpStatus.FORBIDDEN, 'You cannot message this customer');
+    }
+    if (await isBlockedByBusiness(business.id, customerId)) {
+      throw new ApiError(httpStatus.FORBIDDEN, 'You blocked this person. Unblock them to send a message.');
     }
     const conversation = await this.#getOrCreate(business.id, customerId, 'inquiry');
     const customer = await db.query.users.findFirst({
@@ -187,6 +247,9 @@ export class BusinessInboxService {
     if (access) throw new ApiError(httpStatus.BAD_REQUEST, `${business.name ?? 'This business'} can't message its own team here`);
     if (await BlockService.isBlocked(userId, business.ownerId)) {
       throw new ApiError(httpStatus.FORBIDDEN, 'You cannot message this person');
+    }
+    if (await isBlockedByBusiness(business.id, userId)) {
+      throw new ApiError(httpStatus.FORBIDDEN, 'You blocked this person. Unblock them to send a message.');
     }
     return person;
   }
@@ -398,6 +461,12 @@ export class BusinessInboxService {
     if (!business || business.deletedAt) throw new ApiError(httpStatus.NOT_FOUND, 'Business not found');
     if (await BlockService.isBlocked(conversation.customerId, business.ownerId)) {
       throw new ApiError(httpStatus.FORBIDDEN, 'You cannot message in this conversation');
+    }
+    // The business's privacy settings (customer side); a business block stops both sides
+    if (side === 'customer') {
+      await assertCustomerMayMessage(business, conversation.customerId, kind, conversation.id);
+    } else if (await isBlockedByBusiness(business.id, conversation.customerId)) {
+      throw new ApiError(httpStatus.FORBIDDEN, 'You blocked this person. Unblock them to send a message.');
     }
 
     if (msg.messageType === 'image' || msg.messageType === 'video' || msg.messageType === 'file') {

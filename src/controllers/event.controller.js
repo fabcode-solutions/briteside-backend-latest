@@ -1,6 +1,7 @@
 import { EventService } from '../services/event.service.js';
 import { OrganizerService } from '../services/organizer.service.js';
 import { OnboardingService } from '../services/onboarding.service.js';
+import { rankingCategoryIds } from '../services/businessAccount.service.js';
 import ApiError from '../utils/api-error.js';
 import { catchAsync } from '../utils/catch-async.js';
 import { assertCanPublishAs } from '../services/social/businessAuthor.js';
@@ -52,8 +53,14 @@ export const getDiscoverEvents = catchAsync(async (req, res) => {
   const userId = req.user?.id ?? null;
   // "For you": rank events in the user's setup-flow categories first. Skipped
   // when the user filters by a category explicitly or opts out (?forYou=false).
+  // While acting as a business (?asBusinessId=), its own interests rank instead.
   if (userId && !filters.categoryId && req.query.forYou !== 'false') {
-    filters.preferredCategoryIds = await OnboardingService.getEventCategoryIds(userId);
+    filters.preferredCategoryIds = await rankingCategoryIds(
+      'event',
+      req.user,
+      req.query.asBusinessId,
+      OnboardingService.getEventCategoryIds
+    );
   }
   const result = await EventService.getDiscoverEvents(filters, userId);
 

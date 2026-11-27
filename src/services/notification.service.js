@@ -21,6 +21,7 @@ import { emitNotification } from '../socket/emitter.js';
 import { getActorProfiles } from '../utils/helper.js';
 import logger from '../config/logger.js';
 import { sendPushForNotification } from './push.service.js';
+import { resolveBusinessNotificationPrefs } from '../config/business-account.js';
 
 const typeToSetting = {
   event_update: 'eventUpdates',
@@ -281,6 +282,63 @@ const tagAudience = async data => {
   return audience ? { ...data, metadata: { ...metadata, audience } } : data;
 };
 
+/**
+ * Which business notification switch (BUSINESS_NOTIFICATION_KEYS) covers a
+ * business-bell notification, or null when none does (always delivered).
+ */
+const businessPrefKey = data => {
+  const type = String(data.type ?? '');
+  const metadata = data.metadata ?? {};
+  switch (type) {
+    case 'business_booking':
+      return (
+        { newBooking: 'newBookings', request: 'bookingRequests', change: 'bookingChanges', payment: 'payments' }[
+          metadata.kind
+        ] ?? 'newBookings'
+      );
+    case 'business_message':
+      return 'messages';
+    case 'business_review':
+      return 'reviews';
+    case 'business_follow':
+      return 'followers';
+    case 'business_wall_post':
+      return metadata.kind === 'pendingApproval' ? 'wallPosts' : 'pageActivity';
+    case 'business_gallery_post':
+      return 'pageActivity';
+    case 'business_commission':
+      return 'payments';
+    default:
+      return null;
+  }
+};
+
+/** True when the notification lands in a business's bell and that business turned it off. */
+const isMutedByBusiness = async data => {
+  const metadata = data.metadata ?? {};
+  if (metadata.audience !== 'business') return false;
+  const key = businessPrefKey(data);
+  if (!key) return false;
+  try {
+    const where = metadata.businessId
+      ? eq(businesses.id, metadata.businessId)
+      : // Commission notices carry no id — one business per owner
+        data.type === 'business_commission'
+        ? eq(businesses.ownerId, data.userId)
+        : null;
+    if (!where) return false;
+    const business = await db.query.businesses.findFirst({
+      where,
+      columns: { notificationPrefs: true },
+    });
+    if (!business) return false;
+    return resolveBusinessNotificationPrefs(business.notificationPrefs)[key] === false;
+  } catch (err) {
+    logger.warn(`[notification] business prefs check failed: ${err?.message}`);
+    return false; // never drop a notification because the check failed
+  }
+};
+
 export const createNotification = async data => {
   // Check user notification settings before creating
   const settings = await getNotificationSettingsByUserId(data.userId);
@@ -295,7 +353,11 @@ export const createNotification = async data => {
     return null; // Notification disabled by user
   }
 
-  const notificationData = await addResolvedActorMetadata(await tagAudience(data));
+  const tagged = await tagAudience(data);
+  // Business-side notifications follow the business's own settings
+  if (await isMutedByBusiness(tagged)) return null;
+
+  const notificationData = await addResolvedActorMetadata(tagged);
   const [newNotification] = await db.insert(notifications).values(notificationData).returning();
   const [enrichedNotification] = await enrichNotifications([newNotification]);
 

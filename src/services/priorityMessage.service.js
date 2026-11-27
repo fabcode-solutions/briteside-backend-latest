@@ -1463,6 +1463,8 @@ export class PriorityMessageService {
       // Record spend — fire-and-forget
       UserSpendService.recordSpend({
         userId: payment.senderId,
+        // Sent as a business → that business's spend log
+        businessId: payment.businessId ?? null,
         spendType: 'priority_message',
         amountCents: payment.amountCents,
         referenceId: payment.id,

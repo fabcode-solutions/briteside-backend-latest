@@ -13,6 +13,7 @@ import { businessByIdOrSlug } from '../utils/handles.js';
 import logger from '../config/logger.js';
 import { isBusinessPublic } from './business.service.js';
 import { createNotification } from './notification.service.js';
+import { assertNotBlockedByBusiness } from './businessBlock.service.js';
 import { sendMail } from './mail.service.js';
 import { emailWrapper, ctaRow, ctaButton, appUrl } from '../templates/emailLayout.js';
 
@@ -144,13 +145,23 @@ export class BusinessReviewService {
   static async listPublic(idOrSlug, query) {
     const business = await db.query.businesses.findFirst({
       where: and(businessByIdOrSlug(idOrSlug), isNull(businesses.deletedAt)),
-      columns: { id: true, isPublished: true, deletedAt: true },
+      columns: { id: true, isPublished: true, deletedAt: true, showReviews: true },
       with: { owner: { columns: { isBritesidePlus: true } } },
     });
     if (!business || !isBusinessPublic(business, business.owner)) {
       throw new ApiError(httpStatus.NOT_FOUND, 'Business not found');
     }
-    return listFor(business.id, query, query.locationId ? [query.locationId] : null);
+    // The business hid its reviews (privacy) — its team reads them in the dashboard
+    if (business.showReviews === false) {
+      const { page = 1, limit = 10 } = query;
+      return {
+        reviews: [],
+        hidden: true,
+        summary: { rating: 0, reviewCount: 0, distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } },
+        pagination: { page, limit, total: 0, totalPages: 0, hasMore: false },
+      };
+    }
+    return { ...(await listFor(business.id, query, query.locationId ? [query.locationId] : null)), hidden: false };
   }
 
   // ── Dashboard ─────────────────────────────────────────────────────────────
@@ -219,6 +230,7 @@ export class BusinessReviewService {
 
   static async create(user, bookingId, { rating, comment, images }) {
     const booking = await loadOwnBooking(user, bookingId);
+    await assertNotBlockedByBusiness(booking.businessId, user.id, "You can't review this business");
     if (!canReviewBooking(booking, user.id)) {
       throw new ApiError(
         httpStatus.CONFLICT,

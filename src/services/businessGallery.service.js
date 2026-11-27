@@ -19,10 +19,12 @@ import {
 import ApiError from '../utils/api-error.js';
 import logger from '../config/logger.js';
 import { createNotification } from './notification.service.js';
+import { assertNotBlockedByBusiness } from './businessBlock.service.js';
 import {
   AUTHOR_COLUMNS,
   authorName,
   canModerate,
+  filterText,
   loadPublicBusiness,
   resolveMentions,
   serializeAuthor,
@@ -313,6 +315,11 @@ export class BusinessGalleryService {
   static async createComment(user, idOrSlug, postKey, { text, parentId = null, mentionedUserIds = [] }) {
     const business = await loadPublicBusiness(idOrSlug);
     loadPost(business, postKey);
+    // Visitors: not blocked by the business, and its profanity filter applies
+    if (!(await canModerate(business, user))) {
+      await assertNotBlockedByBusiness(business.id, user.id, "You can't comment on this business's posts");
+      text = filterText(business, text);
+    }
 
     let parent = null;
     if (parentId) parent = await loadComment(business, postKey, parentId);
@@ -378,6 +385,7 @@ export class BusinessGalleryService {
     const business = await loadPublicBusiness(idOrSlug);
     const comment = await loadComment(business, postKey, commentId);
     if (comment.authorId !== user.id) throw new ApiError(httpStatus.FORBIDDEN, 'You can only edit your own comments');
+    if (!(await canModerate(business, user))) text = filterText(business, text);
 
     const mentions = await resolveMentions(text, mentionedUserIds);
     await db

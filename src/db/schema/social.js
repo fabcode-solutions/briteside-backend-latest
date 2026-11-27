@@ -883,7 +883,8 @@ export const pinnedPosts = pgTable(
   ]
 );
 
-// Pinned profiles (a user bookmarking another user's profile for quick access)
+// Pinned profiles (a user bookmarking another user's profile — or a business
+// page — for quick access). Exactly one of pinned_user_id / pinned_business_id.
 export const pinnedProfiles = pgTable(
   'pinned_profiles',
   {
@@ -891,15 +892,21 @@ export const pinnedProfiles = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    pinnedUserId: uuid('pinned_user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
+    pinnedUserId: uuid('pinned_user_id').references(() => users.id, { onDelete: 'cascade' }),
+    pinnedBusinessId: uuid('pinned_business_id').references(() => businesses.id, {
+      onDelete: 'cascade',
+    }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   table => [
     index('idx_pinned_profiles_user').on(table.userId),
     index('idx_pinned_profiles_pinned_user').on(table.pinnedUserId),
     uniqueIndex('idx_pinned_profiles_unique').on(table.userId, table.pinnedUserId),
+    uniqueIndex('idx_pinned_profiles_business_unique').on(table.userId, table.pinnedBusinessId),
+    check(
+      'chk_pinned_profiles_target',
+      sql`(${table.pinnedUserId} IS NULL) <> (${table.pinnedBusinessId} IS NULL)`
+    ),
   ]
 );
 

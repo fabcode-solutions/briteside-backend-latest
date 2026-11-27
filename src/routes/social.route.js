@@ -95,6 +95,8 @@ import {
   toggleFollowUser,
   togglePinProfile,
   getPinnedProfiles,
+  togglePinBusiness,
+  getBusinessPinStatus,
   toggleLikePost,
   toggleSavePost,
   toggleHidePost,
@@ -162,6 +164,9 @@ router.get('/following/:userId', getFollowing);
 
 router.get('/pinned-profiles', getPinnedProfiles);
 router.post('/pinned-profiles/:username', togglePinProfile);
+// Business pages can be pinned too (they show in the same Pinned Profiles list)
+router.get('/pinned-businesses/:idOrSlug', getBusinessPinStatus);
+router.post('/pinned-businesses/:idOrSlug', togglePinBusiness);
 
 router.get('/search', searchUsers);
 

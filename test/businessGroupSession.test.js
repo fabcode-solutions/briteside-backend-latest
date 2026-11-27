@@ -71,8 +71,9 @@ describe('party size', () => {
     expect(partySizeProblem(group, 0)).toMatch(/how many/);
   });
 
-  it('private event: within min and max guests', () => {
-    expect(partySizeProblem(privateEvent, 3)).toBe('This event is for at least 4 guests');
+  it('private event: any size up to max guests (old min_guests ignored)', () => {
+    expect(partySizeProblem(privateEvent, 1)).toBeNull();
+    expect(partySizeProblem(privateEvent, 3)).toBeNull();
     expect(partySizeProblem(privateEvent, 21)).toBe('This event is for up to 20 guests');
     expect(partySizeProblem(privateEvent, 10)).toBeNull();
   });
@@ -94,12 +95,13 @@ describe('session settings', () => {
     expect(sessionSettingsProblem({ sessionType: 'group', capacity: 10 })).toBeNull();
   });
 
-  it('private event needs a valid guest range', () => {
-    expect(sessionSettingsProblem({ sessionType: 'private_group' })).toMatch(/smallest and largest/);
-    expect(sessionSettingsProblem({ sessionType: 'private_group', minGuests: 10, maxGuests: 5 })).toMatch(
-      /can’t be more than/
-    );
-    expect(sessionSettingsProblem({ sessionType: 'private_group', minGuests: 2, maxGuests: 12 })).toBeNull();
+  it('private event needs a valid max guests', () => {
+    expect(sessionSettingsProblem({ sessionType: 'private_group' })).toMatch(/largest group/);
+    expect(sessionSettingsProblem({ sessionType: 'private_group', maxGuests: 0 })).toMatch(/largest group/);
+    expect(sessionSettingsProblem({ sessionType: 'private_group', maxGuests: 501 })).toMatch(/up to 500/);
+    expect(sessionSettingsProblem({ sessionType: 'private_group', maxGuests: 12 })).toBeNull();
+    // A stale minGuests above max no longer matters.
+    expect(sessionSettingsProblem({ sessionType: 'private_group', minGuests: 10, maxGuests: 5 })).toBeNull();
   });
 
   it('individual needs nothing extra', () => {

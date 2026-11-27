@@ -21,6 +21,8 @@ router.get('/prompts/pending', getPendingPrompts);
 router.post('/events/:eventId/reviews', submitEventReview);
 router.post('/reviews/:reviewId/helpful', markReviewHelpful);
 router.post('/events/:eventId/dismiss-prompt', dismissPrompt);
+// Path the web client (useReviews.dismissPrompt) calls
+router.post('/prompts/:eventId/dismiss', dismissPrompt);
 
 // Admin route for creating prompts (can be called by cron job)
 router.post('/events/:eventId/create-prompts', createReviewPrompts);

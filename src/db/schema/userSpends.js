@@ -13,6 +13,7 @@ import { sql } from 'drizzle-orm';
 import { users } from './users.js';
 import { events } from './events.js';
 import { groups } from './groups.js';
+import { businesses } from './businesses.js';
 
 export const spendTypeEnum = pgEnum('spend_type', [
   'ticket_purchase',
@@ -24,6 +25,9 @@ export const spendTypeEnum = pgEnum('spend_type', [
   // declaration position, so reordering would change existing comparisons.
   'shop',
   'business_booking',
+  // Spent by a business account (user_spends.business_id set)
+  'business_reserve_now',
+  'business_commission',
 ]);
 
 export const userSpends = pgTable(
@@ -33,6 +37,9 @@ export const userSpends = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    // Set when the spend belongs to a business account (paid while acting as
+    // it). userId stays the person who paid. Personal spend log = business_id IS NULL.
+    businessId: uuid('business_id').references(() => businesses.id, { onDelete: 'cascade' }),
     spendType: spendTypeEnum('spend_type').notNull(),
     // Positive = spend, negative = refund
     amountCents: integer('amount_cents').notNull(),
@@ -58,6 +65,7 @@ export const userSpends = pgTable(
   },
   table => [
     index('idx_user_spends_user_id').on(table.userId),
+    index('idx_user_spends_business_id').on(table.businessId),
     index('idx_user_spends_spend_type').on(table.spendType),
     index('idx_user_spends_paid_at').on(table.paidAt),
     index('idx_user_spends_is_refunded').on(table.isRefunded),

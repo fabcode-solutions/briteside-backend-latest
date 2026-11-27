@@ -283,6 +283,8 @@ export const stripeWebhookHandler = catchAsync(async (req, res) => {
         } else if (paidSub.metadata?.type === RESERVE_NOW_TYPE) {
           // Renewal: status / period come from customer.subscription.updated — just re-sync
           await BusinessReserveNowService.handleSubscriptionChanged(paidSub);
+          // The business's spend log (first month + each renewal)
+          await BusinessReserveNowService.recordInvoicePaid(paidInvoice, paidSub);
         } else {
           await SubscriptionService.handleInvoicePaid(paidInvoice);
         }

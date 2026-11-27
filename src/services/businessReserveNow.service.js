@@ -6,8 +6,9 @@
  * take the reservation; it only sends the diner there.
  *
  * Billing is its own Stripe subscription (metadata.type = 'business_reserve_now'),
- * separate from BriteSide Plus but on the owner's same Stripe customer so their
- * saved card is reused. State lives on the business row (reserveNow* columns) and
+ * separate from BriteSide Plus, on the business's own Stripe customer (its saved
+ * cards — Business → Payment Methods). Subscriptions started before businesses had
+ * their own customer stay on the owner's personal customer until they end. State lives on the business row (reserveNow* columns) and
  * is synced from:
  *   - the checkout return (confirmCheckout — so the button works right away)
  *   - checkout.session.completed / customer.subscription.updated / .deleted webhooks
@@ -17,14 +18,16 @@
  */
 import httpStatus from 'http-status';
 import Stripe from 'stripe';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { businesses } from '../db/schema/index.js';
+import { businesses, stripeCustomers, userSpends } from '../db/schema/index.js';
 import ApiError from '../utils/api-error.js';
 import config from '../config/config.js';
 import logger from '../config/logger.js';
 import { getRedirectUrls, isNativePlatform } from '../utils/redirect-urls.js';
-import { SubscriptionService, getInvoicePaymentIntent } from './subscription.service.js';
+import { getInvoicePaymentIntent } from './subscription.service.js';
+import { getOrCreateBusinessCustomer } from './businessAccount.service.js';
+import { UserSpendService } from './userSpend.service.js';
 
 const stripe = config.stripe?.secretKey ? new Stripe(config.stripe.secretKey) : null;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://briteside.app';
@@ -109,6 +112,24 @@ function assertCanSubscribe(business, link) {
   }
 }
 
+/**
+ * Reserve Now subscriptions on the business's customer, plus any on the owner's
+ * personal customer (where they were created before businesses had their own).
+ */
+async function subscriptionsFor(business, customer) {
+  const legacy = await db.query.stripeCustomers.findFirst({
+    where: eq(stripeCustomers.userId, business.ownerId),
+    columns: { stripeCustomerId: true },
+  });
+  const customers = [customer, legacy?.stripeCustomerId].filter((c, i, a) => c && a.indexOf(c) === i);
+  const lists = await Promise.all(
+    customers.map(c =>
+      stripe.subscriptions.list({ customer: c, status: 'all', limit: 20 }).then(r => r.data).catch(() => [])
+    )
+  );
+  return lists.flat();
+}
+
 export class BusinessReserveNowService {
   /**
    * Start a $20/mo subscription (hosted Stripe Checkout). The reservation link can be
@@ -118,10 +139,10 @@ export class BusinessReserveNowService {
     ensureStripe();
     assertCanSubscribe(business, reservationUrl || business.reservationUrl);
 
-    const customer = await SubscriptionService.getOrCreateStripeCustomer(business.ownerId);
+    const customer = await getOrCreateBusinessCustomer(business);
     // Webhook delay guard: a subscription for this business may already be running in Stripe
-    const running = await stripe.subscriptions.list({ customer, status: 'all', limit: 20 });
-    const existing = running.data.find(
+    const running = await subscriptionsFor(business, customer);
+    const existing = running.find(
       s =>
         s.metadata?.type === RESERVE_NOW_TYPE &&
         s.metadata?.businessId === business.id &&
@@ -192,9 +213,9 @@ export class BusinessReserveNowService {
         .where(eq(businesses.id, business.id));
     }
 
-    const customer = await SubscriptionService.getOrCreateStripeCustomer(business.ownerId);
-    const subs = await stripe.subscriptions.list({ customer, status: 'all', limit: 20 });
-    const ours = subs.data.filter(
+    const customer = await getOrCreateBusinessCustomer(business);
+    const subs = await subscriptionsFor(business, customer);
+    const ours = subs.filter(
       s => s.metadata?.type === RESERVE_NOW_TYPE && s.metadata?.businessId === business.id
     );
     const running = ours.find(s => LIVE_STATUSES.includes(STATUS_FROM_STRIPE[s.status]));
@@ -366,5 +387,49 @@ export class BusinessReserveNowService {
   /** customer.subscription.created / updated / deleted with metadata.type = business_reserve_now */
   static async handleSubscriptionChanged(sub) {
     await this.applySubscription(sub.metadata?.businessId, sub);
+  }
+
+  /**
+   * invoice.paid for a Reserve Now subscription (first month + renewals): logs the
+   * charge in the business's spend log. Once per invoice; never throws.
+   */
+  static async recordInvoicePaid(invoice, sub) {
+    try {
+      const businessId = sub?.metadata?.businessId;
+      const amountCents = invoice?.amount_paid ?? 0;
+      if (!businessId || !invoice?.id || amountCents <= 0) return;
+      const business = await db.query.businesses.findFirst({
+        where: eq(businesses.id, businessId),
+        columns: { id: true, ownerId: true, name: true },
+      });
+      if (!business) return;
+      const already = await db.query.userSpends.findFirst({
+        where: and(
+          eq(userSpends.businessId, businessId),
+          eq(userSpends.spendType, 'business_reserve_now'),
+          sql`${userSpends.metadata}->>'invoiceId' = ${invoice.id}`
+        ),
+        columns: { id: true },
+      });
+      if (already) return;
+      const paidAtSec = invoice.status_transitions?.paid_at ?? invoice.created;
+      await UserSpendService.recordSpend({
+        userId: business.ownerId,
+        businessId,
+        spendType: 'business_reserve_now',
+        amountCents,
+        referenceId: businessId,
+        referenceType: 'business_reserve_now',
+        metadata: {
+          invoiceId: invoice.id,
+          description: 'Reserve Now — monthly',
+          businessName: business.name,
+          periodEnd: periodEndOf(sub),
+        },
+        paidAt: paidAtSec ? new Date(paidAtSec * 1000) : new Date(),
+      });
+    } catch (err) {
+      logger.error(`[ReserveNow] spend log for invoice ${invoice?.id} failed: ${err.message}`);
+    }
   }
 }

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
   BUSINESS_CATEGORY_KEYS,
-  PAYMENT_MODELS,
+  SELECTABLE_PAYMENT_MODELS,
   LOCATION_TYPES,
   PAGE_TYPES,
   BOOKING_CONFIRMATION_MODES,
@@ -34,17 +34,16 @@ export const weeklyHoursSchema = z
   .record(z.enum(['0', '1', '2', '3', '4', '5', '6']), timeWindow.nullable())
   .refine(h => Object.keys(h).length === 7, { message: 'Hours must include all 7 days' });
 
-const timezone = z.string().refine(
-  tz => {
-    try {
-      new Intl.DateTimeFormat('en-US', { timeZone: tz });
-      return true;
-    } catch {
-      return false;
-    }
-  },
-  { message: 'Invalid IANA timezone' }
-);
+function isValidTimeZone(tz) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const timezone = z.string().refine(isValidTimeZone, { message: 'Invalid IANA timezone' });
 
 const url = z.string().url().max(2048);
 const INQUIRY_CHANNELS = ['inbox', 'email'];
@@ -71,6 +70,8 @@ const websiteUrl = httpLink('Website must be a full http:// or https:// address'
 // Reserve Now target (their OpenTable / Resy / Tock… page)
 const reservationUrl = httpLink('Reservation link must be a full http:// or https:// address');
 const optionalText = max => z.string().trim().max(max).optional().nullable();
+/** Business "About" description, spaces included. Longer ones saved earlier stay until edited. */
+export const BUSINESS_BIO_MAX = 400;
 const cents = z.number().int().min(0).max(10_000_000);
 const uuid = z.string().uuid();
 
@@ -164,7 +165,7 @@ export const createBusinessSchema = z.object({
     // Post images shown on the business page
     gallery: z.array(url).max(12).optional(),
     hours: weeklyHoursSchema.optional(),
-    defaultPaymentModel: z.enum(PAYMENT_MODELS).default('full'),
+    defaultPaymentModel: z.enum(SELECTABLE_PAYMENT_MODELS).default('full'),
     // Onboarding creates the owner as the first staff member…
     ownerStaff: z
       .object({
@@ -197,7 +198,7 @@ export const updateBusinessSchema = z.object({
         .nullable(),
       category: z.enum(BUSINESS_CATEGORY_KEYS),
       subcategory: optionalText(100),
-      bio: optionalText(5000),
+      bio: optionalText(BUSINESS_BIO_MAX),
       amenities: z.array(z.string().trim().min(1).max(60)).max(30),
       gallery: z.array(url).max(12),
       // Same order as `gallery`: the locations each post shows at ([] = every location)
@@ -220,7 +221,7 @@ export const updateBusinessSchema = z.object({
       timezone,
       hours: weeklyHoursSchema,
       acceptingBookings: z.boolean(),
-      defaultPaymentModel: z.enum(PAYMENT_MODELS),
+      defaultPaymentModel: z.enum(SELECTABLE_PAYMENT_MODELS),
       serviceCategories: z.array(z.string().trim().min(1).max(100)).max(50),
       isPublished: z.boolean(),
     })
@@ -348,7 +349,7 @@ const serviceFields = z.object({
   // Inquire button instead of Book; customers inquire and get a custom offer
   priceOnRequest: z.boolean(),
   // null = inherit business default
-  paymentModel: z.enum(PAYMENT_MODELS).nullable(),
+  paymentModel: z.enum(SELECTABLE_PAYMENT_MODELS).nullable(),
   // Deposit: a fixed amount OR a percentage of the price (neither = 20%)
   depositCents: cents.nullable(),
   depositPercent: z
@@ -774,6 +775,13 @@ export const createBookingCheckoutSchema = z.object({
     // 'native' = hold the slot and pay through the in-app card form
     // (native-intent → native-finalize); default = Stripe Checkout session
     mode: z.enum(['checkout', 'native']).optional(),
+    // The customer's IANA zone (browser), for "your time" in emails; unknown → ignored
+    customerTimezone: z
+      .string()
+      .trim()
+      .max(64)
+      .optional()
+      .transform(tz => (tz && isValidTimeZone(tz) ? tz : undefined)),
   })
     .refine(b => !!b.groupSessionId || (!!b.date && !!b.time), {
       message: 'Pick a date and time',
@@ -1288,7 +1296,7 @@ export const createCustomOfferSchema = z.object({
         .min(100, 'The price must be at least $1')
         .max(10_000_000, 'The price can be up to $100,000'),
       durationMins: z.number().int().min(5, 'At least 5 minutes').max(24 * 60, 'Up to 24 hours'),
-      paymentModel: z.enum(PAYMENT_MODELS),
+      paymentModel: z.enum(SELECTABLE_PAYMENT_MODELS),
       depositCents: cents.nullable().optional(),
       locationId: uuid.nullable().optional(),
       staffId: uuid.nullable().optional(),

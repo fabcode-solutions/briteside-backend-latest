@@ -35,6 +35,7 @@ import { sql } from 'drizzle-orm';
 import { users } from './users.js';
 import { posts } from './social.js';
 import { groups } from './groups.js';
+import { businesses } from './businesses.js';
 // Reused as-is — same Postgres enum type as group courses, no need for a
 // second 'video_source_type' enum with an identical set of values.
 import { videoSourceTypeEnum } from './groupCourses.js';
@@ -171,6 +172,11 @@ export const shopOrders = pgTable(
     buyerId: uuid('buyer_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    // Bought while acting as a business: shows in that business's Digital
+    // Product Downloads (not the buyer's personal ones). buyerId stays the payer.
+    buyerBusinessId: uuid('buyer_business_id').references(() => businesses.id, {
+      onDelete: 'set null',
+    }),
     // Denormalised so earnings queries don't need to join through products.
     sellerId: uuid('seller_id')
       .notNull()
